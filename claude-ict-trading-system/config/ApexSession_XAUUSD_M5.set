@@ -1,0 +1,12 @@
+NyStart=12
+NyEnd=21
+UseLondon=false
+UseNY=true
+RiskPercent=1.00
+UsePremiumDiscount=true
+RequireFVG=false
+UseVolatilityFilter=false
+RR=3.0
+UseTrail=true
+TrailStartR=1.5
+TrailDistanceR=1.2
