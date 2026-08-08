@@ -59,6 +59,7 @@ def run(tree: SourceTree) -> list[checks.Finding]:
     findings += checks.check_unchecked_copy(tree)
     findings += checks.check_indicator_handle_leak(tree)
     findings += checks.check_resize_without_init(tree)
+    findings += checks.check_use_before_definition(tree)
     findings += checks.check_forbidden(tree)
     findings += checks.check_order_send_boundary(tree, ORDER_SEND_OWNER)
     findings += checks.check_required_invariants(tree, REQUIRED_INVARIANTS)

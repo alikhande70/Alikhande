@@ -224,6 +224,39 @@ def test_unchecked_copy() -> None:
     check(codes(checks.check_unchecked_copy(good)) == set(), "checked CopyBuffer is quiet")
 
 
+def test_use_before_definition() -> None:
+    print("use before definition")
+    bad = tree_from({
+        "MQL5/Include/A.mqh":
+            "#pragma once\n"
+            "class C { public: void Go(){ int x=Helper(); } };\n"
+            "int Helper(){ return 1; }\n"
+    })
+    check("USE_BEFORE_DEFINITION" in codes(checks.check_use_before_definition(bad)),
+          "global called before its definition is reported")
+
+    good = tree_from({
+        "MQL5/Include/A.mqh":
+            "#pragma once\n"
+            "int Helper(){ return 1; }\n"
+            "class C { public: void Go(){ int x=Helper(); } };\n"
+    })
+    check(codes(checks.check_use_before_definition(good)) == set(),
+          "correct ordering is quiet")
+
+    # Class members may call each other in any order — not a forward reference.
+    members = tree_from({
+        "MQL5/Include/A.mqh":
+            "#pragma once\n"
+            "class C {\n"
+            "  public: void First(){ Second(); }\n"
+            "  private: void Second(){ }\n"
+            "};\n"
+    })
+    check(codes(checks.check_use_before_definition(members)) == set(),
+          "class members calling later members is not flagged (no false positive)")
+
+
 def main() -> int:
     for fn in (
         test_lexer,
@@ -236,6 +269,7 @@ def main() -> int:
         test_ordersend_boundary,
         test_include_cycle,
         test_unchecked_copy,
+        test_use_before_definition,
     ):
         fn()
 

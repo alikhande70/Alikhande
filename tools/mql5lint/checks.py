@@ -313,6 +313,73 @@ FORBIDDEN = {
 }
 
 
+FUNC_DEF_POS_RE = re.compile(r"\b[A-Za-z_]\w*\s+([A-Za-z_]\w*)\s*\([^;{}]*\)\s*\{")
+
+
+def _brace_depths(text: str) -> list[int]:
+    """Brace nesting depth at every character offset.
+
+    The depth reported for a `{` is the depth *outside* it, so a file-scope
+    function's opening brace reads as 0.
+    """
+    depths = [0] * (len(text) + 1)
+    depth = 0
+    for i, ch in enumerate(text):
+        depths[i] = depth
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+    depths[len(text)] = depth
+    return depths
+
+
+def check_use_before_definition(tree: SourceTree) -> list[Finding]:
+    """Free function called earlier in the file than it is defined.
+
+    MQL5 has no implicit forward declarations: a global function must be defined
+    before its first use *within the same translation unit position*. Calling one
+    from a class method that appears above it is a hard compile error, and it is
+    an easy mistake to make when moving helpers around.
+
+    Only same-file cases are reported — a function defined in an included header
+    is available everywhere below the `#include`, which the include graph
+    already validates.
+    """
+    out: list[Finding] = []
+    for sf in tree.files.values():
+        # Only file-scope functions qualify. Class and struct members may be
+        # called in any order within their own type, so a member matching the
+        # same syntactic shape is not a use-before-definition at all.
+        depths = _brace_depths(sf.text)
+
+        definitions: dict[str, int] = {}
+        for m in FUNC_DEF_POS_RE.finditer(sf.text):
+            if depths[m.start()] != 0:
+                continue
+            # Keep the earliest definition if a name somehow appears twice.
+            definitions.setdefault(m.group(1), m.start())
+
+        for name, def_pos in definitions.items():
+            for call in re.finditer(rf"\b{re.escape(name)}\s*\(", sf.text):
+                if call.start() >= def_pos:
+                    continue
+                # The definition site itself matches the call pattern; skip it.
+                if call.start() == def_pos:
+                    continue
+                out.append(
+                    Finding(
+                        "USE_BEFORE_DEFINITION",
+                        sf.rel,
+                        sf.line_of(call.start()),
+                        f"`{name}(...)` is called here but defined at line "
+                        f"{sf.line_of(def_pos)}; MQL5 requires definition first",
+                    )
+                )
+                break
+    return out
+
+
 def check_forbidden(tree: SourceTree) -> list[Finding]:
     out: list[Finding] = []
     for sf in tree.files.values():
