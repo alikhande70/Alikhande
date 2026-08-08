@@ -33,18 +33,12 @@ private:
    ulong CorrelatedPositionId(const AS_ExecutionRecord &current,const ulong magic) const
      {
       if(current.position_id>0)return current.position_id;
-
-      // Prefer the order's own broker linkage when the ticket is known.
       if(current.order_ticket>0 && HistoryOrderSelect(current.order_ticket)){
          if((ulong)HistoryOrderGetInteger(current.order_ticket,ORDER_MAGIC)==magic && HistoryOrderGetString(current.order_ticket,ORDER_SYMBOL)==current.symbol){
             ulong position_id=(ulong)HistoryOrderGetInteger(current.order_ticket,ORDER_POSITION_ID);
             if(position_id>0)return position_id;
          }
       }
-
-      // If ORDER_POSITION_ID is not yet populated, an entry deal created by the
-      // exact submitted order can establish the position identity. Do not fall
-      // back to arbitrary magic+symbol deals: that can steal an older trade.
       if(current.order_ticket>0){
          for(int i=0;i<HistoryDealsTotal();i++){
             ulong deal=HistoryDealGetTicket(i);if(deal==0)continue;
@@ -65,13 +59,11 @@ public:
       ZeroMemory(out);out.state=AS_EXEC_UNKNOWN;out.terminal=false;
       if(current.symbol==""){out.reason="NO_SYMBOL";return false;}
 
-      datetime from=(current.updated_at>0 ? current.updated_at-300 : TimeCurrent()-86400*30);
+      datetime from=(current.created_at>0 ? current.created_at-3600 : (current.updated_at>0 ? current.updated_at-86400 : TimeCurrent()-86400*30));
       if(!HistorySelect(from,TimeCurrent()+60)){out.reason="HISTORY_SELECT_FAILED";return false;}
       ulong correlation_position=CorrelatedPositionId(current,magic);
       out.position_id=correlation_position;
 
-      // 1) Current positions: exact position identity when known. If no broker
-      // correlation exists yet, do not claim an arbitrary same-symbol position.
       if(correlation_position>0){
          for(int i=PositionsTotal()-1;i>=0;i--){
             ulong ticket=PositionGetTicket(i);if(ticket==0)continue;
@@ -82,7 +74,6 @@ public:
          }
       }
 
-      // 2) Working order: exact ticket when available, otherwise magic+symbol.
       for(int i=OrdersTotal()-1;i>=0;i--){
          ulong ticket=OrderGetTicket(i);if(!SameActiveOrder(current,magic,ticket))continue;
          out.order_ticket=ticket;
@@ -92,8 +83,6 @@ public:
          out.reason="AUTHORITATIVE_ACTIVE_ORDER_FOUND";return true;
       }
 
-      // 3) Deal history is used only after a position identity has been proven
-      // by the execution's order/position linkage.
       if(correlation_position>0){
          const int deals=HistoryDealsTotal();
          for(int i=0;i<deals;i++){
@@ -109,8 +98,6 @@ public:
          if(out.entry_volume>out.exit_volume+1e-8){out.state=AS_EXEC_UNKNOWN;out.terminal=false;out.reason="HISTORY_EXPOSURE_WITHOUT_CURRENT_POSITION";return true;}
       }
 
-      // 4) Order history may prove a clean rejection/cancellation. FILLED or
-      // PARTIAL without correlated position/deal evidence is not terminal.
       const int orders=HistoryOrdersTotal();
       for(int i=0;i<orders;i++){
          ulong ticket=HistoryOrderGetTicket(i);if(!SameHistoryOrder(current,magic,ticket))continue;
