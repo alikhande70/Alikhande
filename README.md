@@ -1,6 +1,6 @@
-# Alikhande Scanner MT5 v1.2.0
+# Alikhande Scanner MT5 v1.3.0
 
-**Edition:** Reliability & Evidence
+**Edition:** Evidence Integrity
 **Default mode:** Alert-only. Real accounts are blocked unconditionally.
 
 A multi-timeframe, zone-based scanner for MetaTrader 5. It looks for pullback
@@ -41,10 +41,19 @@ These are structural, not configurable:
 |---|---|---|---|
 | `AS_MODE_ALERT_ONLY` (default) | no | no | no |
 | `AS_MODE_SHADOW` | yes | yes | no |
-| `AS_MODE_DEMO` | yes | yes | demo accounts only |
+| `AS_MODE_DEMO_CONFIRM` | yes | yes | demo only, after arm **and** confirm |
 
-Shadow mode runs the identical validation and persistence path as demo and stops
+Shadow runs the identical validation and persistence path as demo and stops
 short of the send, so it exercises the real code rather than a simulation of it.
+
+No mode sends automatically. `DEMO_CONFIRM` requires two deliberate actions on
+separate controls — arm, then confirm — and the armed intent expires after a
+short TTL. An EA that fires on its own is not supervised, it is merely watched.
+
+**Persistence is routed by runtime.** A live terminal writes production history;
+a backtest writes an agent-scoped file clearly named as such; an optimization
+sweep writes nothing. Records from different contexts can never mix, so a win
+rate computed later is not silently measuring a parameter sweep.
 
 ## Layout
 

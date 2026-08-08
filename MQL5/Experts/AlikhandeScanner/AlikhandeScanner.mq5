@@ -1,6 +1,6 @@
 #property strict
-#property version   "1.20"
-#property description "Alikhande Scanner MT5 v1.2.0 - Reliability & Evidence edition"
+#property version   "1.30"
+#property description "Alikhande Scanner MT5 v1.3.0 - Evidence Integrity edition"
 #property description "Alert-only by default. Real accounts are blocked unconditionally."
 
 #include <AlikhandeScanner/Core/Config.mqh>

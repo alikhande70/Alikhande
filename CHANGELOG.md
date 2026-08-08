@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.3.0 — Evidence Integrity
+
+Produced by studying an independent GPT rebuild, then acting on what it got
+right. Two of the changes below fix real defects in v1.2.0 that the study
+exposed. Full three-way analysis in `docs/COMPARISON_V1.3.md`.
+
+### Fixed
+
+- **Deal replay double-counted fills.** `OnTransaction` discarded
+  `RecordDealOnce`'s answer and mutated `filled_volume` regardless. Since
+  MetaQuotes documents that transaction delivery may repeat, the idempotency was
+  decorative: a replayed `DEAL_ADD` could drive a partially-filled order to
+  FILLED on volume that arrived once. The ledger is now an admission gate.
+- **A stopless position read as zero risk.** `PositionRisk` returned `0.0` under
+  a comment claiming such positions were "reported separately". They were not,
+  so an unbounded position appeared *free* to every cap — the more exposed the
+  account, the more room the caps seemed to have. Boundedness is now explicit
+  and blocks before any cap is evaluated.
+
+### Added
+
+- **Runtime context and persistence isolation.** Terminal / tester /
+  optimization are distinguished, and the database is routed per context so a
+  backtest can never contaminate production outcome history. Optimization
+  disables persistence outright rather than writing per-pass files.
+- **Calendar gate with provenance.** LIVE / TEST_DATA / UNAVAILABLE are distinct
+  states; UNKNOWN is never folded into CLEAR. Resolution is context-dependent:
+  blocking in production, non-blocking but flagged NEWS-BLIND in the tester.
+- **Two-step human confirmation.** `AS_MODE_DEMO_CONFIRM` replaces auto-execute.
+  Arm and confirm are separate controls; the intent carries a TTL and refuses if
+  the plan was superseded.
+- **Zone relation as a first-class concept.** BELOW / INSIDE / ABOVE /
+  UNAVAILABLE, wired into setup qualification and scoring — genuine interaction
+  now scores above mere proximity.
+- **Two static checks**, both from concrete defects: `DISCARDED_GUARD_RESULT`
+  (an ignored idempotency guard) and `UNREACHABLE_MODULE` (production code
+  nothing reaches from the EA). Gate self-tests now number 41.
+
+### Changed
+
+- Rule and scoring versions bumped to 1.3.0: setup qualification now requires a
+  correctly-anchored zone and scoring gained a ZONE_INSIDE component, so stored
+  outcomes from 1.2.0 describe different logic and must not be pooled.
+
+### Not verified
+
+Nothing has been compiled or executed — no MetaEditor or MT5 terminal exists in
+this environment. No claim is made about profitability. See
+`docs/VERIFICATION.md`.
+
 ## 1.2.0 — Reliability & Evidence
 
 Rebuilt from the SHA-256-verified v1.1.0 baseline. No new setups: the release

@@ -1,5 +1,5 @@
 #property strict
-#property version "1.20"
+#property version "1.30"
 #property description "Parses every Alikhande module so MetaEditor reports errors for all of them."
 
 // Compile this FIRST. The EA only pulls in what it uses, so a broken module

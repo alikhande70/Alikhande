@@ -1,5 +1,5 @@
 #property strict
-#property version "1.20"
+#property version "1.30"
 #property description "In-terminal self-tests for logic the static gate cannot evaluate."
 
 #include <AlikhandeScanner/Testing/TestRunner.mqh>
