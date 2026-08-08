@@ -16,6 +16,7 @@ public:
       double e50[3],e200[3],adx[1],atr_hist[];ArrayResize(atr_hist,AS_ATR_QUALITY_LOOKBACK);
       bool ok=CopyBuffer(h50,0,1,3,e50)==3 && CopyBuffer(h200,0,1,3,e200)==3 && CopyBuffer(hadx,0,1,1,adx)==1 && CopyBuffer(hatr,0,1,AS_ATR_QUALITY_LOOKBACK,atr_hist)==AS_ATR_QUALITY_LOOKBACK;
       IndicatorRelease(h50);IndicatorRelease(h200);IndicatorRelease(hadx);IndicatorRelease(hatr); if(!ok)return false;
+      // CopyBuffer stores the oldest copied element at index 0. For shifts 1..3, index 2 is the most recent closed bar.
       double ema50_recent=e50[2],ema50_old=e50[0],ema200_recent=e200[2];
       double atr_current=atr_hist[AS_ATR_QUALITY_LOOKBACK-1],atr_median=Median(atr_hist,AS_ATR_QUALITY_LOOKBACK);
       double point=SymbolInfoDouble(symbol,SYMBOL_POINT); if(point<=0||atr_current<=0)return false;
