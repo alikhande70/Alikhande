@@ -63,7 +63,9 @@ private:
       if(!Exec("ALTER TABLE outcomes ADD COLUMN parameter_hash TEXT"))return false;
       if(!Exec("ALTER TABLE outcomes ADD COLUMN broker_spec_hash TEXT"))return false;
       if(!Exec("ALTER TABLE outcomes ADD COLUMN execution_id TEXT"))return false;
+      if(!Exec("ALTER TABLE executions ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0"))return false;
       if(!Exec("CREATE INDEX IF NOT EXISTS ix_outcomes_scope ON outcomes(evidence_source,rule_version,scoring_version,parameter_hash,state)"))return false;
+      if(!Exec("CREATE INDEX IF NOT EXISTS ix_executions_created ON executions(created_at)"))return false;
       return true;
    }
 
