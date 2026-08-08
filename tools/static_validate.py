@@ -59,55 +59,62 @@ uses=set(re.findall(r'\b(AS_[A-Z0-9_]+)\b',all_src))
 missing=sorted(x for x in uses-defs if not x.startswith('AS_PRODUCT_') and x not in {'AS_VERSION','AS_RULE_VERSION','AS_SCORING_VERSION','AS_SCHEMA_VERSION','AS_MANAGED_CHART_MARKER'})
 if missing: errors.append('UNRESOLVED_AS_CONSTANTS '+','.join(missing))
 
-# Follow the real include graph from the production EA. Local quoted includes
-# such as "Preflight.mqh" resolve relative to the including file; angle-bracket
-# AlikhandeScanner includes resolve from the project include root.
 include_re=re.compile(r'#include\s+[<"]([^>"]+)[>"]')
 def resolve_include(source:Path, token:str):
     if token.startswith('AlikhandeScanner/'):
         return (INC/token[len('AlikhandeScanner/'):]).resolve()
     return (source.parent/token).resolve()
 
-reachable=set()
-stack=[EA.resolve()]
+reachable=set();stack=[EA.resolve()]
 while stack:
     current=stack.pop()
-    if current in reachable or not current.exists():
-        continue
+    if current in reachable or not current.exists(): continue
     reachable.add(current)
     text=current.read_text(encoding='utf-8',errors='replace')
     for token in include_re.findall(text):
         target=resolve_include(current,token)
-        if target.exists() and target.suffix.lower() in {'.mqh','.mq5'}:
-            stack.append(target)
+        if target.exists() and target.suffix.lower() in {'.mqh','.mq5'}: stack.append(target)
 
 all_modules={p.resolve() for p in INC.rglob('*.mqh')}
 unreachable=sorted(str(p.relative_to(ROOT)) for p in all_modules-reachable)
-if unreachable:
-    errors.append('UNREACHABLE_MODULES '+','.join(unreachable))
+if unreachable: errors.append('UNREACHABLE_MODULES '+','.join(unreachable))
 
 ea_text=EA.read_text(encoding='utf-8',errors='replace')
 for name in ['g_last_alert','g_bar_h4','g_bar_h1','g_bar_m15','g_bar_m5']:
-    if f'ArrayResize({name},' in ea_text and f'ArrayInitialize({name},' not in ea_text:
-        errors.append(f'UNINITIALIZED_RUNTIME_ARRAY {name}')
+    if f'ArrayResize({name},' in ea_text and f'ArrayInitialize({name},' not in ea_text: errors.append(f'UNINITIALIZED_RUNTIME_ARRAY {name}')
 
 compact=re.sub(r'\s+','',ea_text)
-if 'c4||c1||c15||c5' in compact and 'g_signal_engine.Evaluate' in compact:
-    errors.append('STALE_SIGNAL_BAR_GATED_EVALUATION')
-if 'g_cached_signal[i]=s;' not in compact:
-    errors.append('LIVE_SIGNAL_CACHE_NOT_REFRESHED')
+if 'c4||c1||c15||c5' in compact and 'g_signal_engine.Evaluate' in compact: errors.append('STALE_SIGNAL_BAR_GATED_EVALUATION')
+if 'g_cached_signal[i]=s;' not in compact: errors.append('LIVE_SIGNAL_CACHE_NOT_REFRESHED')
 
 for rel in ['Analysis/TrendEngine.mqh','Analysis/ZoneEngine.mqh']:
-    p=INC/rel;t=p.read_text(encoding='utf-8',errors='replace')
-    if any(fn in t for fn in ['iMA(','iADX(','iATR(']) and 'm_handles' not in t:
-        errors.append('UNCACHED_INDICATOR_HANDLE '+rel)
+    t=(INC/rel).read_text(encoding='utf-8',errors='replace')
+    if any(fn in t for fn in ['iMA(','iADX(','iATR(']) and 'm_handles' not in t: errors.append('UNCACHED_INDICATOR_HANDLE '+rel)
 
 execution=(INC/'Execution'/'ExecutionEngine.mqh').read_text(encoding='utf-8',errors='replace')
-if 'm_current.state=AS_EXEC_UNKNOWN;m_current.terminal=false' not in re.sub(r'\s+','',execution):
-    errors.append('UNKNOWN_EXECUTION_MAY_UNBLOCK_SEND')
+if 'm_current.state=AS_EXEC_UNKNOWN;m_current.terminal=false' not in re.sub(r'\s+','',execution): errors.append('UNKNOWN_EXECUTION_MAY_UNBLOCK_SEND')
 reconciler=(INC/'Execution'/'ReconcilerV13.mqh').read_text(encoding='utf-8',errors='replace')
 for needle in ['PositionsTotal()','OrdersTotal()','HistoryDealsTotal()','HistoryOrdersTotal()']:
     if needle not in reconciler: errors.append('RECONCILIATION_SOURCE_MISSING '+needle)
+
+# Evidence integrity: outcomes from quote-observation and broker execution are
+# distinct evidence classes and statistics may not mix strategy identities.
+outcome=(INC/'Signals'/'OutcomeEngine.mqh').read_text(encoding='utf-8',errors='replace')
+for needle in ['UpdateShadow','SyncDemoExecution','AS_OUTCOME_SOURCE_SHADOW','AS_OUTCOME_SOURCE_DEMO','DEAL_POSITION_ID','DEAL_REASON_TP','DEAL_REASON_SL']:
+    if needle not in outcome: errors.append('OUTCOME_EVIDENCE_PATH_MISSING '+needle)
+repo=(INC/'Persistence'/'Repositories.mqh').read_text(encoding='utf-8',errors='replace')
+for needle in ['evidence_source','rule_version','scoring_version','parameter_hash','broker_spec_hash','execution_id']:
+    if needle not in repo: errors.append('OUTCOME_PROVENANCE_MISSING '+needle)
+read_models=(INC/'Persistence'/'ReadModels.mqh').read_text(encoding='utf-8',errors='replace')
+for needle in ['evidence_source=?3','rule_version=?4','scoring_version=?5','parameter_hash=?6']:
+    if needle not in read_models: errors.append('OUTCOME_STATS_SCOPE_MISSING '+needle)
+if 'g_outcomes.UpdateShadow' not in ea_text or 'g_outcomes.SyncDemoExecution' not in ea_text: errors.append('OUTCOME_ENGINE_NOT_WIRED_TO_EA')
+if 's.signal_id=AS_Fnv1a(s.signal_id+"|"+g_parameter_hash+"|"+s.broker_spec_hash)' not in compact: errors.append('SIGNAL_EVIDENCE_IDENTITY_NOT_SCOPED')
+version=(INC/'Core'/'VersionInfo.mqh').read_text(encoding='utf-8',errors='replace')
+if '#define AS_SCHEMA_VERSION 6' not in version: errors.append('OUTCOME_SCHEMA_V6_NOT_ACTIVE')
+
+database=(INC/'Persistence'/'Database.mqh').read_text(encoding='utf-8',errors='replace')
+if 'Migrate5To6' not in database or 'ix_outcomes_scope' not in database: errors.append('OUTCOME_SCHEMA_MIGRATION_MISSING')
 
 print('STATIC GATE')
 print('INFO files=',len(files))
@@ -116,4 +123,4 @@ print('INFO reachable_modules=',len(all_modules & reachable),'/',len(all_modules
 if errors:
     for e in errors: print('FAIL',e)
     sys.exit(1)
-print('PASS include graph / reachability / live-signal path / indicator cache / execution recovery / constants / safety policy')
+print('PASS include graph / reachability / live-signal path / indicator cache / execution recovery / evidence integrity / constants / safety policy')
