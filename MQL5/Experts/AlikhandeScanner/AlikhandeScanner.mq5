@@ -537,6 +537,8 @@ void ConfirmArmedPlan(const int index)
 //+------------------------------------------------------------------+
 void RefreshActiveTab()
   {
+   g_ui.SetAcknowledgeAvailable(g_execution.RequiresManualReview());
+
    const AS_ArmedIntent intent = g_arming.Current();
    g_ui.SetArmState(g_arming.IsArmed(),
                     g_arming.IsArmed() ? (int)(intent.expires_at - TimeCurrent()) : 0,
@@ -589,7 +591,8 @@ void RefreshActiveTab()
                         g_indicators.Count(), g_database.IsOpen(),
                         AS_ExecStateName(execution.state), g_log.SuppressedCount(),
                         AS_RuntimeKindName(g_runtime.kind), g_runtime.is_production,
-                        g_persistence.enabled ? g_persistence.filename : "disabled");
+                        g_persistence.enabled ? g_persistence.filename : "disabled",
+                        g_execution.RequiresManualReview());
      }
   }
 
@@ -659,6 +662,13 @@ void ArmSelectedPlan()
    if(index < 0)
       return;
 
+   if(g_execution.RequiresManualReview())
+     {
+      g_log.Warn("ARM_REJECTED", g_symbols[index],
+                 "an earlier execution is unresolved; verify the account and "
+                 "acknowledge before arming anything new");
+      return;
+     }
    if(!g_plan_cache[index].valid)
      {
       g_log.Info("ARM_REJECTED", g_symbols[index], "no valid plan to arm");
@@ -675,6 +685,17 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 
    // Arm and Confirm are handled before tab/row routing so a click on either
    // can never also be interpreted as a navigation action.
+   if(g_ui.IsAcknowledgeClick(sparam))
+     {
+      // Deliberate operator act: they are asserting the account was checked.
+      // Recorded with that wording so the log says who decided, not just what
+      // changed.
+      if(g_execution.AcknowledgeUnresolved("operator confirmed account verified via dashboard"))
+         g_log.Warn("SUBMISSION_UNBLOCKED", "", "unresolved execution acknowledged");
+      RefreshActiveTab();
+      ChartRedraw();
+      return;
+     }
    if(g_ui.IsArmClick(sparam))
      {
       ArmSelectedPlan();

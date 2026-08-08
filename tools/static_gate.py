@@ -44,6 +44,8 @@ REQUIRED_INVARIANTS = {
     "calendar unknown is distinct": "AS_NEWS_UNKNOWN",
     "runtime isolation": "AS_RUNTIME_OPTIMIZATION",
     "unbounded risk blocks": "UNBOUNDED_RISK",
+    "unresolved execution blocks": "UNRESOLVED_MANUAL_REVIEW_REQUIRED",
+    "broker truth reconstruction": "HistoryOrderSelect",
 }
 
 # Checks that are advisory during the rebuild rather than hard failures.

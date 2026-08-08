@@ -11,6 +11,7 @@
 #include <AlikhandeScanner/Core/Hash.mqh>
 #include <AlikhandeScanner/News/CalendarGate.mqh>
 #include <AlikhandeScanner/Execution/ArmedIntent.mqh>
+#include <AlikhandeScanner/Execution/ExecutionEngine.mqh>
 
 //+------------------------------------------------------------------+
 void TestLifecycle(AS_TestRunner &t)
@@ -349,6 +350,38 @@ void TestArming(AS_TestRunner &t)
   }
 
 //+------------------------------------------------------------------+
+void TestExecutionTerminality(AS_TestRunner &t)
+  {
+   t.Suite("execution terminality");
+
+   // The P0 this predicate exists to prevent: an unresolved execution being
+   // auto-marked finished, which flips HasUnresolved() false and releases the
+   // submit gate while an untracked order may still be live.
+   t.Check(!AS_ExecStateMayBeAutoTerminal(AS_EXEC_UNKNOWN),
+           "UNKNOWN may never be auto-terminal - it means 'not resolved'");
+
+   // States that are genuinely still in flight must not be terminal either,
+   // or reconciliation would stop watching something still happening.
+   t.Check(!AS_ExecStateMayBeAutoTerminal(AS_EXEC_SUBMITTING), "SUBMITTING is not terminal");
+   t.Check(!AS_ExecStateMayBeAutoTerminal(AS_EXEC_ACCEPTED), "ACCEPTED is not terminal");
+   t.Check(!AS_ExecStateMayBeAutoTerminal(AS_EXEC_PARTIALLY_FILLED),
+           "PARTIALLY_FILLED is not terminal");
+   t.Check(!AS_ExecStateMayBeAutoTerminal(AS_EXEC_FILLED),
+           "FILLED is not terminal - the position's fate is still open");
+   t.Check(!AS_ExecStateMayBeAutoTerminal(AS_EXEC_POSITION_ACTIVE),
+           "POSITION_ACTIVE is not terminal");
+   t.Check(!AS_ExecStateMayBeAutoTerminal(AS_EXEC_RECONCILING),
+           "RECONCILING is not terminal");
+
+   // Only definite dispositions finish an execution.
+   t.Check(AS_ExecStateMayBeAutoTerminal(AS_EXEC_COMPLETED), "COMPLETED is terminal");
+   t.Check(AS_ExecStateMayBeAutoTerminal(AS_EXEC_REJECTED), "REJECTED is terminal");
+   t.Check(AS_ExecStateMayBeAutoTerminal(AS_EXEC_CANCELLED), "CANCELLED is terminal");
+
+   t.Check(AS_ExecStateName(AS_EXEC_UNKNOWN) == "UNKNOWN", "state name round trip");
+  }
+
+//+------------------------------------------------------------------+
 void TestHash(AS_TestRunner &t)
   {
    t.Suite("hashing");
@@ -380,6 +413,7 @@ void OnStart()
    TestExposure(runner);
    TestNewsGate(runner);
    TestArming(runner);
+   TestExecutionTerminality(runner);
    TestHash(runner);
 
    if(runner.Summary())

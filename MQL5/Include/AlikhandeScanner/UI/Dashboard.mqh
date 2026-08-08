@@ -200,6 +200,13 @@ public:
            m_y + height - AS_UI_ROW_HEIGHT - AS_UI_PADDING + 2, "",
            AS_UI_COLOR_MUTED, AS_UI_FONT_MONO, AS_UI_FONT_SIZE_ROW);
 
+      // Acknowledgement lives on Health, beside the blocked-state message. It
+      // is the only way to clear a submission block, and it stays inert unless
+      // there is genuinely something to acknowledge.
+      Button(Name("ACK"), m_x + AS_UI_PADDING,
+             m_y + height - AS_UI_ROW_HEIGHT - AS_UI_PADDING,
+             178, AS_UI_ROW_HEIGHT, "Acknowledge unresolved", false);
+
       SwitchTab(m_active);
       ChartRedraw(0);
      }
@@ -244,6 +251,8 @@ public:
       const bool detail = (tab == AS_TAB_DETAIL);
       if(detail) { Show(Name("ARM")); Show(Name("CONFIRM")); Show(Name("ARMSTATE")); }
       else       { Hide(Name("ARM")); Hide(Name("CONFIRM")); Hide(Name("ARMSTATE")); }
+
+      if(tab == AS_TAB_HEALTH) Show(Name("ACK")); else Hide(Name("ACK"));
 
       const int body_lines = 14;
       for(int i = 0; i < body_lines; i++)
@@ -392,7 +401,7 @@ public:
                      const int indicator_handles, const bool database_open,
                      const string execution_state, const int suppressed_logs,
                      const string runtime_kind, const bool is_production,
-                     const string persistence_target)
+                     const string persistence_target, const bool manual_review_required)
      {
       ClearBody();
       int line = 0;
@@ -416,6 +425,16 @@ public:
                database_open ? AS_UI_COLOR_LONG : AS_UI_COLOR_SHORT);
       BodyLine(line++, "  target              " + persistence_target, AS_UI_COLOR_MUTED);
       BodyLine(line++, "  execution           " + execution_state, AS_UI_COLOR_TEXT);
+      if(manual_review_required)
+        {
+         // The engine is refusing to submit. Say why in full: a blocked
+         // scanner that looks merely idle is how somebody "fixes" it by
+         // deleting the database and loses the evidence with it.
+         BodyLine(line++, "  SUBMISSION BLOCKED  execution could not be resolved",
+                  AS_UI_COLOR_SHORT);
+         BodyLine(line++, "  verify the account manually, then acknowledge",
+                  AS_UI_COLOR_SHORT);
+        }
       BodyLine(line++, StringFormat("  suppressed logs     %d", suppressed_logs),
                AS_UI_COLOR_MUTED);
      }
@@ -468,6 +487,19 @@ public:
       ObjectSetInteger(0, Name("CONFIRM"), OBJPROP_STATE, false);
       ObjectSetInteger(0, Name("ARM"), OBJPROP_STATE, false);
      }
+
+   // Styled live only while there is something to acknowledge, so the control
+   // cannot imply it will do something it will refuse to do.
+   void SetAcknowledgeAvailable(const bool available)
+     {
+      ObjectSetInteger(0, Name("ACK"), OBJPROP_BGCOLOR,
+                       available ? AS_UI_COLOR_WARN : AS_UI_COLOR_TAB_OFF);
+      ObjectSetInteger(0, Name("ACK"), OBJPROP_COLOR,
+                       available ? clrBlack : AS_UI_COLOR_MUTED);
+      ObjectSetInteger(0, Name("ACK"), OBJPROP_STATE, false);
+     }
+
+   bool IsAcknowledgeClick(const string object_name) const { return object_name == Name("ACK"); }
 
    bool IsArmClick(const string object_name) const { return object_name == Name("ARM"); }
    bool IsConfirmClick(const string object_name) const { return object_name == Name("CONFIRM"); }

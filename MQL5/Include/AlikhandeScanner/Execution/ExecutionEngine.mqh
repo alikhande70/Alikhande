@@ -42,6 +42,35 @@ string AS_ExecStateName(const ENUM_AS_EXEC_STATE state)
    return "UNKNOWN";
   }
 
+// May reconciliation record this state as finished?
+//
+// AS_EXEC_UNKNOWN is deliberately absent. It means "not resolved", and a state
+// meaning not-resolved must never be auto-recorded as finished — doing so was
+// the P0 this predicate exists to prevent: it released the submit gate in the
+// one situation where an untracked order might be live.
+//
+// The single documented exception is AcknowledgeUnresolved(), where a human has
+// inspected the account and taken responsibility for the decision.
+bool AS_ExecStateMayBeAutoTerminal(const ENUM_AS_EXEC_STATE state)
+  {
+   return state == AS_EXEC_COMPLETED
+          || state == AS_EXEC_REJECTED
+          || state == AS_EXEC_CANCELLED;
+  }
+
+// What the broker says happened to an execution, rebuilt from live and
+// historical state rather than from events that may never have arrived.
+struct AS_BrokerTruth
+  {
+   bool               resolved;      // did any source have a definite answer
+   ENUM_AS_EXEC_STATE state;
+   bool               terminal;      // is that answer final
+   string             source;        // which source answered
+   string             detail;
+   double             filled_volume;
+   ulong              position_id;
+  };
+
 class AS_ExecutionEngine
   {
 private:
@@ -65,6 +94,205 @@ private:
       if(deal_ticket == 0 || !HistoryDealSelect(deal_ticket))
          return false;
       return (ulong)HistoryDealGetInteger(deal_ticket, DEAL_MAGIC) == m_magic;
+     }
+
+   // ---------------------------------------------------------- broker truth
+   //
+   // Four sources, consulted in descending order of authority. Each answers a
+   // different question, and consulting only one is how a live order gets
+   // mistaken for nothing having happened:
+   //
+   //   1. Open positions   — "is there a position right now"
+   //   2. Working orders   — "is an order still live but unfilled"
+   //   3. History orders   — "what was the order's final disposition"
+   //   4. History deals    — "what actually executed"
+
+   bool FindOpenPosition(AS_BrokerTruth &truth) const
+     {
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+         const ulong ticket = PositionGetTicket(i);
+         if(ticket == 0)
+            continue;
+         if((ulong)PositionGetInteger(POSITION_MAGIC) != m_magic)
+            continue;
+
+         const bool matches_id = (m_current.position_id > 0
+                                  && (ulong)PositionGetInteger(POSITION_IDENTIFIER)
+                                     == m_current.position_id);
+         if(!matches_id && PositionGetString(POSITION_SYMBOL) != m_current.symbol)
+            continue;
+
+         truth.resolved      = true;
+         truth.state         = AS_EXEC_POSITION_ACTIVE;
+         truth.terminal      = false;   // a live position is not a finished execution
+         truth.source        = "POSITION";
+         truth.detail        = StringFormat("position %I64u open",
+                                            (ulong)PositionGetInteger(POSITION_IDENTIFIER));
+         truth.position_id   = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+         truth.filled_volume = PositionGetDouble(POSITION_VOLUME);
+         return true;
+        }
+      return false;
+     }
+
+   bool FindWorkingOrder(AS_BrokerTruth &truth) const
+     {
+      for(int i = OrdersTotal() - 1; i >= 0; i--)
+        {
+         const ulong ticket = OrderGetTicket(i);
+         if(ticket == 0)
+            continue;
+         if((ulong)OrderGetInteger(ORDER_MAGIC) != m_magic)
+            continue;
+         if(m_current.order_ticket > 0 && ticket != m_current.order_ticket
+            && OrderGetString(ORDER_SYMBOL) != m_current.symbol)
+            continue;
+         if(m_current.order_ticket == 0 && OrderGetString(ORDER_SYMBOL) != m_current.symbol)
+            continue;
+
+         truth.resolved = true;
+         truth.state    = AS_EXEC_ACCEPTED;
+         truth.terminal = false;        // still working: emphatically not finished
+         truth.source   = "WORKING_ORDER";
+         truth.detail   = StringFormat("order %I64u still live", ticket);
+         return true;
+        }
+      return false;
+     }
+
+   // Maps a completed order's final state. Only reached when the order is no
+   // longer working, so every branch here is a definite disposition.
+   bool ResolveHistoryOrder(const ulong ticket, AS_BrokerTruth &truth) const
+     {
+      if(ticket == 0 || !HistoryOrderSelect(ticket))
+         return false;
+      if((ulong)HistoryOrderGetInteger(ticket, ORDER_MAGIC) != m_magic)
+         return false;
+
+      const long order_state = HistoryOrderGetInteger(ticket, ORDER_STATE);
+      truth.resolved = true;
+      truth.source   = "HISTORY_ORDER";
+
+      switch(order_state)
+        {
+         case ORDER_STATE_FILLED:
+            truth.state    = AS_EXEC_FILLED;
+            truth.terminal = false;   // filled, but the position's fate is still open
+            truth.detail   = StringFormat("order %I64u filled", ticket);
+            break;
+         case ORDER_STATE_PARTIAL:
+            truth.state    = AS_EXEC_PARTIALLY_FILLED;
+            truth.terminal = false;
+            truth.detail   = StringFormat("order %I64u partially filled", ticket);
+            break;
+         case ORDER_STATE_CANCELED:
+         case ORDER_STATE_EXPIRED:
+            truth.state    = AS_EXEC_CANCELLED;
+            truth.terminal = true;
+            truth.detail   = StringFormat("order %I64u cancelled/expired", ticket);
+            break;
+         case ORDER_STATE_REJECTED:
+            truth.state    = AS_EXEC_REJECTED;
+            truth.terminal = true;
+            truth.detail   = StringFormat("order %I64u rejected", ticket);
+            break;
+         default:
+            // Transitional states say nothing final; treat as no answer rather
+            // than inventing one.
+            truth.resolved = false;
+            return false;
+        }
+      return true;
+     }
+
+   // Sums this execution's deals. An IN followed by an OUT on the same position
+   // means the trade opened and closed while we were not watching — which is a
+   // genuinely finished execution, not a missing one.
+   bool ResolveFromDeals(AS_BrokerTruth &truth) const
+     {
+      double volume_in = 0.0;
+      double volume_out = 0.0;
+      ulong position_id = 0;
+      int matched = 0;
+
+      const int total = HistoryDealsTotal();
+      for(int i = 0; i < total; i++)
+        {
+         const ulong deal = HistoryDealGetTicket(i);
+         if(deal == 0)
+            continue;
+         if((ulong)HistoryDealGetInteger(deal, DEAL_MAGIC) != m_magic)
+            continue;
+         if(HistoryDealGetString(deal, DEAL_SYMBOL) != m_current.symbol)
+            continue;
+
+         // Prefer an exact link when we have one; otherwise magic+symbol within
+         // the selected history window is the best available correlation.
+         if(m_current.order_ticket > 0
+            && (ulong)HistoryDealGetInteger(deal, DEAL_ORDER) != m_current.order_ticket
+            && m_current.position_id > 0
+            && (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID) != m_current.position_id)
+            continue;
+
+         const long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
+         const double volume = HistoryDealGetDouble(deal, DEAL_VOLUME);
+         if(entry == DEAL_ENTRY_IN)
+            volume_in += volume;
+         else if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY)
+            volume_out += volume;
+         if(position_id == 0)
+            position_id = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+         matched++;
+        }
+
+      if(matched == 0)
+         return false;
+
+      truth.resolved      = true;
+      truth.source        = "HISTORY_DEAL";
+      truth.filled_volume = volume_in;
+      truth.position_id   = position_id;
+
+      if(volume_in > 0.0 && volume_out + 1e-8 >= volume_in)
+        {
+         truth.state    = AS_EXEC_COMPLETED;
+         truth.terminal = true;
+         truth.detail   = StringFormat("opened %.2f and closed %.2f", volume_in, volume_out);
+        }
+      else
+        {
+         truth.state    = AS_EXEC_FILLED;
+         truth.terminal = false;
+         truth.detail   = StringFormat("filled %.2f, %.2f still open", volume_in,
+                                       volume_in - volume_out);
+        }
+      return true;
+     }
+
+   AS_BrokerTruth ResolveFromBroker(void) const
+     {
+      AS_BrokerTruth truth;
+      ZeroMemory(truth);
+      truth.resolved = false;
+
+      // History must be selected before the history calls will see anything.
+      // The window is anchored on when this execution was created, widened so a
+      // clock skew between terminal and server cannot hide the records.
+      const datetime from = (m_current.created_at > 0
+                             ? m_current.created_at - 3600 : TimeCurrent() - 86400);
+      HistorySelect(from, TimeCurrent() + 3600);
+
+      if(FindOpenPosition(truth))
+         return truth;
+      if(FindWorkingOrder(truth))
+         return truth;
+      if(m_current.order_ticket > 0 && ResolveHistoryOrder(m_current.order_ticket, truth))
+         return truth;
+      if(ResolveFromDeals(truth))
+         return truth;
+
+      return truth;   // resolved == false: every source was silent
      }
 
 public:
@@ -298,56 +526,100 @@ public:
       Save();
      }
 
-   // Periodic sweep. Events can be dropped entirely when the transaction queue
-   // overflows, so nothing may depend on an event arriving; this re-reads
-   // authoritative position state and escalates what it cannot resolve.
+   // Periodic sweep. Transaction events can be dropped entirely when the
+   // terminal's queue overflows, so nothing may depend on one arriving; this
+   // rebuilds the truth from the broker instead.
+   //
+   // The governing rule, and the reason this was redesigned: `terminal` means
+   // RESOLVED. It never means "gave up". An earlier version marked a genuinely
+   // unresolved execution terminal after the grace period so the engine would
+   // not wedge — which released the submit gate and allowed the next order out
+   // in precisely the situation where nobody knew whether the previous one was
+   // live. That is exactly backwards: "we do not know" is the strongest
+   // possible reason to send nothing further.
    void Reconcile(void)
      {
       if(!HasUnresolved())
          return;
 
-      bool position_found = false;
-      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      const AS_BrokerTruth truth = ResolveFromBroker();
+
+      if(truth.resolved)
         {
-         const ulong ticket = PositionGetTicket(i);
-         if(ticket == 0)
-            continue;
-         if(PositionGetString(POSITION_SYMBOL) == m_current.symbol
-            && (ulong)PositionGetInteger(POSITION_MAGIC) == m_magic)
-           {
-            m_current.position_id = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
-            m_current.state = AS_EXEC_POSITION_ACTIVE;
-            position_found = true;
-            break;
-           }
+         m_current.state = truth.state;
+         // Belt and braces: even a resolver bug cannot mark a
+         // not-actually-finished state as finished and reopen the gate.
+         m_current.terminal = truth.terminal && AS_ExecStateMayBeAutoTerminal(truth.state);
+         m_current.message = truth.detail;
+         if(truth.position_id > 0)
+            m_current.position_id = truth.position_id;
+         if(truth.filled_volume > 0.0)
+            m_current.filled_volume = truth.filled_volume;
+
+         if(m_log != NULL)
+            m_log.Info("RECONCILED", m_current.symbol,
+                       StringFormat("execution %s resolved as %s via %s (%s)",
+                                    m_current.execution_id, AS_ExecStateName(truth.state),
+                                    truth.source, truth.detail));
+         Save();
+         return;
         }
 
-      if(!position_found)
+      // Not resolvable yet. Inside the grace period this is normal — the server
+      // may simply not have answered.
+      if(TimeCurrent() - m_current.updated_at <= AS_RECONCILE_GRACE_SECONDS)
         {
-         if(m_current.state == AS_EXEC_POSITION_ACTIVE)
-           {
-            m_current.state = AS_EXEC_COMPLETED;
-            m_current.terminal = true;
-            m_current.message = "POSITION_CLOSED";
-           }
-         else if(TimeCurrent() - m_current.updated_at > AS_RECONCILE_GRACE_SECONDS)
-           {
-            // Unresolved past the grace period with no position to show for it.
-            // Marked terminal so the engine is not wedged forever, but flagged
-            // loudly: this is the state that needs a human to look.
-            m_current.state = AS_EXEC_UNKNOWN;
-            m_current.terminal = true;
-            m_current.message = "RECONCILIATION_FAILED";
-            if(m_log != NULL)
-               m_log.Error("RECONCILIATION_FAILED", m_current.symbol,
-                           StringFormat("execution %s unresolved after %d s; "
-                                        "verify the account manually",
-                                        m_current.execution_id, AS_RECONCILE_GRACE_SECONDS));
-           }
-         else
-            m_current.state = AS_EXEC_RECONCILING;
+         m_current.state = AS_EXEC_RECONCILING;
+         Save();
+         return;
         }
 
+      // Past the grace period with all four broker sources silent. This is a
+      // real unknown: an order may be live that this EA cannot see. The
+      // execution stays NON-terminal, which keeps HasUnresolved() true, which
+      // keeps the submit gate shut — and because the record is stored with
+      // terminal=0 the block survives a restart as well.
+      //
+      // Only a deliberate operator acknowledgement clears it.
+      if(m_current.state != AS_EXEC_UNKNOWN && m_log != NULL)
+         m_log.Error("RECONCILIATION_FAILED", m_current.symbol,
+                     StringFormat("execution %s unresolved after %d s across positions, "
+                                  "working orders, history orders and history deals; "
+                                  "submission is blocked until acknowledged",
+                                  m_current.execution_id, AS_RECONCILE_GRACE_SECONDS));
+
+      m_current.state = AS_EXEC_UNKNOWN;
+      m_current.terminal = false;
+      m_current.message = "UNRESOLVED_MANUAL_REVIEW_REQUIRED";
       Save();
+     }
+
+   // True when the engine is refusing to submit because an execution could not
+   // be resolved. Surfaced on the Health tab; distinct from merely having a
+   // live execution in flight.
+   bool RequiresManualReview(void) const
+     {
+      return m_current.execution_id != ""
+             && !m_current.terminal
+             && m_current.state == AS_EXEC_UNKNOWN;
+     }
+
+   // Operator escape hatch. Without this the engine would wedge permanently on
+   // an unresolvable execution, and a permanently wedged system gets "fixed" by
+   // deleting the database — which loses the evidence too. Clearing is a
+   // deliberate, logged act that records who decided the account was verified.
+   bool AcknowledgeUnresolved(const string operator_note)
+     {
+      if(!RequiresManualReview())
+         return false;
+
+      m_current.terminal = true;
+      m_current.message = "ACKNOWLEDGED: " + operator_note;
+      if(m_log != NULL)
+         m_log.Warn("UNRESOLVED_ACKNOWLEDGED", m_current.symbol,
+                    StringFormat("execution %s cleared by operator: %s",
+                                 m_current.execution_id, operator_note));
+      Save();
+      return true;
      }
   };
