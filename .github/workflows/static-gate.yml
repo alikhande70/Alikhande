@@ -1,0 +1,24 @@
+name: static gate
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The linter guards the codebase, so it needs its own guard: if these
+      # fail, every result the gate reports below is untrustworthy.
+      - name: Static gate self-tests
+        run: python3 tools/test_static_gate.py
+
+      - name: Static gate
+        run: python3 tools/static_gate.py

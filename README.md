@@ -1,48 +1,103 @@
-# Alikhande Scanner MT5 v1.1.0
+# Alikhande Scanner MT5 v1.2.0
 
-**Edition:** ScannerPanel Hardening Edition  
-**Safety default:** Alert-only; demo execution remains inaccessible from the dashboard.
+**Edition:** Reliability & Evidence
+**Default mode:** Alert-only. Real accounts are blocked unconditionally.
 
-## What changed
+A multi-timeframe, zone-based scanner for MetaTrader 5. It looks for pullback
+and rejection setups at confirmed H1 structure, scores them against a fixed rule
+set, sizes them under hard risk policy, and — in demo mode only — executes them
+through a reconciled order pipeline.
 
-- Broker-aware symbol resolution: exact name, `_o` suffix, `#` prefix and full-tree normalized fallback.
-- `SymbolDiscovery.mq5` and `SymbolSpec.mq5` diagnostic scripts.
-- Centralized defaults and explicit `[ASSUMED]` values in `Core/Config.mqh`.
-- 250 ms sliced scheduler with a 20 ms processing budget and two symbols per slice by default.
-- Tick-staleness detection and symbol-spec warm-up.
-- Heavy analysis is refreshed only after a new closed bar on its timeframe.
-- Corrected EMA buffer chronology and ATR quality normalization.
-- Corrected H4-neutral and two-sided trend-strength scoring bugs.
-- Setup labels now require an actual pullback/rejection condition.
-- Stop Loss is structural, based on the nearest confirmed H1 zone plus an ATR buffer.
-- 2R room-to-target validation.
-- Duplicate SignalID logging prevention.
-- Managed-chart reuse policy.
-- Risk planner rejects trades below broker minimum volume instead of increasing risk.
-- Optional account-level daily loss, drawdown and consecutive-loss guards; disabled by default.
-- Compile-all harness includes every header so MetaEditor parses all modules.
+## What this build is for
+
+v1.1.0 could produce signals. It could not tell you whether they were any good,
+because nothing survived a restart and no outcome was ever recorded. v1.2.0 is
+the infrastructure that makes the question answerable: every signal, plan,
+execution and outcome is persisted with the rule version and parameter
+fingerprint that produced it.
+
+No new setups were added in this release. That is deliberate — more strategies
+before the existing ones can be measured is more unfalsifiable claims.
+
+## Safety policy
+
+These are structural, not configurable:
+
+- **Real accounts are refused.** `ExecutionEngine::Submit` returns
+  `REAL_ACCOUNT_BLOCKED` on any non-demo account. `ENUM_AS_RUN_MODE` has no
+  member that selects live trading, so no input combination can reach it.
+- **One OrderSend boundary.** `Execution/ExecutionEngine.mqh` is the only module
+  permitted to send an order; the static gate fails the build if that changes.
+- **No martingale, grid, recovery or averaging down.** The static gate rejects
+  these patterns by name.
+- **A rule score is not a probability.** The score is a weighted sum of
+  conditions. Historical win rate appears only when at least
+  `AS_MIN_OUTCOME_SAMPLE` real outcomes exist for that symbol, setup and rule
+  version, and always alongside its Wilson interval and sample size.
+
+## Run modes
+
+| Mode | Plans | Preflight | Sends |
+|---|---|---|---|
+| `AS_MODE_ALERT_ONLY` (default) | no | no | no |
+| `AS_MODE_SHADOW` | yes | yes | no |
+| `AS_MODE_DEMO` | yes | yes | demo accounts only |
+
+Shadow mode runs the identical validation and persistence path as demo and stops
+short of the send, so it exercises the real code rather than a simulation of it.
+
+## Layout
+
+```
+MQL5/
+  Experts/AlikhandeScanner/     EA entry point
+  Scripts/AlikhandeScanner/     compile harness, self-tests, broker diagnostics
+  Include/AlikhandeScanner/
+    Core/          config, versioning, hashing, de-duplicating logger
+    Domain/        enums and plain-data models
+    Broker/        symbol resolution, specification + drift detection
+    Data/          indicator handle cache, quotes, spread statistics
+    Analysis/      trend, structural zones, market regime
+    Signals/       signal generation, lifecycle
+    Risk/          sizing, portfolio exposure, account guards, trade guards
+    Execution/     preflight, execution engine (sole OrderSend boundary)
+    Persistence/   SQLite schema, migrations, repositories
+    Statistics/    Wilson interval over stored outcomes
+    UI/            multi-tab dashboard, theme
+    Testing/       assertion harness
+tools/                          static analysis gate and its tests
+docs/                           architecture, audit, acceptance criteria
+```
 
 ## Install
 
-Copy the contents of `MQL5/` into the terminal Data Folder's `MQL5/` directory:
+Copy `MQL5/` into the terminal's Data Folder, then compile in this order:
 
-- `Experts/AlikhandeScanner/AlikhandeScanner.mq5`
-- `Include/AlikhandeScanner/...`
-- `Scripts/AlikhandeScanner/...`
+1. `Scripts/AlikhandeScanner/CompileAllModules.mq5` — parses every module,
+   including ones the EA does not currently reference.
+2. `Scripts/AlikhandeScanner/RunSelfTests.mq5` — run it; it must print PASSED.
+3. `Scripts/AlikhandeScanner/SymbolDiscovery.mq5` — find your broker's exact
+   symbol names.
+4. `Scripts/AlikhandeScanner/SymbolSpec.mq5` — verify the specification numbers
+   that position sizing depends on.
+5. `Experts/AlikhandeScanner/AlikhandeScanner.mq5`
 
-Compile in this order:
+Required gate: **0 errors / 0 warnings** on all five.
 
-1. `Scripts/AlikhandeScanner/CompileAllModules.mq5`
-2. `Scripts/AlikhandeScanner/SymbolDiscovery.mq5`
-3. `Scripts/AlikhandeScanner/SymbolSpec.mq5`
-4. `Experts/AlikhandeScanner/AlikhandeScanner.mq5`
+## Development
 
-Required gate: **0 errors / 0 warnings** for all four programs.
+```bash
+python3 tools/test_static_gate.py   # the linter's own tests
+python3 tools/static_gate.py        # the codebase gate
+```
 
-## Important limitations
+Both run in CI on every push. See `docs/VERIFICATION.md` for exactly what they
+do and do not prove.
 
-- Historical Win Rate and outcome tracking are still not implemented; no probability is displayed.
-- Breakout-Retest remains reserved in the enum but is not yet an active setup.
-- Demo execution classes are compiled but not exposed through dashboard buttons.
-- Real-account execution is not approved.
-- This package has not been compiled in MetaEditor in the current environment.
+## Status
+
+Not compiled. No MetaEditor or MT5 terminal exists in the environment this was
+built in, so every module is *statically verified and unproven at runtime*.
+`docs/VERIFICATION.md` is explicit about the gap. Compiling and running the self
+tests on a real terminal is the next required step, and until it happens no
+claim about this build should be treated as established.

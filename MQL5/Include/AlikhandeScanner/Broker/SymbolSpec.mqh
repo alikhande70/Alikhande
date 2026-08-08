@@ -16,6 +16,18 @@
 
 #define AS_SPEC_DRIFT_CAPACITY 64
 
+// Result of comparing a live specification against the last known one. The
+// caller needs to distinguish "first time we have seen this symbol" from
+// "unchanged": the first case must still be persisted, or the baseline never
+// reaches the database and drift can only ever be detected within a single
+// session.
+enum ENUM_AS_SPEC_STATUS
+  {
+   AS_SPEC_UNCHANGED,
+   AS_SPEC_FIRST_SEEN,
+   AS_SPEC_DRIFTED
+  };
+
 class AS_SymbolSpecReader
   {
 private:
@@ -68,27 +80,31 @@ public:
       return s.ready;
      }
 
-   // Compares against the fingerprint last seen for this symbol. Returns true
-   // when the spec changed since the previous observation. The first
-   // observation is never reported as drift.
-   bool DetectDrift(const AS_SymbolSpec &s)
+   // Compares against the fingerprint last seen for this symbol.
+   //
+   // AS_SPEC_FIRST_SEEN and AS_SPEC_DRIFTED both mean "persist this"; only
+   // AS_SPEC_UNCHANGED means there is nothing to write. Returning a plain bool
+   // here was a real defect: a fresh symbol reported "no drift", so its
+   // baseline never reached the database, SeedFingerprint found nothing on the
+   // next start, and drift across restarts was undetectable.
+   ENUM_AS_SPEC_STATUS DetectDrift(const AS_SymbolSpec &s)
      {
       if(!s.ready)
-         return false;
+         return AS_SPEC_UNCHANGED;
 
       for(int i = 0; i < m_count; i++)
         {
          if(m_symbols[i] != s.symbol)
             continue;
          if(m_fingerprints[i] == s.fingerprint)
-            return false;
+            return AS_SPEC_UNCHANGED;
          if(m_log != NULL)
             m_log.Warn("SPEC_DRIFT", s.symbol,
                        StringFormat("broker specification changed: %s -> %s; "
                                     "risk sizing for open plans is now stale",
                                     m_fingerprints[i], s.fingerprint));
          m_fingerprints[i] = s.fingerprint;
-         return true;
+         return AS_SPEC_DRIFTED;
         }
 
       if(m_count < AS_SPEC_DRIFT_CAPACITY)
@@ -97,7 +113,13 @@ public:
          m_fingerprints[m_count] = s.fingerprint;
          m_count++;
         }
-      return false;
+      else if(m_log != NULL)
+        {
+         m_log.Warn("SPEC_TABLE_FULL", s.symbol,
+                    StringFormat("drift tracking capacity %d exhausted; "
+                                 "this symbol is not monitored", AS_SPEC_DRIFT_CAPACITY));
+        }
+      return AS_SPEC_FIRST_SEEN;
      }
 
    // Seeds the baseline from persisted state so drift is detected across a
