@@ -32,9 +32,6 @@ public:
       if(m_repo.LoadLatestUnresolvedExecution(m_current))Reconcile();
    }
 
-   // Compatibility path for the existing EA wiring. v1.3 still requires a
-   // durable DB, so it opens the same runtime-isolated database as a second WAL
-   // handle rather than silently disabling idempotency.
    void Attach(AS_Repositories &repo){
       m_repo=&repo;m_db=NULL;m_owns_db=false;
       if(m_fallback_db.Open()){m_db=&m_fallback_db;m_owns_db=true;m_deals.Attach(m_fallback_db);}
@@ -69,7 +66,7 @@ public:
       else if(result.retcode==TRADE_RETCODE_DONE){m_current.state=AS_EXEC_FILLED;}
       else if(result.retcode==TRADE_RETCODE_DONE_PARTIAL){m_current.state=AS_EXEC_PARTIALLY_FILLED;}
       else if(result.retcode==TRADE_RETCODE_PLACED){m_current.state=AS_EXEC_ACCEPTED;}
-      else{m_current.state=AS_EXEC_UNKNOWN;reason=StringFormat("UNKNOWN_SUBMIT_%u_%s",result.retcode,result.comment);}
+      else{m_current.state=AS_EXEC_UNKNOWN;m_current.terminal=false;reason=StringFormat("UNKNOWN_SUBMIT_%u_%s",result.retcode,result.comment);}
       Save();return sent;
    }
 
@@ -108,8 +105,13 @@ public:
    void Reconcile(){
       if(!HasUnresolved())return;
       AS_ReconcileResultV13 rebuilt;
-      if(!m_reconciler.Rebuild(m_current,AS_MAGIC,rebuilt)){m_current.state=AS_EXEC_UNKNOWN;m_current.message=rebuilt.reason;m_current.updated_at=TimeCurrent();Save();return;}
-      m_current.state=rebuilt.state;if(rebuilt.position_id>0)m_current.position_id=rebuilt.position_id;
+      if(!m_reconciler.Rebuild(m_current,AS_MAGIC,rebuilt)){
+         m_current.state=AS_EXEC_UNKNOWN;m_current.terminal=false;m_current.message=rebuilt.reason;m_current.updated_at=TimeCurrent();Save();return;
+      }
+      m_current.state=rebuilt.state;
+      if(rebuilt.position_id>0)m_current.position_id=rebuilt.position_id;
+      if(rebuilt.order_ticket>0)m_current.order_ticket=rebuilt.order_ticket;
+      if(rebuilt.entry_volume>m_current.filled_volume)m_current.filled_volume=rebuilt.entry_volume;
       m_current.terminal=rebuilt.terminal;m_current.message=rebuilt.reason;m_current.updated_at=TimeCurrent();Save();
    }
 };
