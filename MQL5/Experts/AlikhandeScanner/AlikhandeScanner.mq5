@@ -1,10 +1,11 @@
 #property strict
-#property version "1.20"
-#property description "Alikhande Scanner MT5 v1.2.0-rc1 - reliability and evidence edition"
+#property version "1.30"
+#property description "Alikhande Scanner MT5 v1.3.0-dev - integrated reliability candidate"
 
 #include <AlikhandeScanner/Core/Config.mqh>
 #include <AlikhandeScanner/Core/VersionInfo.mqh>
 #include <AlikhandeScanner/Core/Hash.mqh>
+#include <AlikhandeScanner/Core/NewBarDetector.mqh>
 #include <AlikhandeScanner/Domain/Models.mqh>
 #include <AlikhandeScanner/Broker/SymbolResolver.mqh>
 #include <AlikhandeScanner/Broker/SymbolSpec.mqh>
@@ -48,6 +49,7 @@ input int InpNewsBlockBeforeMinutes=AS_DEFAULT_NEWS_BLOCK_BEFORE_MIN;
 input int InpNewsBlockAfterMinutes=AS_DEFAULT_NEWS_BLOCK_AFTER_MIN;
 
 AS_MarketData g_data;
+AS_NewBarDetector g_new_bar;
 AS_TrendEngine g_trend;
 AS_ZoneEngine g_zones;
 AS_RegimeEngine g_regime_engine;
@@ -79,6 +81,7 @@ AS_TrendResult g_h4[],g_h1[],g_m15[],g_m5[];
 AS_SignalCandidate g_cached_signal[];
 AS_RegimeResult g_cached_regime[];
 AS_SymbolSpec g_cached_spec[];
+AS_NewsStateV13 g_news_state[];
 bool g_data_ready[];
 AS_TradePlan g_current_plan;
 string g_parameter_hash="";
@@ -98,23 +101,24 @@ bool SignalTerminal(const AS_SignalCandidate &s){
 }
 
 bool RefreshTrend(const string symbol,const ENUM_TIMEFRAMES tf,datetime &last_bar,AS_TrendResult &out,bool &changed){
-   changed=false;datetime closed=iTime(symbol,tf,1);if(closed<=0)return false;
-   if(closed==last_bar&&out.valid)return true;
+   datetime closed=0;changed=g_new_bar.ClosedBarChanged(symbol,tf,last_bar,closed);
+   if(!changed&&out.valid)return true;
+   if(closed<=0)return false;
    AS_TrendResult temp;ZeroMemory(temp);if(!g_trend.Analyze(symbol,tf,temp))return false;
-   out=temp;last_bar=closed;changed=true;return true;
+   out=temp;return true;
 }
 
 bool IsManagedChart(const long cid){return ObjectFind(cid,AS_MANAGED_CHART_MARKER)>=0;}
 long FindExistingChart(const string symbol,const ENUM_TIMEFRAMES tf,const bool managed_only){for(long cid=ChartFirst();cid>=0;cid=ChartNext(cid)){if(ChartSymbol(cid)==symbol&&ChartPeriod(cid)==tf){if(!managed_only||IsManagedChart(cid))return cid;}}return -1;}
 void OpenManagedChart(const string symbol,const ENUM_TIMEFRAMES tf){long cid=-1;if(InpChartReuseMode==AS_MANAGED_ONLY)cid=FindExistingChart(symbol,tf,true);else if(InpChartReuseMode==AS_REUSE_MATCHING)cid=FindExistingChart(symbol,tf,false);if(cid<0)cid=ChartOpen(symbol,tf);if(cid>0){ChartSetInteger(cid,CHART_BRING_TO_TOP,true);if(ObjectFind(cid,AS_MANAGED_CHART_MARKER)<0){ObjectCreate(cid,AS_MANAGED_CHART_MARKER,OBJ_LABEL,0,0,0);ObjectSetString(cid,AS_MANAGED_CHART_MARKER,OBJPROP_TEXT,"");ObjectSetInteger(cid,AS_MANAGED_CHART_MARKER,OBJPROP_HIDDEN,true);}}}
 int IndexOfSymbol(const string symbol){for(int i=0;i<ArraySize(g_symbols);i++)if(g_symbols[i]==symbol)return i;return -1;}
-
 bool AllDataReady(){if(ArraySize(g_symbols)==0)return false;for(int i=0;i<ArraySize(g_symbols);i++)if(g_symbols[i]==""||!g_data_ready[i])return false;return true;}
 
 void RenderCurrentTab(){
    ENUM_AS_TAB tab=g_ui.Tab();
    if(tab==AS_TAB_SIGNAL){if(g_selected>=0&&g_selected<ArraySize(g_symbols))g_ui.SignalDetail(g_cached_signal[g_selected]);else{AS_SignalCandidate empty;ZeroMemory(empty);g_ui.SignalDetail(empty);}return;}
    if(tab==AS_TAB_RISK){g_ui.RiskDetail(g_current_plan,(g_current_plan.valid?"Preview valid. DEMO confirmation required.":"No valid preview."),g_current_plan.valid&&InpRunMode==AS_MODE_DEMO_CONFIRM);return;}
+   if(tab==AS_TAB_NEWS){if(g_selected>=0&&g_selected<ArraySize(g_symbols))g_ui.News(g_news_state[g_selected],g_symbols[g_selected]);else{AS_NewsStateV13 empty;ZeroMemory(empty);g_ui.News(empty,"");}return;}
    if(tab==AS_TAB_HISTORY){string rows[];g_read.RecentSignals(rows,8);g_ui.History(rows);return;}
    if(tab==AS_TAB_STATS){int total=0,wins=0,losses=0;double wr=0,avg=0,lo=0,hi=0;g_read.OutcomeStats(total,wins,losses,wr,avg,lo,hi);g_ui.Stats(total,wins,losses,wr,avg,lo,hi,AS_MIN_HISTORICAL_PROBABILITY_SAMPLE);return;}
    if(tab==AS_TAB_SETTINGS){g_ui.Settings(EnumToString(InpRunMode),g_parameter_hash,InpSymbols,InpRiskPercent,InpMaxTotalOpenRiskPct,InpEnableNewsGate,InpEnableAccountRiskGuards,InpScanTimerMs);return;}
@@ -127,16 +131,17 @@ int OnInit(){
    ArrayResize(g_requested,n);ArrayResize(g_symbols,n);ArrayResize(g_last_alert,n);ArrayResize(g_spreads,n);
    ArrayResize(g_bar_h4,n);ArrayResize(g_bar_h1,n);ArrayResize(g_bar_m15,n);ArrayResize(g_bar_m5,n);
    ArrayResize(g_h4,n);ArrayResize(g_h1,n);ArrayResize(g_m15,n);ArrayResize(g_m5,n);
-   ArrayResize(g_cached_signal,n);ArrayResize(g_cached_regime,n);ArrayResize(g_cached_spec,n);ArrayResize(g_data_ready,n);
+   ArrayResize(g_cached_signal,n);ArrayResize(g_cached_regime,n);ArrayResize(g_cached_spec,n);ArrayResize(g_news_state,n);ArrayResize(g_data_ready,n);
+   ArrayInitialize(g_last_alert,0);ArrayInitialize(g_bar_h4,0);ArrayInitialize(g_bar_h1,0);ArrayInitialize(g_bar_m15,0);ArrayInitialize(g_bar_m5,0);
    for(int i=0;i<n;i++){
       g_requested[i]=raw[i];StringTrimLeft(g_requested[i]);StringTrimRight(g_requested[i]);
       string resolved="";if(!g_resolver.Resolve(g_requested[i],resolved))PrintFormat("Alikhande unresolved symbol '%s'",g_requested[i]);
-      g_symbols[i]=resolved;g_spreads[i]=new AS_SpreadTracker();g_data_ready[i]=false;
+      g_symbols[i]=resolved;g_spreads[i]=new AS_SpreadTracker();g_data_ready[i]=false;ZeroMemory(g_cached_signal[i]);ZeroMemory(g_cached_regime[i]);ZeroMemory(g_cached_spec[i]);ZeroMemory(g_news_state[i]);
    }
    g_parameter_hash=CurrentParameterHash();
    bool db_ok=g_db.Open();if(!db_ok)g_breaker.Trip("DB_NOT_READY");
    g_repo.Attach(g_db);g_read.Attach(g_db);g_risk_state.Attach(g_db);g_account_guard.Attach(g_risk_state);
-   g_lifecycle.Attach(g_repo);g_outcomes.Attach(g_repo);g_execution.Attach(g_repo);
+   g_lifecycle.Attach(g_repo);g_outcomes.Attach(g_repo);g_execution.Attach(g_repo,g_db);
    g_account_guard.Initialize();g_ui.Build();EventSetMillisecondTimer((int)MathMax(100,InpScanTimerMs));
    PrintFormat("%s %s initialized mode=%s parameter_hash=%s",AS_PRODUCT_NAME,AS_VERSION,EnumToString(InpRunMode),g_parameter_hash);
    return INIT_SUCCEEDED;
@@ -154,15 +159,25 @@ void ScanOne(const int i){
    bool c4=false,c1=false,c15=false,c5=false;
    if(!RefreshTrend(sym,PERIOD_H4,g_bar_h4[i],g_h4[i],c4)||!RefreshTrend(sym,PERIOD_H1,g_bar_h1[i],g_h1[i],c1)||!RefreshTrend(sym,PERIOD_M15,g_bar_m15[i],g_m15[i],c15)||!RefreshTrend(sym,PERIOD_M5,g_bar_m5[i],g_m5[i],c5))return;
    AS_RegimeResult regime;g_regime_engine.Evaluate(g_h4[i],g_h1[i],g_m15[i],snap,regime);
-   string news_reason="";bool calendar_block=false;if(InpEnableNewsGate)calendar_block=g_news.BlockedNow(sym,InpNewsBlockBeforeMinutes,InpNewsBlockAfterMinutes,news_reason);
-   bool news_unavailable=InpEnableNewsGate&&!calendar_block&&news_reason!="";bool news_block=calendar_block||news_unavailable;
-   if(news_block){regime.regime=AS_REGIME_NEWS_RISK;regime.tradable=false;regime.reasons+=(news_reason==""?"NEWS_BLOCK":news_reason)+";";}g_cached_regime[i]=regime;
+
+   AS_NewsStateV13 news;ZeroMemory(news);
+   if(InpEnableNewsGate)g_news.Evaluate(sym,InpNewsBlockBeforeMinutes,InpNewsBlockAfterMinutes,news);
+   else{news.source=AS_NEWS_SOURCE_UNAVAILABLE;news.available=true;news.blocked=false;news.reason="NEWS_GATE_DISABLED";news.evaluated_at=TimeCurrent();}
+   g_news_state[i]=news;
+   bool calendar_block=InpEnableNewsGate&&news.available&&news.blocked;
+   bool news_unavailable=InpEnableNewsGate&&!news.available;
+   bool news_block=calendar_block||news_unavailable;
+   if(news_block){regime.regime=AS_REGIME_NEWS_RISK;regime.tradable=false;regime.reasons+=(news.reason==""?"NEWS_BLOCK":news.reason)+";";}g_cached_regime[i]=regime;
+
    bool tracking_active=(g_cached_signal[i].state==AS_SIGNAL_ACTIVE&&!SignalTerminal(g_cached_signal[i]));
    if(tracking_active){g_outcomes.Update(g_cached_signal[i]);tracking_active=(g_cached_signal[i].state==AS_SIGNAL_ACTIVE&&!SignalTerminal(g_cached_signal[i]));}
-   if(!tracking_active&&(c4||c1||c15||c5||g_cached_signal[i].confirmation_bar_time==0)){
+
+   if(!tracking_active){
       AS_Zone zones[];g_zones.Build(sym,PERIOD_H1,300,3,3,0.20,zones);AS_SignalCandidate s;ZeroMemory(s);
       if(g_signal_engine.Evaluate(sym,g_h4[i],g_h1[i],g_m15[i],g_m5[i],snap,zones,regime,spec,s)){
-         s.parameter_hash=g_parameter_hash;bool fresh=g_lifecycle.Register(s);if(fresh||g_cached_signal[i].signal_id=="")g_cached_signal[i]=s;
+         s.parameter_hash=g_parameter_hash;
+         bool fresh=g_lifecycle.Register(s);
+         g_cached_signal[i]=s;
          if(fresh&&(s.direction==AS_DIR_LONG||s.direction==AS_DIR_SHORT)){
             if(InpRunMode==AS_MODE_SHADOW)g_lifecycle.Activate(g_cached_signal[i]);
             if(InpEnableAlerts&&TimeCurrent()-g_last_alert[i]>=InpAlertCooldownMinutes*60){Alert(StringFormat("%s %s L%.0f/S%.0f %s",sym,EnumToString(s.direction),s.long_score,s.short_score,EnumToString(regime.regime)));g_last_alert[i]=TimeCurrent();}
