@@ -9,6 +9,7 @@
 #include <AlikhandeScanner/Analysis/TrendEngine.mqh>
 #include <AlikhandeScanner/Risk/PortfolioRisk.mqh>
 #include <AlikhandeScanner/Core/Hash.mqh>
+#include <AlikhandeScanner/News/CalendarGate.mqh>
 
 //+------------------------------------------------------------------+
 void TestLifecycle(AS_TestRunner &t)
@@ -212,6 +213,58 @@ void TestExposure(AS_TestRunner &t)
   }
 
 //+------------------------------------------------------------------+
+void TestNewsGate(AS_TestRunner &t)
+  {
+   t.Suite("calendar gate");
+
+   AS_CalendarGate gate;
+
+   AS_RuntimeContext production;
+   ZeroMemory(production);
+   production.kind = AS_RUNTIME_TERMINAL;
+   production.is_production = true;
+
+   AS_RuntimeContext tester;
+   ZeroMemory(tester);
+   tester.kind = AS_RUNTIME_TESTER;
+   tester.is_production = false;
+
+   // Outside the terminal the calendar is not consulted at all, and the honest
+   // answer is UNKNOWN. Reporting CLEAR here is the fail-open bug: a backtest
+   // would trade through every high-impact release while appearing filtered.
+   const AS_NewsVerdict in_tester = gate.Evaluate("EURUSD", tester, 30, 15, false);
+   t.Check(in_tester.state == AS_NEWS_UNKNOWN, "tester yields UNKNOWN, not CLEAR");
+   t.Check(in_tester.source == AS_NEWS_SOURCE_UNAVAILABLE, "tester source is UNAVAILABLE");
+
+   AS_NewsVerdict unknown;
+   ZeroMemory(unknown);
+   unknown.state = AS_NEWS_UNKNOWN;
+
+   AS_NewsVerdict blocked;
+   ZeroMemory(blocked);
+   blocked.state = AS_NEWS_BLOCKED;
+
+   AS_NewsVerdict clear;
+   ZeroMemory(clear);
+   clear.state = AS_NEWS_CLEAR;
+
+   gate.ApplyRuntimePolicy(production);
+   t.Check(gate.BlocksTrading(unknown), "production: UNKNOWN blocks (fail-safe)");
+   t.Check(gate.BlocksTrading(blocked), "production: BLOCKED blocks");
+   t.Check(!gate.BlocksTrading(clear), "production: CLEAR does not block");
+   t.Check(!gate.IsNewsBlind(), "production run is not news-blind");
+
+   gate.ApplyRuntimePolicy(tester);
+   t.Check(!gate.BlocksTrading(unknown),
+           "tester: UNKNOWN does not block, or no backtest could ever trade");
+   t.Check(gate.BlocksTrading(blocked), "tester: an actual BLOCKED verdict still blocks");
+   t.Check(gate.IsNewsBlind(), "tester run is flagged news-blind");
+
+   t.Check(AS_NewsStateName(AS_NEWS_UNKNOWN) == "UNKNOWN", "state name round trip");
+   t.Check(AS_NewsSourceName(AS_NEWS_SOURCE_LIVE) == "LIVE", "source name round trip");
+  }
+
+//+------------------------------------------------------------------+
 void TestHash(AS_TestRunner &t)
   {
    t.Suite("hashing");
@@ -241,6 +294,7 @@ void OnStart()
    TestZoneLookups(runner);
    TestDirectionalBonus(runner);
    TestExposure(runner);
+   TestNewsGate(runner);
    TestHash(runner);
 
    if(runner.Summary())

@@ -26,6 +26,7 @@
 #include <AlikhandeScanner/Risk/PortfolioRisk.mqh>
 #include <AlikhandeScanner/Risk/TradeGuards.mqh>
 #include <AlikhandeScanner/Risk/AccountRiskGuard.mqh>
+#include <AlikhandeScanner/News/CalendarGate.mqh>
 #include <AlikhandeScanner/Execution/ExecutionEngine.mqh>
 #include <AlikhandeScanner/UI/Dashboard.mqh>
 
@@ -46,6 +47,10 @@ input bool             InpEnableAccountGuards    = false;
 input bool             InpEnableAlerts           = true;
 input int              InpAlertCooldownMinutes   = 30;
 input ENUM_AS_CHART_REUSE InpChartReuseMode      = AS_CHART_MANAGED_ONLY;
+input bool             InpEnableNewsGate         = true;
+input int              InpNewsPreMinutes         = AS_NEWS_PRE_MINUTES;
+input int              InpNewsPostMinutes        = AS_NEWS_POST_MINUTES;
+input bool             InpNewsIncludeMedium      = false;
 
 //--- collaborators -----------------------------------------------------------
 AS_Log              g_log;
@@ -67,6 +72,7 @@ AS_Statistics       g_statistics;
 AS_RiskPlanner      g_risk_planner;
 AS_TradeGuards      g_trade_guards;
 AS_AccountRiskGuard g_account_guard;
+AS_CalendarGate     g_calendar;
 AS_ExecutionEngine  g_execution;
 AS_Dashboard        g_ui;
 
@@ -76,6 +82,8 @@ string               g_symbols[];
 AS_SpreadTracker    *g_spreads[];
 AS_StructuralContext g_context[];
 AS_SignalCandidate   g_signal_cache[];
+AS_NewsVerdict       g_news_cache[];
+AS_NewsVerdict       g_news_disabled;
 datetime             g_last_alert[];
 datetime             g_bar_h4[], g_bar_h1[], g_bar_m15[], g_bar_m5[];
 
@@ -230,6 +238,12 @@ int OnInit()
                                 g_runtime.is_production ? "yes" : "no",
                                 g_runtime.description));
    g_statistics.Attach(g_repo);
+   ZeroMemory(g_news_disabled);
+   g_news_disabled.state = AS_NEWS_CLEAR;
+   g_news_disabled.source = AS_NEWS_SOURCE_UNAVAILABLE;
+   g_news_disabled.reason = "news gate disabled by input";
+   g_calendar.Attach(g_log);
+   g_calendar.ApplyRuntimePolicy(g_runtime);
    g_account_guard.Attach(g_repo, g_log);
    g_execution.Attach(g_repo, g_log, AS_MAGIC);
 
@@ -243,6 +257,7 @@ int OnInit()
    ArrayResize(g_spreads, requested_count);
    ArrayResize(g_context, requested_count);
    ArrayResize(g_signal_cache, requested_count);
+   ArrayResize(g_news_cache, requested_count);
    ArrayResize(g_last_alert, requested_count);
    ArrayResize(g_bar_h4, requested_count);
    ArrayResize(g_bar_h1, requested_count);
@@ -272,6 +287,7 @@ int OnInit()
       g_spreads[i] = new AS_SpreadTracker();
       ZeroMemory(g_context[i]);
       ZeroMemory(g_signal_cache[i]);
+      ZeroMemory(g_news_cache[i]);
 
       // Seed the drift baseline from persisted state so a specification
       // change across a restart is still detected.
@@ -385,6 +401,26 @@ void ProcessSymbol(const int index)
 
    candidate.broker_spec_hash = spec.fingerprint;
    g_statistics.Enrich(candidate);
+
+   // The calendar answers with a state AND a source. UNKNOWN is a distinct
+   // third answer, never folded into CLEAR: a gate that goes quiet exactly
+   // when it cannot see is worse than no gate, because it looks like one.
+   const AS_NewsVerdict news = InpEnableNewsGate
+                               ? g_calendar.Evaluate(symbol, g_runtime,
+                                                     InpNewsPreMinutes, InpNewsPostMinutes,
+                                                     InpNewsIncludeMedium)
+                               : g_news_disabled;
+   g_news_cache[index] = news;
+   const bool news_blocks = InpEnableNewsGate && g_calendar.BlocksTrading(news);
+   if(news_blocks)
+     {
+      candidate.hard_blocked = true;
+      candidate.direction = AS_DIR_NONE;
+      candidate.setup = AS_SETUP_NONE;
+      candidate.validation_codes += StringFormat("NEWS_%s(%s);",
+                                                 AS_NewsStateName(news.state), news.reason);
+     }
+
    g_signal_cache[index] = candidate;
 
    // --- guards ------------------------------------------------------------
@@ -474,14 +510,17 @@ void RefreshActiveTab()
                            TrendText(g_context[i].h4.trend_class),
                            TrendText(g_context[i].h1.trend_class),
                            TrendText(g_context[i].m15.trend_class),
-                           TrendText(g_context[i].m5.trend_class));
+                           TrendText(g_context[i].m5.trend_class),
+                           g_news_cache[i]);
          return;
         }
       AS_SignalCandidate empty;
       ZeroMemory(empty);
       AS_RegimeResult no_regime;
       ZeroMemory(no_regime);
-      g_ui.RenderDetail(empty, no_regime, "-", "-", "-", "-");
+      AS_NewsVerdict no_news;
+      ZeroMemory(no_news);
+      g_ui.RenderDetail(empty, no_regime, "-", "-", "-", "-", no_news);
       return;
      }
 

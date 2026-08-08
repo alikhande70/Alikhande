@@ -61,6 +61,10 @@
 #define AS_DEFAULT_MAX_DRIFT_POINTS         30       // [ASSUMED] symbol-specific validation needed
 #define AS_RECONCILE_GRACE_SECONDS          30       // [ASSUMED] before an unknown send is escalated
 
+// ---------------------------------------------------------------- news
+#define AS_NEWS_PRE_MINUTES                 30       // [ASSUMED]
+#define AS_NEWS_POST_MINUTES                15       // [ASSUMED]
+
 // ---------------------------------------------------------------- statistics
 // Below this sample count no probability is displayed at all. A rule score is
 // not a probability, and a probability from 8 trades is not evidence.

@@ -4,6 +4,7 @@
 #include "../Core/VersionInfo.mqh"
 #include "../Analysis/RegimeEngine.mqh"
 #include "../Statistics/Statistics.mqh"
+#include "../News/CalendarGate.mqh"
 
 // Multi-tab control panel.
 //
@@ -276,7 +277,8 @@ public:
    // bare "84" is unactionable and undebuggable — the operator needs to know
    // which conditions produced it and what, if anything, is vetoing the trade.
    void RenderDetail(const AS_SignalCandidate &s, const AS_RegimeResult &regime,
-                     const string h4, const string h1, const string m15, const string m5)
+                     const string h4, const string h1, const string m15, const string m5,
+                     const AS_NewsVerdict &news)
      {
       ClearBody();
       if(s.symbol == "")
@@ -306,6 +308,19 @@ public:
       // be read as the same quantity.
       BodyLine(line++, "  (rule score is not a probability)", AS_UI_COLOR_MUTED);
       BodyLine(line++, "Historical   " + AS_FormatProbability(s), AS_UI_COLOR_MUTED);
+      BodyLine(line++, "", AS_UI_COLOR_TEXT);
+
+      // State and source are shown together, always. "CLEAR" from a live
+      // calendar and "UNKNOWN" from no calendar are completely different
+      // claims, and a panel that renders both as a quiet green tick is lying.
+      color news_colour = AS_UI_COLOR_LONG;
+      if(news.state == AS_NEWS_BLOCKED)      news_colour = AS_UI_COLOR_SHORT;
+      else if(news.state == AS_NEWS_UNKNOWN) news_colour = AS_UI_COLOR_WARN;
+      BodyLine(line++, StringFormat("News     %s via %s%s",
+                                    AS_NewsStateName(news.state),
+                                    AS_NewsSourceName(news.source),
+                                    news.reason == "" ? "" : "  (" + news.reason + ")"),
+               news_colour);
       BodyLine(line++, "", AS_UI_COLOR_TEXT);
 
       BodyLine(line++, "Reasons  " + (s.reasons == "" ? "-" : s.reasons), AS_UI_COLOR_LONG);
