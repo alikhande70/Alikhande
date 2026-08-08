@@ -94,11 +94,9 @@ for rel in ['Analysis/TrendEngine.mqh','Analysis/ZoneEngine.mqh']:
 execution=(INC/'Execution'/'ExecutionEngine.mqh').read_text(encoding='utf-8',errors='replace')
 if 'm_current.state=AS_EXEC_UNKNOWN;m_current.terminal=false' not in re.sub(r'\s+','',execution): errors.append('UNKNOWN_EXECUTION_MAY_UNBLOCK_SEND')
 reconciler=(INC/'Execution'/'ReconcilerV13.mqh').read_text(encoding='utf-8',errors='replace')
-for needle in ['PositionsTotal()','OrdersTotal()','HistoryDealsTotal()','HistoryOrdersTotal()']:
+for needle in ['PositionsTotal()','OrdersTotal()','HistoryDealsTotal()','HistoryOrdersTotal()','ORDER_POSITION_ID','DEAL_ORDER']:
     if needle not in reconciler: errors.append('RECONCILIATION_SOURCE_MISSING '+needle)
 
-# Evidence integrity: outcomes from quote-observation and broker execution are
-# distinct evidence classes and statistics may not mix strategy identities.
 outcome=(INC/'Signals'/'OutcomeEngine.mqh').read_text(encoding='utf-8',errors='replace')
 for needle in ['UpdateShadow','SyncDemoExecution','AS_OUTCOME_SOURCE_SHADOW','AS_OUTCOME_SOURCE_DEMO','DEAL_POSITION_ID','DEAL_REASON_TP','DEAL_REASON_SL']:
     if needle not in outcome: errors.append('OUTCOME_EVIDENCE_PATH_MISSING '+needle)
