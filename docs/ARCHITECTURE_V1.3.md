@@ -1,127 +1,130 @@
-# Alikhande Scanner v1.3 — Architecture Freeze
+# Alikhande Scanner v1.3 — Production Architecture
+
+## Status of this document
+
+This file describes the **actual v1.3 production source layout and enforced runtime flow** on branch `gpt/alikhande-scanner-v1.3-independent-rebuild-20260808`. Earlier drafts used conceptual directory names such as `Market/` and `Calendar/`; those names were architectural labels, not the filesystem. That ambiguity is removed here.
 
 ## Design principle
 
 v1.3 separates four truths that must never be conflated:
 
-1. **Structural market truth** — facts derived from closed bars and immutable until the next structural refresh.
-2. **Live quote truth** — bid/ask, spread, drift and price-to-zone relationship evaluated on every scan pass.
-3. **Authoritative execution truth** — current orders, positions, trade history and transaction events from MT5.
-4. **Persisted evidence truth** — durable SQLite records used for recovery, audit and future statistical analysis.
+1. **Structural market truth** — facts derived from closed bars and stable until the next structural refresh.
+2. **Live quote truth** — bid/ask, spread, freshness and price-to-zone relationship evaluated on every scan pass.
+3. **Authoritative execution truth** — current orders, positions, order/deal history and transaction events from MT5.
+4. **Persisted evidence truth** — durable SQLite records used for recovery, audit and later statistical analysis.
 
-A module may consume another truth, but it must not silently rewrite its meaning.
-
-## Target architecture
+## Actual source layout
 
 ```text
-AlikhandeScanner
-├── Core
-│   ├── Config
-│   ├── RuntimeContext
-│   ├── Scheduler
-│   ├── NewBarDetector
-│   └── Hash
-├── Market
-│   ├── MarketData
-│   ├── QuoteState
-│   ├── BarSnapshot
-│   └── IndicatorRegistry
-├── Analysis
-│   ├── TrendEngine
-│   ├── RegimeEngine
-│   ├── ZoneEngine
-│   └── StructureEngine
-├── Signal
-│   ├── StructuralCandidate
-│   ├── LiveValidator
-│   ├── ScoringEngine
-│   ├── SignalLifecycle
-│   └── Explanation
-├── Risk
-│   ├── PositionRisk
-│   ├── PortfolioExposure
-│   ├── AccountRiskGuard
-│   └── RiskBudget
-├── Execution
-│   ├── TradePlan
-│   ├── Preflight
-│   ├── ExecutionEngine
-│   ├── TransactionDeduplicator
-│   └── Reconciler
-├── Persistence
-│   ├── Database
-│   ├── Migrations
-│   ├── SignalRepository
-│   ├── ExecutionRepository
-│   └── OutcomeRepository
-├── Calendar
-│   ├── LiveCalendarProvider
-│   ├── TesterCalendarProvider
-│   └── NewsGate
-├── UI
-│   ├── Overview
-│   ├── SignalDetail
-│   ├── Risk
-│   ├── News
-│   └── Health
-└── Tests
-    ├── Domain
-    ├── Signal
-    ├── Risk
-    ├── Execution
-    ├── Persistence
-    └── Restart
+MQL5/Include/AlikhandeScanner
+├── Core/
+│   ├── Config.mqh
+│   ├── Hash.mqh
+│   ├── NewBarDetector.mqh
+│   ├── RuntimeContext.mqh
+│   └── VersionInfo.mqh
+├── Data/
+│   ├── MarketData.mqh
+│   ├── RuntimeSnapshots.mqh
+│   └── SpreadTracker.mqh
+├── Analysis/
+│   ├── TrendEngine.mqh
+│   ├── ZoneEngine.mqh
+│   └── RegimeEngine.mqh
+├── Signal/
+│   ├── SignalDomainV13.mqh
+│   ├── ZoneSemanticsV13.mqh
+│   ├── LiveValidatorV13.mqh
+│   ├── ExplainableScoringV13.mqh
+│   └── LifecycleV13.mqh
+├── Signals/
+│   ├── SignalEngine.mqh        # production facade using Signal/* modules
+│   ├── SignalLifecycle.mqh     # production lifecycle facade
+│   └── OutcomeEngine.mqh
+├── Risk/
+│   ├── PortfolioRisk.mqh
+│   └── RiskMathV13.mqh
+├── Trading/
+│   └── RiskPlanner.mqh
+├── Safety/
+│   ├── AccountRiskGuard.mqh
+│   └── TradeGuards.mqh
+├── Execution/
+│   ├── Preflight.mqh
+│   ├── DealLedgerV13.mqh
+│   ├── ReconcilerV13.mqh
+│   └── ExecutionEngine.mqh
+├── Persistence/
+│   ├── DatabasePolicyV13.mqh
+│   ├── Database.mqh
+│   ├── Repositories.mqh
+│   ├── ReadModels.mqh
+│   └── RiskStateStore.mqh
+├── News/
+│   ├── CalendarProviderV13.mqh
+│   └── NewsGate.mqh
+├── Broker/
+├── Health/
+└── UI/
 ```
 
-## Runtime data flow
+The temporary `V13` suffix marks modules introduced during this rebuild. It is not a second authoritative implementation: production facades explicitly call these modules, and the static gate rejects unreachable `.mqh` production modules. A naming cleanup may follow only after MetaEditor qualification, to avoid mixing refactoring with runtime verification.
+
+## Production runtime flow
 
 ```text
-Closed-bar refresh
-  -> BarSnapshot
-  -> Trend/Regime/Structure/Zone analysis
-  -> StructuralCandidate (stable identity)
+Closed-bar change
+  -> NewBarDetector
+  -> TrendEngine closed-bar analysis
+  -> typed supply/demand zones from ZoneEngine
 
 Every scan pass
-  -> QuoteState
-  -> price-to-zone relationship
-  -> LiveValidator
-  -> Explainable score/veto set
-  -> TradePlan preview
+  -> MarketData -> RuntimeSnapshots -> fresh QuoteState
+  -> RegimeEngine
+  -> Signals/SignalEngine production facade
+       -> ZoneSemanticsV13
+       -> ExplainableScoringV13
+       -> StructuralCandidateV13 stable identity
+       -> LiveValidatorV13 current Entry / SL / TP / vetoes
+  -> cached UI signal is refreshed even when signal_id is unchanged
 
-Explicit demo confirmation only
-  -> Risk gates
-  -> OrderCheck preflight
-  -> single ExecutionEngine boundary
-  -> OrderSend
+Risk preview
+  -> RiskPlanner
+  -> PortfolioRisk -> RiskMathV13
+  -> explicit Preview / DEMO confirmation
+
+Execution
+  -> real-account hard block
+  -> Preflight -> OrderCheck
+  -> persist intent
+  -> single OrderSend boundary
   -> OnTradeTransaction
-  -> idempotent state transition
-  -> periodic/restart reconciliation
-  -> outcome lifecycle
+  -> DealLedgerV13 admission before fill-state mutation
+  -> periodic/restart ReconcilerV13
+       -> current Positions
+       -> current Orders
+       -> History Deals
+       -> History Orders
 ```
 
 ## Non-negotiable invariants
 
 - Real-account execution is impossible in v1.x by unconditional runtime hard block.
 - `OrderSend` exists in exactly one production module.
-- A deal ticket mutates execution state at most once.
+- A deal ticket may mutate execution state at most once.
 - Every sent intent is persisted before `OrderSend`.
-- Restart recovery derives state from SQLite plus MT5 history/orders/positions; SQLite alone is not authoritative.
-- Structural candidate identity does not change because bid/ask changes.
-- Entry/SL/TP preview must be recalculated or explicitly invalidated from current live conditions.
-- Missing SL is not zero risk.
+- `UNKNOWN` execution outcome remains non-terminal and blocks new sends until authoritative evidence resolves it.
+- Restart recovery uses SQLite plus current orders, current positions, history orders and history deals.
+- Structural signal identity does not depend on live bid/ask.
+- Entry/SL/TP are revalidated against the current quote on every scan pass before a signal is displayed as tradable.
+- Price inside a valid demand/supply zone is a first-class interaction.
+- Missing or unpriceable SL exposure is unbounded risk, never zero risk.
 - Rule score is not a probability.
-- Tester/optimization persistence cannot contaminate terminal/demo history.
-- News state must explicitly identify LIVE, TEST_DATA or UNAVAILABLE source.
-- UI is read-only with respect to analytical truth; interactions issue commands but do not calculate hidden trading logic.
+- Terminal/demo persistence is separated from tester/optimization persistence.
+- News provenance is explicit: LIVE, TEST_DATA or UNAVAILABLE.
+- UI renders domain state and issues commands; it does not contain hidden signal/execution logic.
+- Static module reachability is necessary evidence, not a substitute for MetaEditor/MT5 runtime proof.
 
-## Execution modes
+## Qualification boundary
 
-- **ALERT_ONLY** — analysis and display only, no executable intent.
-- **SHADOW** — complete live validation, risk and preflight path but no order leaves MT5.
-- **DEMO_CONFIRM** — explicit user confirmation required before execution; demo account only.
-
-No live mode exists in v1.x.
-
-## Versioning discipline
-
-Rule logic, scoring logic, database schema, parameter set and broker specification each carry independent version/hash identity. Historical outcomes are meaningful only when those identities are retained with the signal.
+Source/static gates may establish an implementation candidate. Only Windows MetaEditor/MT5 evidence can establish compile, shadow or demo qualification. No profitability claim follows from software correctness; backtest/OOS evidence is a separate statistical track.
