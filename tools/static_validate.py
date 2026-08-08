@@ -52,7 +52,6 @@ for rel in [
     'MQL5/Include/AlikhandeScanner/Trading/DemoExecution.mqh']:
     if (ROOT/rel).exists(): errors.append('LEGACY_ACTIVE '+rel)
 
-# Detect missing Alikhande compile-time constants/enums before MetaEditor.
 defs=set(re.findall(r'^\s*#define\s+(AS_[A-Z0-9_]+)',all_src,re.M))
 for enum_body in re.findall(r'enum\s+ENUM_AS_[A-Z0-9_]+\s*\{([^}]*)\}',all_src,re.S):
     defs.update(re.findall(r'\b(AS_[A-Z0-9_]+)\b',enum_body))
@@ -60,15 +59,14 @@ uses=set(re.findall(r'\b(AS_[A-Z0-9_]+)\b',all_src))
 missing=sorted(x for x in uses-defs if not x.startswith('AS_PRODUCT_') and x not in {'AS_VERSION','AS_RULE_VERSION','AS_SCORING_VERSION','AS_SCHEMA_VERSION','AS_MANAGED_CHART_MARKER'})
 if missing: errors.append('UNRESOLVED_AS_CONSTANTS '+','.join(missing))
 
-# Production reachability gate. Follow the real include graph from the EA;
-# compiling a module in a synthetic test is not evidence that production uses it.
+# Follow the real include graph from the production EA. Local quoted includes
+# such as "Preflight.mqh" resolve relative to the including file; angle-bracket
+# AlikhandeScanner includes resolve from the project include root.
 include_re=re.compile(r'#include\s+[<"]([^>"]+)[>"]')
 def resolve_include(source:Path, token:str):
     if token.startswith('AlikhandeScanner/'):
-        return INC/token[len('AlikhandeScanner/'):]
-    if token.startswith('..') or token.startswith('.'):
-        return (source.parent/token).resolve()
-    return None
+        return (INC/token[len('AlikhandeScanner/'):]).resolve()
+    return (source.parent/token).resolve()
 
 reachable=set()
 stack=[EA.resolve()]
@@ -80,36 +78,36 @@ while stack:
     text=current.read_text(encoding='utf-8',errors='replace')
     for token in include_re.findall(text):
         target=resolve_include(current,token)
-        if target is not None and target.exists() and (target.suffix.lower() in {'.mqh','.mq5'}):
-            stack.append(target.resolve())
+        if target.exists() and target.suffix.lower() in {'.mqh','.mq5'}:
+            stack.append(target)
 
 all_modules={p.resolve() for p in INC.rglob('*.mqh')}
 unreachable=sorted(str(p.relative_to(ROOT)) for p in all_modules-reachable)
 if unreachable:
     errors.append('UNREACHABLE_MODULES '+','.join(unreachable))
 
-# Critical scheduler arrays must be initialised after resizing; relying on
-# unspecified resized-array contents can corrupt cooldown/new-bar state.
 ea_text=EA.read_text(encoding='utf-8',errors='replace')
 for name in ['g_last_alert','g_bar_h4','g_bar_h1','g_bar_m15','g_bar_m5']:
     if f'ArrayResize({name},' in ea_text and f'ArrayInitialize({name},' not in ea_text:
         errors.append(f'UNINITIALIZED_RUNTIME_ARRAY {name}')
 
-# Stale-signal regression guard: signal evaluation must not be gated by a
-# closed-bar-change disjunction. Closed bars update structural inputs; the live
-# validator must still run every scan pass.
 compact=re.sub(r'\s+','',ea_text)
 if 'c4||c1||c15||c5' in compact and 'g_signal_engine.Evaluate' in compact:
     errors.append('STALE_SIGNAL_BAR_GATED_EVALUATION')
 if 'g_cached_signal[i]=s;' not in compact:
     errors.append('LIVE_SIGNAL_CACHE_NOT_REFRESHED')
 
-# Indicator handles used by production analysis must be retained in a cache;
-# repeated create/release cycles are forbidden in the scanner hot path.
 for rel in ['Analysis/TrendEngine.mqh','Analysis/ZoneEngine.mqh']:
     p=INC/rel;t=p.read_text(encoding='utf-8',errors='replace')
     if any(fn in t for fn in ['iMA(','iADX(','iATR(']) and 'm_handles' not in t:
         errors.append('UNCACHED_INDICATOR_HANDLE '+rel)
+
+execution=(INC/'Execution'/'ExecutionEngine.mqh').read_text(encoding='utf-8',errors='replace')
+if 'm_current.state=AS_EXEC_UNKNOWN;m_current.terminal=false' not in re.sub(r'\s+','',execution):
+    errors.append('UNKNOWN_EXECUTION_MAY_UNBLOCK_SEND')
+reconciler=(INC/'Execution'/'ReconcilerV13.mqh').read_text(encoding='utf-8',errors='replace')
+for needle in ['PositionsTotal()','OrdersTotal()','HistoryDealsTotal()','HistoryOrdersTotal()']:
+    if needle not in reconciler: errors.append('RECONCILIATION_SOURCE_MISSING '+needle)
 
 print('STATIC GATE')
 print('INFO files=',len(files))
@@ -118,4 +116,4 @@ print('INFO reachable_modules=',len(all_modules & reachable),'/',len(all_modules
 if errors:
     for e in errors: print('FAIL',e)
     sys.exit(1)
-print('PASS include graph / reachability / live-signal path / indicator cache / constants / architecture boundaries / safety policy')
+print('PASS include graph / reachability / live-signal path / indicator cache / execution recovery / constants / safety policy')
