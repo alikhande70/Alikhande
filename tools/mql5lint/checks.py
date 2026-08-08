@@ -219,26 +219,84 @@ def check_unchecked_copy(tree: SourceTree) -> list[Finding]:
     return out
 
 
-def check_indicator_handle_leak(tree: SourceTree) -> list[Finding]:
-    """Indicator handles created inside a function that is called per-tick.
+INDICATOR_CREATORS = "iMA|iATR|iADX|iRSI|iStochastic|iMACD|iBands|iCCI"
 
-    Creating `iMA`/`iATR`/`iADX` on every call and releasing them is a known
-    MT5 anti-pattern: it churns the indicator cache and `BarsCalculated` is
-    unreliable immediately after creation. Handles belong in a cache.
+# The anti-pattern is a handle assigned to a LOCAL, which therefore cannot
+# outlive the call: `int h50 = iMA(...)`. A handle stored in a member or a
+# struct field (`h.ema50 = iMA(...)`) or returned from a caching accessor
+# (`return iMA(...)`) is retained, which is the correct shape.
+LOCAL_HANDLE_RE = re.compile(
+    rf"\bint\s+\w+\s*=\s*({INDICATOR_CREATORS})\s*\("
+)
+
+
+LOCAL_HANDLE_NAMED_RE = re.compile(
+    rf"\bint\s+(\w+)\s*=\s*({INDICATOR_CREATORS})\s*\("
+)
+
+
+def _enclosing_function_body(text: str, index: int) -> str:
+    """Source of the brace-block containing `index`, best effort."""
+    depth = 0
+    start = 0
+    for i in range(index, -1, -1):
+        if text[i] == "}":
+            depth += 1
+        elif text[i] == "{":
+            if depth == 0:
+                start = i
+                break
+            depth -= 1
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return text[start:]
+
+
+def check_indicator_handle_leak(tree: SourceTree) -> list[Finding]:
+    """Indicator handles created per call and then thrown away.
+
+    Creating `iMA`/`iATR`/`iADX` on every call is a known MT5 anti-pattern: it
+    churns the terminal's indicator cache, and `BarsCalculated()` is unreliable
+    immediately after creation, so the first call for each symbol tends to fail
+    spuriously and only recover a bar later.
+
+    The discriminator is RETENTION, not syntax. A handle assigned to a local is
+    fine when that local is then returned or stored — that is exactly the shape
+    of a caching accessor. It is only a defect when the handle cannot outlive
+    the call.
+
+    This check has produced false positives twice: first by flagging any
+    creation outside a file named `*Cache*`, then by flagging every local
+    assignment. Both punished correct designs, and a check that does that gets
+    switched off rather than obeyed.
     """
     out: list[Finding] = []
-    creators = re.compile(r"\b(iMA|iATR|iADX|iRSI|iStochastic|iMACD|iBands|iCCI)\s*\(")
     for sf in tree.files.values():
-        if "HandleCache" in sf.rel or "IndicatorCache" in sf.rel:
-            continue  # the cache itself is allowed to create handles
-        for m in creators.finditer(sf.text):
+        for m in LOCAL_HANDLE_NAMED_RE.finditer(sf.text):
+            name, creator = m.group(1), m.group(2)
+            body = _enclosing_function_body(sf.text, m.start())
+
+            returned = re.search(rf"\breturn\s+{re.escape(name)}\s*;", body)
+            # Stored into a field or an array element: `x.h = name`, `a[i] = name`.
+            stored = re.search(rf"[\].]\s*\w*\s*=\s*{re.escape(name)}\s*[;,)]", body) \
+                     or re.search(rf"\w+\s*\[[^\]]*\]\s*=\s*{re.escape(name)}\s*[;,)]", body) \
+                     or re.search(rf"\w+\.\w+\s*=\s*{re.escape(name)}\s*[;,)]", body)
+            if returned or stored:
+                continue
+
             out.append(
                 Finding(
                     "UNCACHED_INDICATOR",
                     sf.rel,
                     sf.line_of(m.start()),
-                    f"`{m.group(1)}(...)` called outside the handle cache; "
-                    f"per-call handle creation churns the indicator cache",
+                    f"`{creator}(...)` handle is neither returned nor stored, so it "
+                    f"cannot outlive the call and is recreated every time",
                 )
             )
     return out
@@ -290,6 +348,18 @@ def check_resize_without_init(tree: SourceTree) -> list[Finding]:
         }
         for name in sorted((resized & candidates) - initialised - copied):
             idx = sf.text.find(f"ArrayResize({name}")
+            if idx < 0:
+                idx = sf.text.find(f"ArrayResize( {name}")
+
+            # Per-element initialisation in the same function as the resize is
+            # equivalent to ArrayInitialize — `for(...) g_ready[i] = false;`
+            # right after the resize leaves nothing undefined. Only a write in
+            # a *different* function leaves a window where the array is read
+            # before it is ever set, which is the actual hazard.
+            if idx >= 0:
+                body = _enclosing_function_body(sf.text, idx)
+                if re.search(rf"\b{re.escape(name)}\s*\[[^\]]*\]\s*=", body):
+                    continue
             out.append(
                 Finding(
                     "RESIZE_WITHOUT_INIT",

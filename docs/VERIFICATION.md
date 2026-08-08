@@ -67,6 +67,29 @@ matter. **Nothing in this repository constitutes evidence that the strategy is
 profitable.** The persistence layer exists precisely so that this can eventually
 be answered with data instead of opinion.
 
+## Known open gap — the outcome loop is not closed
+
+`Repositories::SaveOutcome` is defined and **called by nothing**. The `outcomes`
+table is therefore never populated, `OutcomeCounts` always returns zero,
+`has_historical_estimate` is permanently false, and `AS_FormatProbability`
+always renders "n/a".
+
+Everything downstream of that is correct and inert: the Wilson interval, the
+minimum-sample gate, the rule-version scoping. The signal lifecycle reaches
+`AS_SIGNAL_ACTIVE` and stops — nothing drives it to TP or SL, so nothing is ever
+scored.
+
+This is the same class of defect as v1.1.0's B9, where a correct Wilson
+implementation was never called. v1.2/v1.3 wired the caller; the data it needs is
+still not written.
+
+**Consequence for how this build should be described:** it captures signals,
+plans, executions, deals and features with full version provenance. It does not
+yet produce outcome statistics of any kind. The infrastructure for evidence
+exists; the evidence does not. Closing this loop — tracking an ACTIVE signal to
+its TP/SL and writing the realised R, MFE and MAE — is the single highest-value
+remaining piece of work, and no claim about win rate is possible before it.
+
 ## Required next steps
 
 1. Compile all five programs in MetaEditor. Gate: 0 errors / 0 warnings.

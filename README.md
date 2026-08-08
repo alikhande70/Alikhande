@@ -105,6 +105,13 @@ do and do not prove.
 
 ## Status
 
+**The outcome loop is not closed.** Signals, plans, executions and deals are
+persisted with full version provenance, but nothing writes the `outcomes` table
+yet, so no win rate or probability is ever produced — `has_historical_estimate`
+is permanently false and the UI correctly renders "n/a". See
+`docs/VERIFICATION.md`. The infrastructure for evidence exists; the evidence
+does not.
+
 Not compiled. No MetaEditor or MT5 terminal exists in the environment this was
 built in, so every module is *statically verified and unproven at runtime*.
 `docs/VERIFICATION.md` is explicit about the gap. Compiling and running the self

@@ -170,6 +170,28 @@ def test_resize_without_init() -> None:
     check(codes(checks.check_resize_without_init(local)) == set(),
           "local resize-then-fill is not flagged (no false positive)")
 
+    # Per-element initialisation in the same function as the resize is
+    # equivalent to ArrayInitialize.
+    loop_init = tree_from({
+        "MQL5/Experts/E.mq5":
+            "bool g_ready[];\n"
+            "void OnInit(){ ArrayResize(g_ready,4);\n"
+            "  for(int i=0;i<4;i++){ g_ready[i]=false; } }\n"
+    })
+    check(codes(checks.check_resize_without_init(loop_init)) == set(),
+          "loop initialisation in the resizing function is not flagged")
+
+    # A write only in a *different* function leaves a real read-before-write
+    # window - this is the v1.1.0 g_last_alert shape.
+    other_fn = tree_from({
+        "MQL5/Experts/E.mq5":
+            "datetime g_last[];\n"
+            "void OnInit(){ ArrayResize(g_last,4); }\n"
+            "void OnTimer(){ if(TimeCurrent()-g_last[0]>60) g_last[0]=TimeCurrent(); }\n"
+    })
+    check("RESIZE_WITHOUT_INIT" in codes(checks.check_resize_without_init(other_fn)),
+          "write in a different function still reported")
+
 
 def test_invariants_scan_string_literals() -> None:
     print("invariant scan")
@@ -222,6 +244,59 @@ def test_unchecked_copy() -> None:
         "MQL5/Include/A.mqh": "#pragma once\nvoid f(){ if(CopyBuffer(h,0,0,3,buf)!=3) return; }\n"
     })
     check(codes(checks.check_unchecked_copy(good)) == set(), "checked CopyBuffer is quiet")
+
+
+def test_indicator_handle_pattern() -> None:
+    print("indicator handle pattern")
+    local = tree_from({
+        "MQL5/Include/A.mqh":
+            "#pragma once\n"
+            "bool Analyze(){ int h=iMA(s,tf,50,0,MODE_EMA,PRICE_CLOSE); return h>0; }\n"
+    })
+    check("UNCACHED_INDICATOR" in codes(checks.check_indicator_handle_leak(local)),
+          "handle assigned to a local is reported")
+
+    # A per-class cache storing handles in a member struct is correct design and
+    # must not be punished.
+    member = tree_from({
+        "MQL5/Include/A.mqh":
+            "#pragma once\n"
+            "class C { Set m_h[]; bool Ensure(){ Set h; h.ema=iMA(s,tf,50,0,0,0);"
+            " int n=ArraySize(m_h); ArrayResize(m_h,n+1); m_h[n]=h; return true; } };\n"
+    })
+    check(codes(checks.check_indicator_handle_leak(member)) == set(),
+          "handle stored in a member struct is not flagged (no false positive)")
+
+    accessor = tree_from({
+        "MQL5/Include/A.mqh":
+            "#pragma once\n"
+            "class C { public: int Handle(){ return iMA(s,tf,50,0,0,0); } };\n"
+    })
+    check(codes(checks.check_indicator_handle_leak(accessor)) == set(),
+          "caching accessor returning the handle is not flagged")
+
+    # Lookup-then-create-then-store: a local that IS retained.
+    lookup_store = tree_from({
+        "MQL5/Include/A.mqh":
+            "#pragma once\n"
+            "class C { Item m_h[];\n"
+            "  int Get(){ for(int i=0;i<ArraySize(m_h);i++) if(m_h[i].s==s) return m_h[i].atr;\n"
+            "    int handle=iATR(s,tf,14); if(handle==INVALID_HANDLE) return handle;\n"
+            "    Item item; item.atr=handle; int n=ArraySize(m_h);\n"
+            "    ArrayResize(m_h,n+1); m_h[n]=item; return handle; } };\n"
+    })
+    check(codes(checks.check_indicator_handle_leak(lookup_store)) == set(),
+          "lookup-then-create-then-store cache is not flagged (no false positive)")
+
+    # The genuine v1.1.0 shape: created, used, released, never retained.
+    churn = tree_from({
+        "MQL5/Include/A.mqh":
+            "#pragma once\n"
+            "bool Analyze(){ int h50=iMA(s,tf,50,0,0,0); double b[];\n"
+            "  CopyBuffer(h50,0,1,3,b); IndicatorRelease(h50); return true; }\n"
+    })
+    check("UNCACHED_INDICATOR" in codes(checks.check_indicator_handle_leak(churn)),
+          "create-use-release with no retention is reported")
 
 
 def test_use_before_definition() -> None:
@@ -316,6 +391,7 @@ def main() -> int:
         test_ordersend_boundary,
         test_include_cycle,
         test_unchecked_copy,
+        test_indicator_handle_pattern,
         test_use_before_definition,
         test_discarded_guard_results,
         test_unreachable_module,
