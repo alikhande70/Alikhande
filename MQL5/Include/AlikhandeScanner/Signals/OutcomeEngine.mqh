@@ -16,7 +16,6 @@ public:
    AS_OutcomeEngine(void){m_repo=NULL;}
    void Attach(AS_Repositories &repo){m_repo=&repo;}
 
-   // Shadow evidence is explicitly observational: no broker execution exists.
    bool UpdateShadow(AS_SignalCandidate &s){
       if(s.signal_id==""||s.state!=AS_SIGNAL_ACTIVE)return false;
       MqlTick tick;if(!SymbolInfoTick(s.symbol,tick))return false;
@@ -31,8 +30,6 @@ public:
       return Persist(s,next,AS_OUTCOME_SOURCE_SHADOW,"",px,r,"SHADOW_OBSERVED_QUOTE");
    }
 
-   // Demo evidence is derived only from broker deals belonging to the resolved
-   // execution. A quote crossing TP/SL is not accepted as proof of execution.
    bool SyncDemoExecution(const AS_ExecutionRecord &x,AS_SignalCandidate &s,const ulong magic){
       if(m_repo==NULL||x.execution_id==""||x.signal_id==""||s.signal_id!=x.signal_id)return false;
       if(m_repo.OutcomeExists(s.signal_id))return false;
@@ -44,7 +41,8 @@ public:
       if(x.position_id==0)return false;
 
       AS_TradePlan plan;if(!m_repo.LoadPlan(x.plan_id,plan))return false;
-      if(!HistorySelect(TimeCurrent()-86400*30,TimeCurrent()+60))return false;
+      datetime from=(x.created_at>0?x.created_at-3600:TimeCurrent()-86400*30);
+      if(!HistorySelect(from,TimeCurrent()+60))return false;
 
       double entry_value=0.0,entry_volume=0.0,exit_value=0.0,exit_volume=0.0;
       long last_exit_reason=-1;int matched=0;
