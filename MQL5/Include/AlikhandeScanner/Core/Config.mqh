@@ -60,6 +60,10 @@
 #define AS_DEFAULT_PREVIEW_TTL_SECONDS      30       // [ASSUMED]
 #define AS_DEFAULT_MAX_DRIFT_POINTS         30       // [ASSUMED] symbol-specific validation needed
 #define AS_RECONCILE_GRACE_SECONDS          30       // [ASSUMED] before an unknown send is escalated
+// How long an armed intent stays confirmable. Short on purpose: the point of
+// arming is that the operator evaluated *this* plan at *this* price, and that
+// claim decays quickly.
+#define AS_ARM_TTL_SECONDS                  20       // [ASSUMED]
 
 // ---------------------------------------------------------------- news
 #define AS_NEWS_PRE_MINUTES                 30       // [ASSUMED]

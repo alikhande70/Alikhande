@@ -115,7 +115,10 @@ enum ENUM_AS_RUN_MODE
   {
    AS_MODE_ALERT_ONLY,   // scan and report; no order ever leaves the terminal
    AS_MODE_SHADOW,       // full plan + preflight, logged as if sent, never sent
-   AS_MODE_DEMO          // real OrderSend, demo accounts only
+   // Demo accounts only, AND every order requires a two-step human action
+   // (arm, then confirm). There is deliberately no mode that sends
+   // automatically: an EA that fires on its own is not supervised.
+   AS_MODE_DEMO_CONFIRM
   };
 
 // ---------------------------------------------------------------- exposure

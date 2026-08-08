@@ -27,6 +27,7 @@
 #include <AlikhandeScanner/Risk/TradeGuards.mqh>
 #include <AlikhandeScanner/Risk/AccountRiskGuard.mqh>
 #include <AlikhandeScanner/News/CalendarGate.mqh>
+#include <AlikhandeScanner/Execution/ArmedIntent.mqh>
 #include <AlikhandeScanner/Execution/ExecutionEngine.mqh>
 #include <AlikhandeScanner/UI/Dashboard.mqh>
 
@@ -73,6 +74,7 @@ AS_RiskPlanner      g_risk_planner;
 AS_TradeGuards      g_trade_guards;
 AS_AccountRiskGuard g_account_guard;
 AS_CalendarGate     g_calendar;
+AS_IntentArming     g_arming;
 AS_ExecutionEngine  g_execution;
 AS_Dashboard        g_ui;
 
@@ -84,6 +86,7 @@ AS_StructuralContext g_context[];
 AS_SignalCandidate   g_signal_cache[];
 AS_NewsVerdict       g_news_cache[];
 AS_NewsVerdict       g_news_disabled;
+AS_TradePlan         g_plan_cache[];
 datetime             g_last_alert[];
 datetime             g_bar_h4[], g_bar_h1[], g_bar_m15[], g_bar_m5[];
 
@@ -125,7 +128,7 @@ string RunModeText(const ENUM_AS_RUN_MODE mode)
      {
       case AS_MODE_ALERT_ONLY: return "ALERT-ONLY";
       case AS_MODE_SHADOW:     return "SHADOW";
-      case AS_MODE_DEMO:       return "DEMO";
+      case AS_MODE_DEMO_CONFIRM: return "DEMO-CONFIRM";
      }
    return "?";
   }
@@ -242,6 +245,7 @@ int OnInit()
    g_news_disabled.state = AS_NEWS_CLEAR;
    g_news_disabled.source = AS_NEWS_SOURCE_UNAVAILABLE;
    g_news_disabled.reason = "news gate disabled by input";
+   g_arming.Attach(g_log);
    g_calendar.Attach(g_log);
    g_calendar.ApplyRuntimePolicy(g_runtime);
    g_account_guard.Attach(g_repo, g_log);
@@ -258,6 +262,7 @@ int OnInit()
    ArrayResize(g_context, requested_count);
    ArrayResize(g_signal_cache, requested_count);
    ArrayResize(g_news_cache, requested_count);
+   ArrayResize(g_plan_cache, requested_count);
    ArrayResize(g_last_alert, requested_count);
    ArrayResize(g_bar_h4, requested_count);
    ArrayResize(g_bar_h1, requested_count);
@@ -288,6 +293,7 @@ int OnInit()
       ZeroMemory(g_context[i]);
       ZeroMemory(g_signal_cache[i]);
       ZeroMemory(g_news_cache[i]);
+      ZeroMemory(g_plan_cache[i]);
 
       // Seed the drift baseline from persisted state so a specification
       // change across a restart is still detected.
@@ -486,15 +492,56 @@ void ProcessSymbol(const int index)
       return;
 
    g_repo.SavePlan(plan);
+   g_plan_cache[index] = plan;
 
+   // SHADOW exercises the whole path without sending, so it can run
+   // unattended. DEMO_CONFIRM never sends from here: the plan is now
+   // previewed and waits for the operator to arm and then confirm it.
+   if(InpRunMode == AS_MODE_SHADOW)
+     {
+      string reason = "";
+      if(!g_execution.Submit(plan, InpRunMode, reason))
+         g_log.Info("EXECUTION_NOT_SENT", symbol, reason);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Confirmation path. Reached only from a deliberate second click on |
+//| an already-armed plan; nothing here runs on the timer.            |
+//+------------------------------------------------------------------+
+void ConfirmArmedPlan(const int index)
+  {
+   if(InpRunMode != AS_MODE_DEMO_CONFIRM)
+      return;
+   if(index < 0 || index >= ArraySize(g_plan_cache))
+      return;
+
+   AS_TradePlan plan = g_plan_cache[index];
    string reason = "";
+
+   if(!g_arming.Confirm(plan, reason))
+     {
+      g_log.Warn("CONFIRM_REJECTED", plan.symbol, reason);
+      return;
+     }
+
+   // Re-validated inside Submit against the live quote: arming is permission,
+   // not a snapshot the market is obliged to honour.
    if(!g_execution.Submit(plan, InpRunMode, reason))
-      g_log.Info("EXECUTION_NOT_SENT", symbol, reason);
+      g_log.Warn("EXECUTION_NOT_SENT", plan.symbol, reason);
+   else
+      g_log.Info("EXECUTION_SENT", plan.symbol,
+                 StringFormat("plan %s confirmed and submitted", plan.plan_id));
   }
 
 //+------------------------------------------------------------------+
 void RefreshActiveTab()
   {
+   const AS_ArmedIntent intent = g_arming.Current();
+   g_ui.SetArmState(g_arming.IsArmed(),
+                    g_arming.IsArmed() ? (int)(intent.expires_at - TimeCurrent()) : 0,
+                    intent.symbol);
+
    const ENUM_AS_TAB tab = g_ui.ActiveTab();
    if(tab == AS_TAB_OVERVIEW)
       return;
@@ -574,6 +621,8 @@ void OnTimer()
 
    // Reconciliation is time-based, not event-based: transaction events can be
    // dropped when the terminal queue overflows, so nothing may depend on one.
+   g_arming.Sweep();
+
    if(TimeCurrent() - g_last_reconcile >= AS_RECONCILE_GRACE_SECONDS)
      {
       g_execution.Reconcile();
@@ -586,10 +635,60 @@ void OnTimer()
   }
 
 //+------------------------------------------------------------------+
+int SelectedIndex()
+  {
+   const string selected = g_ui.SelectedSymbol();
+   if(selected == "")
+      return -1;
+   for(int i = 0; i < ArraySize(g_symbols); i++)
+      if(g_symbols[i] == selected)
+         return i;
+   return -1;
+  }
+
+//+------------------------------------------------------------------+
+void ArmSelectedPlan()
+  {
+   if(InpRunMode != AS_MODE_DEMO_CONFIRM)
+     {
+      g_log.Info("ARM_IGNORED", "", "arming only applies in DEMO-CONFIRM mode");
+      return;
+     }
+
+   const int index = SelectedIndex();
+   if(index < 0)
+      return;
+
+   if(!g_plan_cache[index].valid)
+     {
+      g_log.Info("ARM_REJECTED", g_symbols[index], "no valid plan to arm");
+      return;
+     }
+   g_arming.Arm(g_plan_cache[index]);
+  }
+
+//+------------------------------------------------------------------+
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
   {
    if(id != CHARTEVENT_OBJECT_CLICK)
       return;
+
+   // Arm and Confirm are handled before tab/row routing so a click on either
+   // can never also be interpreted as a navigation action.
+   if(g_ui.IsArmClick(sparam))
+     {
+      ArmSelectedPlan();
+      RefreshActiveTab();
+      ChartRedraw();
+      return;
+     }
+   if(g_ui.IsConfirmClick(sparam))
+     {
+      ConfirmArmedPlan(SelectedIndex());
+      RefreshActiveTab();
+      ChartRedraw();
+      return;
+     }
 
    int row = -1;
    if(!g_ui.HandleClick(sparam, row))

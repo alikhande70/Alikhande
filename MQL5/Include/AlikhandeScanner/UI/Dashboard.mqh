@@ -188,6 +188,17 @@ public:
                 m_x + m_width - 62, BodyTop() + (i + 1) * AS_UI_ROW_HEIGHT + 2,
                 52, AS_UI_ROW_HEIGHT - 3, "Chart", false);
 
+      // Arm and Confirm are deliberately separate objects: no single click may
+      // send an order. Both live on the Detail tab and are hidden elsewhere.
+      Button(Name("ARM"), m_x + AS_UI_PADDING, m_y + height - AS_UI_ROW_HEIGHT - AS_UI_PADDING,
+             86, AS_UI_ROW_HEIGHT, "Arm", false);
+      Button(Name("CONFIRM"), m_x + AS_UI_PADDING + 92,
+             m_y + height - AS_UI_ROW_HEIGHT - AS_UI_PADDING,
+             86, AS_UI_ROW_HEIGHT, "Confirm", false);
+      Text(Name("ARMSTATE"), m_x + AS_UI_PADDING + 190,
+           m_y + height - AS_UI_ROW_HEIGHT - AS_UI_PADDING + 2, "",
+           AS_UI_COLOR_MUTED, AS_UI_FONT_MONO, AS_UI_FONT_SIZE_ROW);
+
       SwitchTab(m_active);
       ChartRedraw(0);
      }
@@ -228,6 +239,10 @@ public:
          if(overview) { Show(row); Show(sel); }
          else         { Hide(row); Hide(sel); }
         }
+
+      const bool detail = (tab == AS_TAB_DETAIL);
+      if(detail) { Show(Name("ARM")); Show(Name("CONFIRM")); Show(Name("ARMSTATE")); }
+      else       { Hide(Name("ARM")); Hide(Name("CONFIRM")); Hide(Name("ARMSTATE")); }
 
       const int body_lines = 14;
       for(int i = 0; i < body_lines; i++)
@@ -426,4 +441,27 @@ public:
      }
 
    void SetSelectedSymbol(const string symbol) { m_selected_symbol = symbol; }
+
+   // Reflects the armed intent. Confirm is only styled as live while an intent
+   // is actually armed, so the control cannot suggest it will do something it
+   // will refuse to do.
+   void SetArmState(const bool armed, const int seconds_left, const string plan_symbol)
+     {
+      Text(Name("ARMSTATE"), m_x + AS_UI_PADDING + 190,
+           m_y + 6, "", AS_UI_COLOR_MUTED, AS_UI_FONT_MONO, AS_UI_FONT_SIZE_ROW);
+      ObjectSetString(0, Name("ARMSTATE"), OBJPROP_TEXT,
+                      armed ? StringFormat("ARMED %s  %ds left", plan_symbol, seconds_left)
+                            : "not armed");
+      ObjectSetInteger(0, Name("ARMSTATE"), OBJPROP_COLOR,
+                       armed ? AS_UI_COLOR_WARN : AS_UI_COLOR_MUTED);
+      ObjectSetInteger(0, Name("CONFIRM"), OBJPROP_BGCOLOR,
+                       armed ? AS_UI_COLOR_SHORT : AS_UI_COLOR_TAB_OFF);
+      ObjectSetInteger(0, Name("CONFIRM"), OBJPROP_COLOR,
+                       armed ? clrWhite : AS_UI_COLOR_MUTED);
+      ObjectSetInteger(0, Name("CONFIRM"), OBJPROP_STATE, false);
+      ObjectSetInteger(0, Name("ARM"), OBJPROP_STATE, false);
+     }
+
+   bool IsArmClick(const string object_name) const { return object_name == Name("ARM"); }
+   bool IsConfirmClick(const string object_name) const { return object_name == Name("CONFIRM"); }
   };

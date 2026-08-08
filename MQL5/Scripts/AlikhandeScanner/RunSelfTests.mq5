@@ -10,6 +10,7 @@
 #include <AlikhandeScanner/Risk/PortfolioRisk.mqh>
 #include <AlikhandeScanner/Core/Hash.mqh>
 #include <AlikhandeScanner/News/CalendarGate.mqh>
+#include <AlikhandeScanner/Execution/ArmedIntent.mqh>
 
 //+------------------------------------------------------------------+
 void TestLifecycle(AS_TestRunner &t)
@@ -265,6 +266,61 @@ void TestNewsGate(AS_TestRunner &t)
   }
 
 //+------------------------------------------------------------------+
+void TestArming(AS_TestRunner &t)
+  {
+   t.Suite("two-step arming");
+
+   AS_IntentArming arming;
+   arming.SetTtl(60);
+
+   AS_TradePlan plan;
+   ZeroMemory(plan);
+   plan.valid = true;
+   plan.plan_id = "SIG_A_PLAN";
+   plan.symbol = "EURUSD";
+   plan.lot_size = 0.10;
+
+   string reason = "";
+
+   // Nothing may execute without an arm first.
+   t.Check(!arming.IsArmed(), "starts disarmed");
+   t.Check(!arming.Confirm(plan, reason), "confirm without arm is refused");
+   t.Check(reason == "NO_ARMED_INTENT", "refusal names the missing arm");
+
+   t.Check(arming.Arm(plan), "valid plan arms");
+   t.Check(arming.IsArmed(), "intent reads armed");
+   t.Check(arming.Confirm(plan, reason), "confirm after arm succeeds");
+   t.Check(!arming.IsArmed(), "confirming consumes the intent");
+   t.Check(!arming.Confirm(plan, reason), "the same arm cannot fire twice");
+
+   // A plan replaced underneath the operator must not execute: they armed
+   // something they can no longer see.
+   AS_TradePlan superseded;
+   ZeroMemory(superseded);
+   superseded.valid = true;
+   superseded.plan_id = "SIG_B_PLAN";
+   superseded.symbol = "EURUSD";
+
+   arming.Arm(plan);
+   t.Check(!arming.Confirm(superseded, reason), "superseded plan is refused");
+   t.Check(reason == "ARMED_PLAN_SUPERSEDED", "refusal names the supersession");
+   t.Check(!arming.IsArmed(), "a refused confirm disarms rather than lingering");
+
+   // An invalid plan cannot be armed at all.
+   AS_TradePlan invalid;
+   ZeroMemory(invalid);
+   invalid.valid = false;
+   t.Check(!arming.Arm(invalid), "invalid plan cannot be armed");
+
+   // Expiry: arming is permission that decays.
+   AS_IntentArming short_lived;
+   short_lived.SetTtl(5);          // clamped minimum
+   short_lived.Arm(plan);
+   t.Check(short_lived.IsArmed(), "freshly armed intent is live");
+   t.Check(!short_lived.Sweep(), "sweep does not expire a live intent");
+  }
+
+//+------------------------------------------------------------------+
 void TestHash(AS_TestRunner &t)
   {
    t.Suite("hashing");
@@ -295,6 +351,7 @@ void OnStart()
    TestDirectionalBonus(runner);
    TestExposure(runner);
    TestNewsGate(runner);
+   TestArming(runner);
    TestHash(runner);
 
    if(runner.Summary())
