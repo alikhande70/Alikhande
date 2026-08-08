@@ -1,13 +1,32 @@
 #pragma once
 #include "../Domain/Models.mqh"
 
+struct AS_ZoneAtrHandle {
+   string symbol;
+   ENUM_TIMEFRAMES timeframe;
+   int atr;
+};
+
 class AS_ZoneEngine {
+private:
+   AS_ZoneAtrHandle m_handles[];
+
+   int AtrHandle(const string symbol,const ENUM_TIMEFRAMES tf){
+      for(int i=0;i<ArraySize(m_handles);i++)if(m_handles[i].symbol==symbol&&m_handles[i].timeframe==tf)return m_handles[i].atr;
+      int handle=iATR(symbol,tf,14);if(handle==INVALID_HANDLE)return INVALID_HANDLE;
+      AS_ZoneAtrHandle item;item.symbol=symbol;item.timeframe=tf;item.atr=handle;
+      int n=ArraySize(m_handles);ArrayResize(m_handles,n+1);m_handles[n]=item;return handle;
+   }
+
+   void ReleaseAll(){for(int i=0;i<ArraySize(m_handles);i++)if(m_handles[i].atr!=INVALID_HANDLE)IndicatorRelease(m_handles[i].atr);ArrayResize(m_handles,0);}
 public:
+   ~AS_ZoneEngine(void){ReleaseAll();}
+
    int Build(const string symbol,const ENUM_TIMEFRAMES tf,const int bars,const int left,const int right,const double atr_fraction,AS_Zone &zones[]) {
       ArrayResize(zones,0); if(bars<50||left<1||right<1)return 0;
       MqlRates r[]; ArraySetAsSeries(r,true); if(CopyRates(symbol,tf,1,bars,r)!=bars)return 0;
-      int ha=iATR(symbol,tf,14); if(ha==INVALID_HANDLE)return 0; double a[];ArrayResize(a,bars);ArraySetAsSeries(a,true);
-      if(CopyBuffer(ha,0,1,bars,a)!=bars){IndicatorRelease(ha);return 0;} IndicatorRelease(ha);
+      int ha=AtrHandle(symbol,tf); if(ha==INVALID_HANDLE)return 0; double a[];ArrayResize(a,bars);ArraySetAsSeries(a,true);
+      if(BarsCalculated(ha)<bars||CopyBuffer(ha,0,1,bars,a)!=bars)return 0;
       AS_Zone pivots[]; int n=0;
       for(int i=right;i<bars-left;i++) {
          bool hi=true,lo=true;
