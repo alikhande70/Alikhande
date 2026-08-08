@@ -1,0 +1,6 @@
+#pragma once
+#include "../Domain/Models.mqh"
+class AS_ChartOverlay {
+private: string m_prefix; void HLine(const long chart_id,const string name,const double price,const color c,const ENUM_LINE_STYLE style,const int width){string n=m_prefix+name;if(ObjectFind(chart_id,n)<0)ObjectCreate(chart_id,n,OBJ_HLINE,0,0,price);ObjectSetDouble(chart_id,n,OBJPROP_PRICE,price);ObjectSetInteger(chart_id,n,OBJPROP_COLOR,c);ObjectSetInteger(chart_id,n,OBJPROP_STYLE,style);ObjectSetInteger(chart_id,n,OBJPROP_WIDTH,width);ObjectSetInteger(chart_id,n,OBJPROP_SELECTABLE,false);ObjectSetInteger(chart_id,n,OBJPROP_HIDDEN,true);}
+public: AS_ChartOverlay(void){m_prefix="ALKSCN_OVR_";} void Clear(const long chart_id){ObjectsDeleteAll(chart_id,m_prefix);} void Draw(const long chart_id,const AS_SignalCandidate &s){if(chart_id<=0||s.symbol=="")return;Clear(chart_id);if(s.nearest_support>0)HLine(chart_id,"SUPPORT",s.nearest_support,C'70,170,105',STYLE_DOT,1);if(s.nearest_resistance>0)HLine(chart_id,"RESISTANCE",s.nearest_resistance,C'200,100,90',STYLE_DOT,1);if(s.preferred_entry>0)HLine(chart_id,"ENTRY",s.preferred_entry,C'80,150,220',STYLE_SOLID,1);if(s.stop_loss>0)HLine(chart_id,"SL",s.stop_loss,C'220,80,80',STYLE_SOLID,2);if(s.take_profit>0)HLine(chart_id,"TP",s.take_profit,C'80,200,120',STYLE_SOLID,2);ChartRedraw(chart_id);}
+};
