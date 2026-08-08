@@ -92,16 +92,18 @@ for rel in ['Analysis/TrendEngine.mqh','Analysis/ZoneEngine.mqh']:
     if any(fn in t for fn in ['iMA(','iADX(','iATR(']) and 'm_handles' not in t: errors.append('UNCACHED_INDICATOR_HANDLE '+rel)
 
 execution=(INC/'Execution'/'ExecutionEngine.mqh').read_text(encoding='utf-8',errors='replace')
-if 'm_current.state=AS_EXEC_UNKNOWN;m_current.terminal=false' not in re.sub(r'\s+','',execution): errors.append('UNKNOWN_EXECUTION_MAY_UNBLOCK_SEND')
+execution_compact=re.sub(r'\s+','',execution)
+if 'm_current.state=AS_EXEC_UNKNOWN;m_current.terminal=false' not in execution_compact: errors.append('UNKNOWN_EXECUTION_MAY_UNBLOCK_SEND')
+if 'm_current.created_at=now' not in execution_compact: errors.append('EXECUTION_CREATED_AT_NOT_PERSISTED')
 reconciler=(INC/'Execution'/'ReconcilerV13.mqh').read_text(encoding='utf-8',errors='replace')
-for needle in ['PositionsTotal()','OrdersTotal()','HistoryDealsTotal()','HistoryOrdersTotal()','ORDER_POSITION_ID','DEAL_ORDER']:
+for needle in ['PositionsTotal()','OrdersTotal()','HistoryDealsTotal()','HistoryOrdersTotal()','ORDER_POSITION_ID','DEAL_ORDER','current.created_at']:
     if needle not in reconciler: errors.append('RECONCILIATION_SOURCE_MISSING '+needle)
 
 outcome=(INC/'Signals'/'OutcomeEngine.mqh').read_text(encoding='utf-8',errors='replace')
-for needle in ['UpdateShadow','SyncDemoExecution','AS_OUTCOME_SOURCE_SHADOW','AS_OUTCOME_SOURCE_DEMO','DEAL_POSITION_ID','DEAL_REASON_TP','DEAL_REASON_SL']:
+for needle in ['UpdateShadow','SyncDemoExecution','RecoverTerminalWithoutOutcome','AS_OUTCOME_SOURCE_SHADOW','AS_OUTCOME_SOURCE_DEMO','DEAL_POSITION_ID','DEAL_REASON_TP','DEAL_REASON_SL','x.created_at']:
     if needle not in outcome: errors.append('OUTCOME_EVIDENCE_PATH_MISSING '+needle)
 repo=(INC/'Persistence'/'Repositories.mqh').read_text(encoding='utf-8',errors='replace')
-for needle in ['evidence_source','rule_version','scoring_version','parameter_hash','broker_spec_hash','execution_id']:
+for needle in ['evidence_source','rule_version','scoring_version','parameter_hash','broker_spec_hash','execution_id','created_at','LoadLatestExecutionWithoutOutcome']:
     if needle not in repo: errors.append('OUTCOME_PROVENANCE_MISSING '+needle)
 read_models=(INC/'Persistence'/'ReadModels.mqh').read_text(encoding='utf-8',errors='replace')
 for needle in ['evidence_source=?3','rule_version=?4','scoring_version=?5','parameter_hash=?6']:
@@ -109,10 +111,11 @@ for needle in ['evidence_source=?3','rule_version=?4','scoring_version=?5','para
 if 'g_outcomes.UpdateShadow' not in ea_text or 'g_outcomes.SyncDemoExecution' not in ea_text: errors.append('OUTCOME_ENGINE_NOT_WIRED_TO_EA')
 if 's.signal_id=AS_Fnv1a(s.signal_id+"|"+g_parameter_hash+"|"+s.broker_spec_hash)' not in compact: errors.append('SIGNAL_EVIDENCE_IDENTITY_NOT_SCOPED')
 version=(INC/'Core'/'VersionInfo.mqh').read_text(encoding='utf-8',errors='replace')
-if '#define AS_SCHEMA_VERSION 6' not in version: errors.append('OUTCOME_SCHEMA_V6_NOT_ACTIVE')
+if '#define AS_SCHEMA_VERSION 7' not in version: errors.append('SCHEMA_V7_NOT_ACTIVE')
 
 database=(INC/'Persistence'/'Database.mqh').read_text(encoding='utf-8',errors='replace')
 if 'Migrate5To6' not in database or 'ix_outcomes_scope' not in database: errors.append('OUTCOME_SCHEMA_MIGRATION_MISSING')
+if 'Migrate6To7' not in database or 'ALTER TABLE executions ADD COLUMN created_at' not in database: errors.append('EXECUTION_TIMESTAMP_MIGRATION_MISSING')
 
 print('STATIC GATE')
 print('INFO files=',len(files))
@@ -121,4 +124,4 @@ print('INFO reachable_modules=',len(all_modules & reachable),'/',len(all_modules
 if errors:
     for e in errors: print('FAIL',e)
     sys.exit(1)
-print('PASS include graph / reachability / live-signal path / indicator cache / execution recovery / evidence integrity / constants / safety policy')
+print('PASS include graph / reachability / live-signal path / indicator cache / execution recovery / evidence integrity / migrations / constants / safety policy')
