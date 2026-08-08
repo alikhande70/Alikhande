@@ -21,7 +21,7 @@ private:
    }
 
    int BestAnchor(const AS_Zone &zones[],const string symbol,const ENUM_AS_ZONE_KIND kind,const double price,const double atr,ENUM_AS_ZONE_RELATION &relation,double &distance) const {
-      int best=-1;distance=DBL_MAX;relation=AS_ZONE_UNAVAILABLE;
+      int best=-1;distance=1.0e100;relation=AS_ZONE_UNAVAILABLE;
       for(int i=0;i<ArraySize(zones);i++){
          if(!zones[i].valid||zones[i].broken||zones[i].kind!=kind)continue;
          AS_TypedZone typed;ToTyped(symbol,zones[i],typed);
@@ -82,9 +82,11 @@ public:
       if(h1.direction_score<=-20&&near_supply&&m15.direction_score<20&&m5.direction_score<=-15)short_setup=AS_TREND_PULLBACK;
       else if(h1.direction_score<45&&near_supply&&m15.direction_score<=0&&m5.direction_score<=-20)short_setup=AS_RESISTANCE_REJECTION;
 
-      AS_Zone empty;ZeroMemory(empty);string long_explain="",short_explain="";
-      s.long_score=Score(AS_DIR_LONG,h4,h1,m15,m5,(di>=0?zones[di]:empty),long_setup,snap,long_explain);
-      s.short_score=Score(AS_DIR_SHORT,h4,h1,m15,m5,(si>=0?zones[si]:empty),short_setup,snap,short_explain);
+      AS_Zone empty;ZeroMemory(empty);AS_Zone long_anchor=empty;AS_Zone short_anchor=empty;
+      if(di>=0)long_anchor=zones[di];if(si>=0)short_anchor=zones[si];
+      string long_explain="",short_explain="";
+      s.long_score=Score(AS_DIR_LONG,h4,h1,m15,m5,long_anchor,long_setup,snap,long_explain);
+      s.short_score=Score(AS_DIR_SHORT,h4,h1,m15,m5,short_anchor,short_setup,snap,short_explain);
 
       bool hard=false;string codes="";
       if(!regime.tradable){hard=true;codes+="REGIME_NOT_READY;";}
