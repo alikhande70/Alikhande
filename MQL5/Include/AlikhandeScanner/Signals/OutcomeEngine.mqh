@@ -1,5 +1,6 @@
 #pragma once
 #include "../Domain/Models.mqh"
+#include "../Core/Config.mqh"
 #include "../Persistence/Repositories.mqh"
 
 class AS_OutcomeEngine {
@@ -12,9 +13,18 @@ private:
       m_repo.UpdateSignalState(s.signal_id,state);
       return m_repo.SaveOutcome(s,state,source,execution_id,exit_price,r_multiple,notes);
    }
+
+   void RecoverTerminalWithoutOutcome(){
+      if(m_repo==NULL)return;
+      for(int attempt=0;attempt<16;attempt++){
+         AS_ExecutionRecord x;if(!m_repo.LoadLatestExecutionWithoutOutcome(x))return;
+         AS_SignalCandidate s;if(!m_repo.LoadSignal(x.signal_id,s))return;
+         if(!SyncDemoExecution(x,s,AS_MAGIC))return;
+      }
+   }
 public:
    AS_OutcomeEngine(void){m_repo=NULL;}
-   void Attach(AS_Repositories &repo){m_repo=&repo;}
+   void Attach(AS_Repositories &repo){m_repo=&repo;RecoverTerminalWithoutOutcome();}
 
    bool UpdateShadow(AS_SignalCandidate &s){
       if(s.signal_id==""||s.state!=AS_SIGNAL_ACTIVE)return false;
