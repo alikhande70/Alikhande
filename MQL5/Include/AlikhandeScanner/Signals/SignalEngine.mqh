@@ -155,8 +155,29 @@ public:
       s.nearest_support    = has_demand ? ctx.zones[demand_index].center : 0.0;
       s.nearest_resistance = has_supply ? ctx.zones[supply_index].center : 0.0;
 
-      const ENUM_AS_SETUP_TYPE long_setup  = QualifyLong(ctx, has_demand);
-      const ENUM_AS_SETUP_TYPE short_setup = QualifyShort(ctx, has_supply);
+      // Proximity alone is not interaction. A zone 1.4 ATR away is "near" by
+      // the search radius but price is not engaging with it, and a pullback
+      // setup that fires on mere nearness is describing a different trade from
+      // the one it claims. The relation makes the distinction explicit and the
+      // reason string records which case fired.
+      const ENUM_AS_ZONE_RELATION demand_relation =
+         has_demand ? AS_ZoneRelation(ctx.zones[demand_index], snap.bid)
+                    : AS_ZONE_REL_UNAVAILABLE;
+      const ENUM_AS_ZONE_RELATION supply_relation =
+         has_supply ? AS_ZoneRelation(ctx.zones[supply_index], snap.ask)
+                    : AS_ZONE_REL_UNAVAILABLE;
+
+      s.demand_relation = demand_relation;
+      s.supply_relation = supply_relation;
+
+      // A zone may only anchor a trade in the direction it supports.
+      const bool demand_anchors = has_demand
+                                  && AS_ZoneAnchors(ctx.zones[demand_index], AS_DIR_LONG);
+      const bool supply_anchors = has_supply
+                                  && AS_ZoneAnchors(ctx.zones[supply_index], AS_DIR_SHORT);
+
+      const ENUM_AS_SETUP_TYPE long_setup  = QualifyLong(ctx, demand_anchors);
+      const ENUM_AS_SETUP_TYPE short_setup = QualifyShort(ctx, supply_anchors);
 
       // ---- rule score -----------------------------------------------------
       // This is a RULE SCORE, not a probability. It is a weighted sum of
@@ -190,15 +211,19 @@ public:
       if(short_setup != AS_SETUP_NONE)
         { short_score += 25.0; AddReason(short_reasons, "SETUP", 25.0); }
 
-      if(has_demand)
+      if(demand_anchors)
         {
          const double bonus = MathMin(15.0, ctx.zones[demand_index].quality * 0.15);
          long_score += bonus; AddReason(long_reasons, "ZONE_QUALITY", bonus);
+         if(demand_relation == AS_ZONE_REL_INSIDE)
+           { long_score += 5.0; AddReason(long_reasons, "ZONE_INSIDE", 5.0); }
         }
-      if(has_supply)
+      if(supply_anchors)
         {
          const double bonus = MathMin(15.0, ctx.zones[supply_index].quality * 0.15);
          short_score += bonus; AddReason(short_reasons, "ZONE_QUALITY", bonus);
+         if(supply_relation == AS_ZONE_REL_INSIDE)
+           { short_score += 5.0; AddReason(short_reasons, "ZONE_INSIDE", 5.0); }
         }
 
       if(ctx.m5.direction_score >= 15.0)

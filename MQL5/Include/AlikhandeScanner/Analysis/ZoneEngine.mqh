@@ -179,10 +179,54 @@ bool AS_FindNearestZone(const AS_Zone &zones[], const ENUM_AS_ZONE_TYPE type,
    return index >= 0;
   }
 
+// Where price sits relative to a zone.
+//
+// An explicit three-way relation rather than a pair of booleans. The boolean
+// form quietly conflates two different situations — "price is not inside the
+// zone" and "there is no usable zone" — and that conflation is what produced
+// v1.1.0's blindness at the entry trigger. Making UNAVAILABLE its own answer
+// forces every caller to decide what to do about it.
+ENUM_AS_ZONE_RELATION AS_ZoneRelation(const AS_Zone &zone, const double price)
+  {
+   if(!zone.valid || zone.broken || zone.low <= 0.0 || zone.high <= 0.0
+      || zone.low > zone.high)
+      return AS_ZONE_REL_UNAVAILABLE;
+   if(price < zone.low)
+      return AS_ZONE_REL_BELOW;
+   if(price > zone.high)
+      return AS_ZONE_REL_ABOVE;
+   return AS_ZONE_REL_INSIDE;
+  }
+
 // True when `price` sits inside the zone's band.
 bool AS_PriceInsideZone(const AS_Zone &zone, const double price)
   {
-   return zone.valid && price >= zone.low && price <= zone.high;
+   return AS_ZoneRelation(zone, price) == AS_ZONE_REL_INSIDE;
+  }
+
+// A zone can only anchor a trade in the direction it supports: demand anchors
+// longs, supply anchors shorts. Stated once here rather than re-derived at each
+// call site, where getting it backwards is silent and expensive.
+bool AS_ZoneAnchors(const AS_Zone &zone, const ENUM_AS_DIRECTION direction)
+  {
+   if(!zone.valid || zone.broken)
+      return false;
+   if(direction == AS_DIR_LONG)
+      return zone.type == AS_ZONE_DEMAND;
+   if(direction == AS_DIR_SHORT)
+      return zone.type == AS_ZONE_SUPPLY;
+   return false;
+  }
+
+string AS_ZoneRelationName(const ENUM_AS_ZONE_RELATION relation)
+  {
+   switch(relation)
+     {
+      case AS_ZONE_REL_BELOW:  return "BELOW";
+      case AS_ZONE_REL_INSIDE: return "INSIDE";
+      case AS_ZONE_REL_ABOVE:  return "ABOVE";
+     }
+   return "UNAVAILABLE";
   }
 
 // Nearest zone of `type` strictly beyond `price` in the given direction —

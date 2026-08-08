@@ -115,10 +115,38 @@ void TestZoneLookups(AS_TestRunner &t)
    t.Check(!AS_FindZoneBeyond(zones, AS_ZONE_SUPPLY, 1.2000, true, index),
            "no zone above an extreme price");
 
+   // The three-way relation. UNAVAILABLE must be distinguishable from
+   // "outside the band" — collapsing them is what made v1.1.0 blind.
+   t.Check(AS_ZoneRelation(zones[0], 1.0960) == AS_ZONE_REL_INSIDE, "inside detected");
+   t.Check(AS_ZoneRelation(zones[0], 1.0900) == AS_ZONE_REL_BELOW, "below detected");
+   t.Check(AS_ZoneRelation(zones[0], 1.1000) == AS_ZONE_REL_ABOVE, "above detected");
+
+   AS_Zone malformed;
+   ZeroMemory(malformed);
+   malformed.valid = true;
+   malformed.low = 1.10; malformed.high = 1.09;   // inverted band
+   t.Check(AS_ZoneRelation(malformed, 1.095) == AS_ZONE_REL_UNAVAILABLE,
+           "inverted band reports UNAVAILABLE, not a position");
+
+   AS_Zone invalid_zone;
+   ZeroMemory(invalid_zone);
+   t.Check(AS_ZoneRelation(invalid_zone, 1.0) == AS_ZONE_REL_UNAVAILABLE,
+           "invalid zone reports UNAVAILABLE");
+
+   // Anchoring direction: demand anchors longs, supply anchors shorts.
+   t.Check(AS_ZoneAnchors(zones[0], AS_DIR_LONG), "demand anchors a long");
+   t.Check(!AS_ZoneAnchors(zones[0], AS_DIR_SHORT), "demand does not anchor a short");
+   t.Check(AS_ZoneAnchors(zones[1], AS_DIR_SHORT), "supply anchors a short");
+   t.Check(!AS_ZoneAnchors(zones[1], AS_DIR_LONG), "supply does not anchor a long");
+   t.Check(!AS_ZoneAnchors(zones[0], AS_DIR_NONE), "no direction anchors nothing");
+
    // A broken zone must never be returned.
    zones[0].broken = true;
    t.Check(!(AS_FindNearestZone(zones, AS_ZONE_DEMAND, 1.0960, 0.0005, index) && index == 0),
            "broken zone is excluded");
+   t.Check(AS_ZoneRelation(zones[0], 1.0960) == AS_ZONE_REL_UNAVAILABLE,
+           "broken zone reports UNAVAILABLE even with price inside it");
+   t.Check(!AS_ZoneAnchors(zones[0], AS_DIR_LONG), "broken zone cannot anchor");
   }
 
 //+------------------------------------------------------------------+

@@ -3,6 +3,7 @@
 #include "../Domain/Models.mqh"
 #include "../Core/VersionInfo.mqh"
 #include "../Analysis/RegimeEngine.mqh"
+#include "../Analysis/ZoneEngine.mqh"
 #include "../Statistics/Statistics.mqh"
 #include "../News/CalendarGate.mqh"
 
@@ -311,6 +312,12 @@ public:
       BodyLine(line++, "", AS_UI_COLOR_TEXT);
       BodyLine(line++, StringFormat("Support %-12.5f  Resistance %.5f",
                                     s.nearest_support, s.nearest_resistance), AS_UI_COLOR_MUTED);
+      // "near support" is ambiguous; the relation says whether price is
+      // actually engaging with the zone or merely within search range of it.
+      BodyLine(line++, StringFormat("Price is %s demand, %s supply",
+                                    AS_ZoneRelationName(s.demand_relation),
+                                    AS_ZoneRelationName(s.supply_relation)),
+               AS_UI_COLOR_MUTED);
       BodyLine(line++, StringFormat("Entry %-14.5f  Stop %-14.5f  Target %.5f",
                                     s.preferred_entry, s.stop_loss, s.take_profit),
                DirectionColor(s.direction));

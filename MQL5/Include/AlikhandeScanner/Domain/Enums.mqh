@@ -41,6 +41,24 @@ enum ENUM_AS_ZONE_TYPE
    AS_ZONE_DEMAND    // formed by swing lows
   };
 
+// Where price sits relative to a zone.
+//
+// An explicit three-way relation rather than a pair of booleans. The boolean
+// form quietly conflates two different situations — "price is not inside the
+// zone" and "there is no usable zone" — and that conflation is what produced
+// v1.1.0's blindness at the entry trigger. Making UNAVAILABLE its own answer
+// forces every caller to decide what to do about it.
+//
+// Lives in Domain rather than beside the zone engine because Models carries it
+// on the signal candidate, and Domain must never depend upward on Analysis.
+enum ENUM_AS_ZONE_RELATION
+  {
+   AS_ZONE_REL_UNAVAILABLE,  // no usable zone (invalid, broken, malformed)
+   AS_ZONE_REL_BELOW,        // price is below the band
+   AS_ZONE_REL_INSIDE,       // price is within the band — the interaction case
+   AS_ZONE_REL_ABOVE         // price is above the band
+  };
+
 enum ENUM_AS_SETUP_TYPE
   {
    AS_SETUP_NONE,

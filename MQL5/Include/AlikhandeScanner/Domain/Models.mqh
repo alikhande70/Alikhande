@@ -102,6 +102,10 @@ struct AS_SignalCandidate
    double               take_profit;
    double               nearest_support;
    double               nearest_resistance;
+   // Where price sits relative to the anchoring zones, so the panel can say
+   // "inside demand" rather than the ambiguous "near support".
+   ENUM_AS_ZONE_RELATION demand_relation;
+   ENUM_AS_ZONE_RELATION supply_relation;
 
    double               long_score;      // rule score, NOT a probability
    double               short_score;
