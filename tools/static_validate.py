@@ -43,6 +43,8 @@ if submit!=['MQL5/Include/AlikhandeScanner/Execution/ExecutionEngine.mqh']:
 
 sig=(INC/'Signals'/'SignalEngine.mqh').read_text()
 if 'has_historical_estimate=false' not in sig: errors.append('PROBABILITY_GUARD_MISSING')
+if 'LiveValidatorV13.mqh' not in sig or 'ZoneSemanticsV13.mqh' not in sig or 'ExplainableScoringV13.mqh' not in sig:
+    errors.append('PRODUCTION_SIGNAL_V13_NOT_WIRED')
 
 for rel in [
     'MQL5/Include/AlikhandeScanner/Core/SignalRegistry.mqh',
@@ -93,6 +95,22 @@ for name in ['g_last_alert','g_bar_h4','g_bar_h1','g_bar_m15','g_bar_m5']:
     if f'ArrayResize({name},' in ea_text and f'ArrayInitialize({name},' not in ea_text:
         errors.append(f'UNINITIALIZED_RUNTIME_ARRAY {name}')
 
+# Stale-signal regression guard: signal evaluation must not be gated by a
+# closed-bar-change disjunction. Closed bars update structural inputs; the live
+# validator must still run every scan pass.
+compact=re.sub(r'\s+','',ea_text)
+if 'c4||c1||c15||c5' in compact and 'g_signal_engine.Evaluate' in compact:
+    errors.append('STALE_SIGNAL_BAR_GATED_EVALUATION')
+if 'g_cached_signal[i]=s;' not in compact:
+    errors.append('LIVE_SIGNAL_CACHE_NOT_REFRESHED')
+
+# Indicator handles used by production analysis must be retained in a cache;
+# repeated create/release cycles are forbidden in the scanner hot path.
+for rel in ['Analysis/TrendEngine.mqh','Analysis/ZoneEngine.mqh']:
+    p=INC/rel;t=p.read_text(encoding='utf-8',errors='replace')
+    if any(fn in t for fn in ['iMA(','iADX(','iATR(']) and 'm_handles' not in t:
+        errors.append('UNCACHED_INDICATOR_HANDLE '+rel)
+
 print('STATIC GATE')
 print('INFO files=',len(files))
 print('INFO lines=',sum(len(t.splitlines()) for t in texts.values()))
@@ -100,4 +118,4 @@ print('INFO reachable_modules=',len(all_modules & reachable),'/',len(all_modules
 if errors:
     for e in errors: print('FAIL',e)
     sys.exit(1)
-print('PASS include graph / reachability / brace balance / constants / architecture boundaries / safety policy')
+print('PASS include graph / reachability / live-signal path / indicator cache / constants / architecture boundaries / safety policy')
