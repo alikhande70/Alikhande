@@ -32,6 +32,13 @@ $targets = @(
   "Scripts\AlikhandeScanner\SmokeDomain.mq5",
   "Scripts\AlikhandeScanner\SymbolDiscovery.mq5",
   "Scripts\AlikhandeScanner\SymbolSpec.mq5",
+  "Scripts\AlikhandeScanner\Tests\Phase1RuntimeSelfTests.mq5",
+  "Scripts\AlikhandeScanner\Tests\Phase2ZoneSignalSelfTests.mq5",
+  "Scripts\AlikhandeScanner\Tests\Phase3ScoringLifecycleSelfTests.mq5",
+  "Scripts\AlikhandeScanner\Tests\Phase4PersistenceSelfTests.mq5",
+  "Scripts\AlikhandeScanner\Tests\Phase5RiskSelfTests.mq5",
+  "Scripts\AlikhandeScanner\Tests\Phase6ExecutionSelfTests.mq5",
+  "Scripts\AlikhandeScanner\Tests\Phase7CalendarUiSelfTests.mq5",
   "Experts\AlikhandeScanner\AlikhandeScanner.mq5"
 )
 
@@ -50,4 +57,4 @@ foreach ($relative in $targets) {
 }
 
 if ($failed) { throw "MetaEditor compile gate failed. Inspect artifacts/metaeditor/*.log" }
-Write-Host "PASS: all Alikhande MetaEditor targets compiled with 0 errors, 0 warnings"
+Write-Host "PASS: all Alikhande v1.3 MetaEditor targets compiled with 0 errors, 0 warnings"
