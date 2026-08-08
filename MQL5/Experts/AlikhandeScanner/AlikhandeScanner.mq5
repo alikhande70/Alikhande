@@ -112,6 +112,7 @@ bool IsManagedChart(const long cid){return ObjectFind(cid,AS_MANAGED_CHART_MARKE
 long FindExistingChart(const string symbol,const ENUM_TIMEFRAMES tf,const bool managed_only){for(long cid=ChartFirst();cid>=0;cid=ChartNext(cid)){if(ChartSymbol(cid)==symbol&&ChartPeriod(cid)==tf){if(!managed_only||IsManagedChart(cid))return cid;}}return -1;}
 void OpenManagedChart(const string symbol,const ENUM_TIMEFRAMES tf){long cid=-1;if(InpChartReuseMode==AS_MANAGED_ONLY)cid=FindExistingChart(symbol,tf,true);else if(InpChartReuseMode==AS_REUSE_MATCHING)cid=FindExistingChart(symbol,tf,false);if(cid<0)cid=ChartOpen(symbol,tf);if(cid>0){ChartSetInteger(cid,CHART_BRING_TO_TOP,true);if(ObjectFind(cid,AS_MANAGED_CHART_MARKER)<0){ObjectCreate(cid,AS_MANAGED_CHART_MARKER,OBJ_LABEL,0,0,0);ObjectSetString(cid,AS_MANAGED_CHART_MARKER,OBJPROP_TEXT,"");ObjectSetInteger(cid,AS_MANAGED_CHART_MARKER,OBJPROP_HIDDEN,true);}}}
 int IndexOfSymbol(const string symbol){for(int i=0;i<ArraySize(g_symbols);i++)if(g_symbols[i]==symbol)return i;return -1;}
+int IndexOfSignalId(const string signal_id){for(int i=0;i<ArraySize(g_cached_signal);i++)if(g_cached_signal[i].signal_id==signal_id)return i;return -1;}
 bool AllDataReady(){if(ArraySize(g_symbols)==0)return false;for(int i=0;i<ArraySize(g_symbols);i++)if(g_symbols[i]==""||!g_data_ready[i])return false;return true;}
 
 bool CurrentPlanCanExecute(){
@@ -122,13 +123,32 @@ bool CurrentPlanCanExecute(){
    return !g_breaker.Blocked();
 }
 
+void SyncExecutionEvidence(){
+   if(InpRunMode!=AS_MODE_DEMO_CONFIRM)return;
+   AS_ExecutionRecord x=g_execution.Current();if(x.execution_id==""||x.signal_id=="")return;
+   int i=IndexOfSignalId(x.signal_id);AS_SignalCandidate s;ZeroMemory(s);
+   if(i>=0)s=g_cached_signal[i];else if(!g_repo.LoadSignal(x.signal_id,s))return;
+
+   if((x.state==AS_EXEC_ACCEPTED||x.state==AS_EXEC_PARTIALLY_FILLED||x.state==AS_EXEC_FILLED||x.state==AS_EXEC_POSITION_ACTIVE) && s.state==AS_SIGNAL_CONFIRMED){
+      g_lifecycle.Activate(s);if(i>=0)g_cached_signal[i]=s;
+   }
+   if(x.state==AS_EXEC_COMPLETED||x.state==AS_EXEC_REJECTED||x.state==AS_EXEC_CANCELLED){
+      if(g_outcomes.SyncDemoExecution(x,s,AS_MAGIC) && i>=0)g_cached_signal[i]=s;
+   }
+}
+
 void RenderCurrentTab(){
    ENUM_AS_TAB tab=g_ui.Tab();
    if(tab==AS_TAB_SIGNAL){if(g_selected>=0&&g_selected<ArraySize(g_symbols))g_ui.SignalDetail(g_cached_signal[g_selected]);else{AS_SignalCandidate empty;ZeroMemory(empty);g_ui.SignalDetail(empty);}return;}
    if(tab==AS_TAB_RISK){bool can_execute=CurrentPlanCanExecute();g_ui.RiskDetail(g_current_plan,(can_execute?"Preview current. Explicit DEMO confirmation required.":"Preview unavailable, stale, blocked or no longer matches the live signal."),can_execute);return;}
    if(tab==AS_TAB_NEWS){if(g_selected>=0&&g_selected<ArraySize(g_symbols))g_ui.News(g_news_state[g_selected],g_symbols[g_selected]);else{AS_NewsStateV13 empty;ZeroMemory(empty);g_ui.News(empty,"");}return;}
    if(tab==AS_TAB_HISTORY){string rows[];g_read.RecentSignals(rows,8);g_ui.History(rows);return;}
-   if(tab==AS_TAB_STATS){int total=0,wins=0,losses=0;double wr=0,avg=0,lo=0,hi=0;g_read.OutcomeStats(total,wins,losses,wr,avg,lo,hi);g_ui.Stats(total,wins,losses,wr,avg,lo,hi,AS_MIN_HISTORICAL_PROBABILITY_SAMPLE);return;}
+   if(tab==AS_TAB_STATS){
+      int total=0,wins=0,losses=0;double wr=0,avg=0,lo=0,hi=0;
+      ENUM_AS_OUTCOME_SOURCE source=(InpRunMode==AS_MODE_SHADOW?AS_OUTCOME_SOURCE_SHADOW:(InpRunMode==AS_MODE_DEMO_CONFIRM?AS_OUTCOME_SOURCE_DEMO:AS_OUTCOME_SOURCE_UNKNOWN));
+      g_read.OutcomeStats(source,AS_RULE_VERSION,AS_SCORING_VERSION,g_parameter_hash,total,wins,losses,wr,avg,lo,hi);
+      g_ui.Stats(total,wins,losses,wr,avg,lo,hi,AS_MIN_HISTORICAL_PROBABILITY_SAMPLE);return;
+   }
    if(tab==AS_TAB_SETTINGS){g_ui.Settings(EnumToString(InpRunMode),g_parameter_hash,InpSymbols,InpRiskPercent,InpMaxTotalOpenRiskPct,InpEnableNewsGate,InpEnableAccountRiskGuards,InpScanTimerMs);return;}
    if(tab==AS_TAB_SYSTEM){AS_HealthSnapshot h=g_capabilities.Inspect(g_db.Ready(),AllDataReady(),g_execution.HasUnresolved());g_ui.System(h,StringFormat("Open risk %.2f%% | Breaker %s %s",g_portfolio.ScannerOpenRiskPct(AS_MAGIC),g_breaker.Blocked()?"ON":"OFF",g_breaker.Reasons()));}
 }
@@ -150,7 +170,7 @@ int OnInit(){
    bool db_ok=g_db.Open();if(!db_ok)g_breaker.Trip("DB_NOT_READY");
    g_repo.Attach(g_db);g_read.Attach(g_db);g_risk_state.Attach(g_db);g_account_guard.Attach(g_risk_state);
    g_lifecycle.Attach(g_repo);g_outcomes.Attach(g_repo);g_execution.Attach(g_repo,g_db);
-   g_account_guard.Initialize();g_ui.Build();EventSetMillisecondTimer((int)MathMax(100,InpScanTimerMs));
+   g_account_guard.Initialize();SyncExecutionEvidence();g_ui.Build();EventSetMillisecondTimer((int)MathMax(100,InpScanTimerMs));
    PrintFormat("%s %s initialized mode=%s parameter_hash=%s",AS_PRODUCT_NAME,AS_VERSION,EnumToString(InpRunMode),g_parameter_hash);
    return INIT_SUCCEEDED;
 }
@@ -179,12 +199,13 @@ void ScanOne(const int i){
    if(news_block){regime.regime=AS_REGIME_NEWS_RISK;regime.tradable=false;regime.reasons+=(news.reason==""?"NEWS_BLOCK":news.reason)+";";}g_cached_regime[i]=regime;
 
    bool tracking_active=(g_cached_signal[i].state==AS_SIGNAL_ACTIVE&&!SignalTerminal(g_cached_signal[i]));
-   if(tracking_active){g_outcomes.Update(g_cached_signal[i]);tracking_active=(g_cached_signal[i].state==AS_SIGNAL_ACTIVE&&!SignalTerminal(g_cached_signal[i]));}
+   if(tracking_active&&InpRunMode==AS_MODE_SHADOW){g_outcomes.UpdateShadow(g_cached_signal[i]);tracking_active=(g_cached_signal[i].state==AS_SIGNAL_ACTIVE&&!SignalTerminal(g_cached_signal[i]));}
 
    if(!tracking_active){
       AS_Zone zones[];g_zones.Build(sym,PERIOD_H1,300,3,3,0.20,zones);AS_SignalCandidate s;ZeroMemory(s);
       if(g_signal_engine.Evaluate(sym,g_h4[i],g_h1[i],g_m15[i],g_m5[i],snap,zones,regime,spec,s)){
          s.parameter_hash=g_parameter_hash;
+         s.signal_id=AS_Fnv1a(s.signal_id+"|"+g_parameter_hash+"|"+s.broker_spec_hash);
          bool fresh=g_lifecycle.Register(s);
          g_cached_signal[i]=s;
          if(fresh&&(s.direction==AS_DIR_LONG||s.direction==AS_DIR_SHORT)){
@@ -193,13 +214,13 @@ void ScanOne(const int i){
          }
       }
    }
-   if(g_cached_signal[i].state==AS_SIGNAL_ACTIVE)g_outcomes.Update(g_cached_signal[i]);
+   if(g_cached_signal[i].state==AS_SIGNAL_ACTIVE&&InpRunMode==AS_MODE_SHADOW)g_outcomes.UpdateShadow(g_cached_signal[i]);
    string status=(g_cached_signal[i].direction==AS_DIR_NONE?"WATCH":"READY");if(g_cached_signal[i].hard_blocked||news_block)status="BLOCKED";
    string news_label=(calendar_block?"HIGH":(news_blind?"BLIND":(news_unavailable?"N/A":"CLEAR")));g_ui.Row(i,sym,snap.spread_points,regime,g_cached_signal[i],news_label,status);
 }
 
 void OnTimer(){
-   int total=ArraySize(g_symbols);if(total==0)return;g_execution.Reconcile();
+   int total=ArraySize(g_symbols);if(total==0)return;g_execution.Reconcile();SyncExecutionEvidence();
    ulong started=GetMicrosecondCount();int processed=0,limit=(int)MathMin(InpSymbolsPerSlice,total);
    while(processed<limit){if(processed>0&&GetMicrosecondCount()-started>=(ulong)MathMax(1000,InpScanBudgetMicroseconds))break;int i=(g_cursor+processed)%total;processed++;ScanOne(i);}
    if(processed>0)g_cursor=(g_cursor+processed)%total;
@@ -222,12 +243,12 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
    if(g_ui.ParseExecute(sparam,symbol)){
       int i=IndexOfSymbol(symbol);
       if(i<0||!CurrentPlanCanExecute()||g_current_plan.symbol!=symbol||g_current_plan.signal_id!=g_cached_signal[i].signal_id){g_current_plan.valid=false;RenderCurrentTab();return;}
-      string reason="";g_execution.SubmitDemo(g_current_plan,reason);g_current_plan.valid=false;g_ui.SetTab(AS_TAB_SYSTEM);RenderCurrentTab();return;
+      string reason="";g_execution.SubmitDemo(g_current_plan,reason);SyncExecutionEvidence();g_current_plan.valid=false;g_ui.SetTab(AS_TAB_SYSTEM);RenderCurrentTab();return;
    }
 }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result){
-   g_execution.OnTransaction(trans,request,result);
+   g_execution.OnTransaction(trans,request,result);g_execution.Reconcile();SyncExecutionEvidence();
    if(trans.type==TRADE_TRANSACTION_DEAL_ADD&&trans.deal>0&&HistoryDealSelect(trans.deal)){
       if((ulong)HistoryDealGetInteger(trans.deal,DEAL_MAGIC)!=AS_MAGIC)return;
       long entry=HistoryDealGetInteger(trans.deal,DEAL_ENTRY);
