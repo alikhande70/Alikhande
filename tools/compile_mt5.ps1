@@ -39,6 +39,7 @@ $targets = @(
   "Scripts\AlikhandeScanner\Tests\Phase5RiskSelfTests.mq5",
   "Scripts\AlikhandeScanner\Tests\Phase6ExecutionSelfTests.mq5",
   "Scripts\AlikhandeScanner\Tests\Phase7CalendarUiSelfTests.mq5",
+  "Scripts\AlikhandeScanner\Tests\EvidenceIntegritySelfTests.mq5",
   "Experts\AlikhandeScanner\AlikhandeScanner.mq5"
 )
 
