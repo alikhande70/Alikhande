@@ -33,9 +33,7 @@ private:
       return version;
    }
 
-   bool WriteVersion(const int version){
-      return Exec(StringFormat("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version','%d')",version));
-   }
+   bool WriteVersion(const int version){return Exec(StringFormat("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version','%d')",version));}
 
    bool BootstrapV4(){
       if(!Exec("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)"))return false;
@@ -55,6 +53,17 @@ private:
       if(!Exec("CREATE TABLE IF NOT EXISTS runtime_identity(id INTEGER PRIMARY KEY CHECK(id=1),context_kind INTEGER NOT NULL,identity TEXT NOT NULL,db_file TEXT NOT NULL,updated_at INTEGER NOT NULL)"))return false;
       if(!Exec("CREATE INDEX IF NOT EXISTS ix_signals_symbol_time ON signals(symbol,created_at)"))return false;
       if(!Exec("CREATE INDEX IF NOT EXISTS ix_executions_state ON executions(state)"))return false;
+      return true;
+   }
+
+   bool Migrate5To6(){
+      if(!Exec("ALTER TABLE outcomes ADD COLUMN evidence_source INTEGER NOT NULL DEFAULT 0"))return false;
+      if(!Exec("ALTER TABLE outcomes ADD COLUMN rule_version TEXT"))return false;
+      if(!Exec("ALTER TABLE outcomes ADD COLUMN scoring_version TEXT"))return false;
+      if(!Exec("ALTER TABLE outcomes ADD COLUMN parameter_hash TEXT"))return false;
+      if(!Exec("ALTER TABLE outcomes ADD COLUMN broker_spec_hash TEXT"))return false;
+      if(!Exec("ALTER TABLE outcomes ADD COLUMN execution_id TEXT"))return false;
+      if(!Exec("CREATE INDEX IF NOT EXISTS ix_outcomes_scope ON outcomes(evidence_source,rule_version,scoring_version,parameter_hash,state)"))return false;
       return true;
    }
 
@@ -90,6 +99,7 @@ public:
       if(version==0){version=4;ok=WriteVersion(version);}
       if(version>AS_SCHEMA_VERSION){PrintFormat("Alikhande DB schema too new current=%d supported=%d",version,AS_SCHEMA_VERSION);DatabaseTransactionRollback(m_db);return false;}
       if(ok && version==4 && AS_SCHEMA_VERSION>=5){ok=Migrate4To5();if(ok){version=5;ok=WriteVersion(version);}}
+      if(ok && version==5 && AS_SCHEMA_VERSION>=6){ok=Migrate5To6();if(ok){version=6;ok=WriteVersion(version);}}
       if(!ok || version!=AS_SCHEMA_VERSION){DatabaseTransactionRollback(m_db);return false;}
       if(!DatabaseTransactionCommit(m_db))return false;
       return true;
