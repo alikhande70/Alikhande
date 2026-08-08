@@ -6,7 +6,9 @@
 #include <AlikhandeScanner/Core/Config.mqh>
 #include <AlikhandeScanner/Core/VersionInfo.mqh>
 #include <AlikhandeScanner/Core/Log.mqh>
+#include <AlikhandeScanner/Core/RuntimeContext.mqh>
 #include <AlikhandeScanner/Domain/Models.mqh>
+#include <AlikhandeScanner/Persistence/PersistencePolicy.mqh>
 #include <AlikhandeScanner/Persistence/Database.mqh>
 #include <AlikhandeScanner/Persistence/Repositories.mqh>
 #include <AlikhandeScanner/Broker/SymbolResolver.mqh>
@@ -47,6 +49,10 @@ input ENUM_AS_CHART_REUSE InpChartReuseMode      = AS_CHART_MANAGED_ONLY;
 
 //--- collaborators -----------------------------------------------------------
 AS_Log              g_log;
+AS_RuntimeProbe     g_runtime_probe;
+AS_RuntimeContext   g_runtime;
+AS_PersistencePolicy g_persistence_policy;
+AS_PersistencePlan  g_persistence;
 AS_Database         g_database;
 AS_Repositories     g_repo;
 AS_SymbolResolver   g_resolver;
@@ -188,15 +194,41 @@ int OnInit()
    g_trend.Attach(g_indicators);
    g_zones.Attach(g_indicators);
 
-   if(!g_database.Open(AS_DATABASE_FILE))
+   // Classify the runtime BEFORE touching persistence. A backtest and an
+   // optimization sweep produce records indistinguishable from live ones; if
+   // they share a database file, every statistic computed later is measuring a
+   // mixture of live scanning and whatever sweep happened to run that day.
+   g_runtime = g_runtime_probe.Detect();
+   g_persistence = g_persistence_policy.Plan(g_runtime);
+
+   g_log.Info("RUNTIME", "",
+              StringFormat("%s (%s) persistence=%s [%s]",
+                           AS_RuntimeKindName(g_runtime.kind), g_runtime.description,
+                           g_persistence.enabled ? g_persistence.filename : "disabled",
+                           g_persistence.rationale));
+
+   if(g_persistence.enabled && !g_database.Open(g_persistence.filename))
      {
-      // Persistence is not optional: without it there is no de-duplication
-      // across restarts, no risk-state continuity and no outcome history, so
-      // running anyway would produce data that quietly cannot be trusted.
-      Print("Alikhande: FATAL - database unavailable, refusing to start");
-      return INIT_FAILED;
+      if(g_persistence.required)
+        {
+         // Production only. Without persistence there is no de-duplication
+         // across restarts, no risk-state continuity and no outcome history,
+         // so running anyway would produce data that cannot be trusted.
+         Print("Alikhande: FATAL - production database unavailable, refusing to start");
+         return INIT_FAILED;
+        }
+      g_log.Warn("DB_UNAVAILABLE", "",
+                 "continuing without persistence; this run leaves no record");
      }
    g_repo.Attach(g_database, g_log);
+
+   // Stamp the runtime into the event log too. The filename already separates
+   // contexts, but a database that gets copied or renamed should still be able
+   // to say what produced it.
+   g_repo.LogEvent("INFO", "RUNTIME", AS_RuntimeKindName(g_runtime.kind),
+                   StringFormat("production=%s %s",
+                                g_runtime.is_production ? "yes" : "no",
+                                g_runtime.description));
    g_statistics.Attach(g_repo);
    g_account_guard.Attach(g_repo, g_log);
    g_execution.Attach(g_repo, g_log, AS_MAGIC);
@@ -469,7 +501,9 @@ void RefreshActiveTab()
       g_ui.RenderHealth(ArraySize(g_symbols), g_unresolved,
                         g_last_slice_ms, InpScanBudgetMicroseconds / 1000.0,
                         g_indicators.Count(), g_database.IsOpen(),
-                        AS_ExecStateName(execution.state), g_log.SuppressedCount());
+                        AS_ExecStateName(execution.state), g_log.SuppressedCount(),
+                        AS_RuntimeKindName(g_runtime.kind), g_runtime.is_production,
+                        g_persistence.enabled ? g_persistence.filename : "disabled");
      }
   }
 

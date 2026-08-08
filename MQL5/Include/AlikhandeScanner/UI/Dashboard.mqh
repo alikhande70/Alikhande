@@ -353,11 +353,18 @@ public:
    void RenderHealth(const int symbols_total, const int symbols_unresolved,
                      const double last_slice_ms, const double budget_ms,
                      const int indicator_handles, const bool database_open,
-                     const string execution_state, const int suppressed_logs)
+                     const string execution_state, const int suppressed_logs,
+                     const string runtime_kind, const bool is_production,
+                     const string persistence_target)
      {
       ClearBody();
       int line = 0;
       BodyLine(line++, "Runtime", AS_UI_COLOR_ACCENT);
+      // Whether this run's records count as evidence is the first thing an
+      // operator needs to know when reading anything else on this panel.
+      BodyLine(line++, StringFormat("  context             %s%s", runtime_kind,
+                                    is_production ? "" : "  (NOT production history)"),
+               is_production ? AS_UI_COLOR_LONG : AS_UI_COLOR_WARN);
       BodyLine(line++, StringFormat("  symbols             %d (%d unresolved)",
                                     symbols_total, symbols_unresolved),
                symbols_unresolved > 0 ? AS_UI_COLOR_WARN : AS_UI_COLOR_TEXT);
@@ -370,6 +377,7 @@ public:
       BodyLine(line++, "Persistence", AS_UI_COLOR_ACCENT);
       BodyLine(line++, "  database            " + (database_open ? "open" : "CLOSED"),
                database_open ? AS_UI_COLOR_LONG : AS_UI_COLOR_SHORT);
+      BodyLine(line++, "  target              " + persistence_target, AS_UI_COLOR_MUTED);
       BodyLine(line++, "  execution           " + execution_state, AS_UI_COLOR_TEXT);
       BodyLine(line++, StringFormat("  suppressed logs     %d", suppressed_logs),
                AS_UI_COLOR_MUTED);
