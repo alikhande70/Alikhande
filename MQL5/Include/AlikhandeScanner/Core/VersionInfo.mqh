@@ -1,0 +1,6 @@
+#pragma once
+#define AS_VERSION "1.1.0"
+#define AS_RULE_VERSION "RULE-1.1.0"
+#define AS_SCORING_VERSION "SCORE-1.1.0"
+#define AS_STATS_VERSION "STATS-1.1.0"
+#define AS_SCHEMA_VERSION "2"
