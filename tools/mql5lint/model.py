@@ -122,7 +122,14 @@ class SourceTree:
     # ------------------------------------------------------------------ load
 
     def load(self, paths: list[Path]) -> None:
-        for p in sorted(paths):
+        # Keys are resolved absolute paths so they always compare equal to what
+        # resolve_include() returns. Mixing relative and resolved paths made
+        # every include lookup miss, which silently reported the entire tree as
+        # unreachable — a check that can fail *open* like that is worse than no
+        # check, because the output looks like a real finding.
+        self.root = self.root.resolve()
+        self.include_root = self.include_root.resolve()
+        for p in sorted({q.resolve() for q in paths}):
             raw = p.read_text(encoding="utf-8", errors="replace")
             sf = SourceFile(
                 path=p,

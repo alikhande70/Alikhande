@@ -380,6 +380,33 @@ def check_use_before_definition(tree: SourceTree) -> list[Finding]:
     return out
 
 
+def check_discarded_guard_results(tree: SourceTree, guards: list[str]) -> list[Finding]:
+    """Idempotency/admission guards whose return value is thrown away.
+
+    This exists because of a real defect: `RecordDealOnce(...)` was called as a
+    bare statement and the fill state was then mutated regardless, so a replayed
+    transaction double-counted. A guard that returns "already handled" and is
+    ignored is not a guard, it is a log line with a misleading name.
+
+    A call is considered checked if it appears inside a condition or is assigned
+    — i.e. anything other than a statement start.
+    """
+    out: list[Finding] = []
+    for sf in tree.files.values():
+        for guard in guards:
+            for m in re.finditer(rf"(^|[;{{}}])\s*({re.escape(guard)})\s*\(", sf.text, re.M):
+                out.append(
+                    Finding(
+                        "DISCARDED_GUARD_RESULT",
+                        sf.rel,
+                        sf.line_of(m.start(2)),
+                        f"`{guard}(...)` result discarded; its answer must gate "
+                        f"whatever it protects",
+                    )
+                )
+    return out
+
+
 def check_forbidden(tree: SourceTree) -> list[Finding]:
     out: list[Finding] = []
     for sf in tree.files.values():
@@ -423,6 +450,59 @@ def check_required_invariants(tree: SourceTree, required: dict[str, str]) -> lis
     for label, needle in required.items():
         if needle not in joined:
             out.append(Finding("MISSING_INVARIANT", "<tree>", 0, f"{label}: expected `{needle}`"))
+    return out
+
+
+def check_unreachable_from_entrypoint(tree: SourceTree, entry_rel: str) -> list[Finding]:
+    """Production headers not reachable through the EA's include graph.
+
+    A module referenced only by its own test script is not shipped behaviour —
+    it is a design document that happens to compile. This check exists because
+    that failure mode is easy to reach and hard to notice: the tests pass, the
+    architecture doc describes the module, and the running system never calls
+    it.
+
+    Test-only and harness files are excluded from the requirement, since being
+    unreachable from the EA is their normal condition.
+    """
+    entry = None
+    for sf in tree.files.values():
+        if sf.rel.replace("\\", "/") == entry_rel:
+            entry = sf
+            break
+    if entry is None:
+        return [Finding("ENTRYPOINT_MISSING", entry_rel, 0, "entry point not found")]
+
+    reachable: set[Path] = set()
+    frontier = [entry]
+    while frontier:
+        current = frontier.pop()
+        if current.path in reachable:
+            continue
+        reachable.add(current.path)
+        for spec in current.includes:
+            target = tree.resolve_include(current, spec)
+            if target and target in tree.files:
+                frontier.append(tree.files[target])
+
+    out: list[Finding] = []
+    for sf in tree.files.values():
+        rel = sf.rel.replace("\\", "/")
+        if sf.path in reachable:
+            continue
+        if sf.path.suffix != ".mqh":
+            continue          # scripts are their own entry points
+        if "/Testing/" in rel or "/Tests/" in rel:
+            continue          # harness code is legitimately EA-unreachable
+        out.append(
+            Finding(
+                "UNREACHABLE_MODULE",
+                sf.rel,
+                0,
+                "not reachable from the EA include graph; shipped as behaviour "
+                "or removed, but not left as an unreferenced design",
+            )
+        )
     return out
 
 

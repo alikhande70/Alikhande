@@ -257,6 +257,53 @@ def test_use_before_definition() -> None:
           "class members calling later members is not flagged (no false positive)")
 
 
+def test_discarded_guard_results() -> None:
+    print("discarded guard results")
+    bad = tree_from({
+        "MQL5/Include/A.mqh":
+            "#pragma once\n"
+            "void f(){ RecordDealOnce(t,a,b); volume += 1.0; }\n"
+    })
+    check("DISCARDED_GUARD_RESULT" in codes(
+              checks.check_discarded_guard_results(bad, ["RecordDealOnce"])),
+          "bare guard call is reported")
+
+    guarded = tree_from({
+        "MQL5/Include/A.mqh":
+            "#pragma once\n"
+            "void f(){ if(RecordDealOnce(t,a,b)) volume += 1.0; }\n"
+    })
+    check(codes(checks.check_discarded_guard_results(guarded, ["RecordDealOnce"])) == set(),
+          "guard used in a condition is quiet")
+
+    assigned = tree_from({
+        "MQL5/Include/A.mqh":
+            "#pragma once\n"
+            "void f(){ bool ok = RecordDealOnce(t,a,b); }\n"
+    })
+    check(codes(checks.check_discarded_guard_results(assigned, ["RecordDealOnce"])) == set(),
+          "guard whose result is assigned is quiet")
+
+
+def test_unreachable_module() -> None:
+    print("unreachable module")
+    base = "MQL5/Include/AlikhandeScanner/"
+    entry = "MQL5/Experts/AlikhandeScanner/AlikhandeScanner.mq5"
+    t = tree_from({
+        entry: '#include <AlikhandeScanner/Used.mqh>\nvoid OnTick(){}\n',
+        base + "Used.mqh": "#pragma once\n",
+        base + "Orphan.mqh": "#pragma once\n",
+        # Harness code is legitimately unreachable from the EA.
+        base + "Testing/Harness.mqh": "#pragma once\n",
+    })
+    found = checks.check_unreachable_from_entrypoint(t, entry)
+    rels = {f.rel.replace("\\", "/") for f in found}
+    check(any("Orphan.mqh" in r for r in rels), "orphaned module is reported")
+    check(not any("Used.mqh" in r for r in rels), "included module is not reported")
+    check(not any("Harness.mqh" in r for r in rels),
+          "test harness is exempt (no false positive)")
+
+
 def main() -> int:
     for fn in (
         test_lexer,
@@ -270,6 +317,8 @@ def main() -> int:
         test_include_cycle,
         test_unchecked_copy,
         test_use_before_definition,
+        test_discarded_guard_results,
+        test_unreachable_module,
     ):
         fn()
 
