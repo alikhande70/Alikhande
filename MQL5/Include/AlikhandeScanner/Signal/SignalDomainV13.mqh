@@ -1,20 +1,6 @@
 #pragma once
 #include "../Domain/Enums.mqh"
 
-enum ENUM_AS_ZONE_KIND
-  {
-   AS_ZONE_DEMAND = 0,
-   AS_ZONE_SUPPLY = 1
-  };
-
-enum ENUM_AS_ZONE_RELATION
-  {
-   AS_ZONE_BELOW = -1,
-   AS_ZONE_INSIDE = 0,
-   AS_ZONE_ABOVE = 1,
-   AS_ZONE_UNAVAILABLE = 2
-  };
-
 struct AS_TypedZone
   {
    string id;
