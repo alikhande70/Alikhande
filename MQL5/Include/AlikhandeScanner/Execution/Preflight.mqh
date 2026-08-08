@@ -1,10 +1,13 @@
 #pragma once
 #include "../Domain/Models.mqh"
 #include "../Safety/TradeGuards.mqh"
+#include "../Broker/SymbolSpec.mqh"
 
 class AS_Preflight {
 private:
    AS_TradeGuards m_guards;
+   AS_SymbolSpecReader m_spec_reader;
+
    bool ResolveFilling(const string symbol,ENUM_ORDER_TYPE_FILLING &out,string &reason){
       long flags=SymbolInfoInteger(symbol,SYMBOL_FILLING_MODE);
       if((flags&SYMBOL_FILLING_FOK)==SYMBOL_FILLING_FOK){out=ORDER_FILLING_FOK;return true;}
@@ -18,15 +21,33 @@ public:
       ZeroMemory(request);ZeroMemory(check);reason="";
       if(AccountInfoInteger(ACCOUNT_TRADE_MODE)!=ACCOUNT_TRADE_MODE_DEMO){reason="REAL_ACCOUNT_BLOCKED";return false;}
       if(!p.valid||TimeCurrent()>p.expires_at){reason="PLAN_EXPIRED";return false;}
+
+      AS_SymbolSpec current_spec;
+      if(!m_spec_reader.Read(p.symbol,current_spec)){reason="BROKER_SPEC_UNAVAILABLE";return false;}
+      if(p.broker_spec_hash=="" || current_spec.spec_hash!=p.broker_spec_hash){reason="BROKER_SPEC_DRIFT";return false;}
+
       if(m_guards.HasExposure(p.symbol)){reason="EXPOSURE_EXISTS";return false;}
-      string codes="";if(!m_guards.TradePermissions(p.symbol,codes)||!m_guards.StopsValid(p,codes)){reason=codes;return false;}
-      MqlTick tick;if(!SymbolInfoTick(p.symbol,tick)){reason="NO_TICK";return false;}
-      double point=SymbolInfoDouble(p.symbol,SYMBOL_POINT);double current=(p.direction==AS_DIR_LONG?tick.ask:tick.bid);
+      string codes="";
+      if(!m_guards.TradePermissions(p.symbol,codes)||!m_guards.StopsValid(p,codes)){reason=codes;return false;}
+
+      MqlTick tick;
+      if(!SymbolInfoTick(p.symbol,tick)){reason="NO_TICK";return false;}
+      double point=SymbolInfoDouble(p.symbol,SYMBOL_POINT);
+      double current=(p.direction==AS_DIR_LONG?tick.ask:tick.bid);
       if(point<=0||MathAbs(current-p.entry)/point>p.max_drift_points){reason="PRICE_DRIFT_EXCEEDED";return false;}
-      request.action=TRADE_ACTION_DEAL;request.symbol=p.symbol;request.magic=AS_MAGIC;request.volume=p.lot_size;
-      request.type=(p.direction==AS_DIR_LONG?ORDER_TYPE_BUY:ORDER_TYPE_SELL);request.price=current;request.sl=p.stop_loss;request.tp=p.take_profit;
-      request.deviation=(ulong)p.max_drift_points;request.type_time=ORDER_TIME_GTC;
+
+      request.action=TRADE_ACTION_DEAL;
+      request.symbol=p.symbol;
+      request.magic=AS_MAGIC;
+      request.volume=p.lot_size;
+      request.type=(p.direction==AS_DIR_LONG?ORDER_TYPE_BUY:ORDER_TYPE_SELL);
+      request.price=current;
+      request.sl=p.stop_loss;
+      request.tp=p.take_profit;
+      request.deviation=(ulong)p.max_drift_points;
+      request.type_time=ORDER_TIME_GTC;
       if(!ResolveFilling(p.symbol,request.type_filling,reason))return false;
+
       if(!OrderCheck(request,check)){reason=StringFormat("ORDERCHECK_CALL_FAILED_%d",GetLastError());return false;}
       if(check.retcode!=TRADE_RETCODE_DONE&&check.retcode!=TRADE_RETCODE_PLACED){reason=StringFormat("ORDERCHECK_%u_%s",check.retcode,check.comment);return false;}
       return true;
