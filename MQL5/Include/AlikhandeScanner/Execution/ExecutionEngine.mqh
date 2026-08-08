@@ -54,9 +54,10 @@ public:
       MqlTradeRequest req;MqlTradeCheckResult chk;
       if(!m_preflight.Validate(p,req,chk,reason))return false;
       ZeroMemory(m_current);
-      m_current.execution_id=AS_Fnv1a(p.plan_id+"|"+IntegerToString((int)TimeCurrent())+"|"+p.symbol);
+      datetime now=TimeCurrent();
+      m_current.execution_id=AS_Fnv1a(p.plan_id+"|"+IntegerToString((int)now)+"|"+p.symbol);
       m_current.plan_id=p.plan_id;m_current.signal_id=p.signal_id;m_current.symbol=p.symbol;
-      m_current.state=AS_EXEC_SUBMITTING;m_current.requested_volume=p.lot_size;m_current.updated_at=TimeCurrent();m_current.terminal=false;
+      m_current.state=AS_EXEC_SUBMITTING;m_current.requested_volume=p.lot_size;m_current.created_at=now;m_current.updated_at=now;m_current.terminal=false;
       if(m_repo==NULL || !m_repo.SaveExecution(m_current)){reason="INTENT_PERSIST_FAILED";m_current.state=AS_EXEC_REJECTED;m_current.terminal=true;return false;}
 
       MqlTradeResult result;ZeroMemory(result);bool sent=OrderSend(req,result);
