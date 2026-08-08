@@ -10,7 +10,7 @@ int g_failures=0;
 void Check(const bool condition,const string name){if(condition)Print("PASS ",name);else{Print("FAIL ",name);g_failures++;}}
 
 void OnStart(){
-   Check(AS_SCHEMA_VERSION>=6,"schema version includes scoped outcome provenance");
+   Check(AS_SCHEMA_VERSION>=7,"schema includes scoped outcomes and execution creation timestamps");
    Check((int)AS_OUTCOME_SOURCE_SHADOW!=(int)AS_OUTCOME_SOURCE_DEMO,"shadow and demo evidence sources are distinct");
 
    string structural="candidate-123";
@@ -25,6 +25,10 @@ void OnStart(){
       int q=DatabasePrepare(db.Handle(),"SELECT evidence_source,rule_version,scoring_version,parameter_hash,broker_spec_hash,execution_id FROM outcomes LIMIT 0");
       Check(q!=INVALID_HANDLE,"outcomes provenance columns are queryable");
       if(q!=INVALID_HANDLE)DatabaseFinalize(q);
+
+      int e=DatabasePrepare(db.Handle(),"SELECT created_at FROM executions LIMIT 0");
+      Check(e!=INVALID_HANDLE,"execution created_at is queryable for recovery windows");
+      if(e!=INVALID_HANDLE)DatabaseFinalize(e);
 
       AS_ReadModels read;read.Attach(db);
       int total=0,wins=0,losses=0;double wr=0,avg=0,lo=0,hi=0;
