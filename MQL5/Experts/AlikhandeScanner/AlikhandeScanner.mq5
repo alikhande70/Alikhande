@@ -114,10 +114,18 @@ void OpenManagedChart(const string symbol,const ENUM_TIMEFRAMES tf){long cid=-1;
 int IndexOfSymbol(const string symbol){for(int i=0;i<ArraySize(g_symbols);i++)if(g_symbols[i]==symbol)return i;return -1;}
 bool AllDataReady(){if(ArraySize(g_symbols)==0)return false;for(int i=0;i<ArraySize(g_symbols);i++)if(g_symbols[i]==""||!g_data_ready[i])return false;return true;}
 
+bool CurrentPlanCanExecute(){
+   if(InpRunMode!=AS_MODE_DEMO_CONFIRM||!g_current_plan.valid||TimeCurrent()>g_current_plan.expires_at)return false;
+   int i=IndexOfSymbol(g_current_plan.symbol);if(i<0)return false;
+   if(g_cached_signal[i].signal_id==""||g_current_plan.signal_id!=g_cached_signal[i].signal_id)return false;
+   if(g_cached_signal[i].direction==AS_DIR_NONE||g_cached_signal[i].hard_blocked)return false;
+   return !g_breaker.Blocked();
+}
+
 void RenderCurrentTab(){
    ENUM_AS_TAB tab=g_ui.Tab();
    if(tab==AS_TAB_SIGNAL){if(g_selected>=0&&g_selected<ArraySize(g_symbols))g_ui.SignalDetail(g_cached_signal[g_selected]);else{AS_SignalCandidate empty;ZeroMemory(empty);g_ui.SignalDetail(empty);}return;}
-   if(tab==AS_TAB_RISK){g_ui.RiskDetail(g_current_plan,(g_current_plan.valid?"Preview valid. DEMO confirmation required.":"No valid preview."),g_current_plan.valid&&InpRunMode==AS_MODE_DEMO_CONFIRM);return;}
+   if(tab==AS_TAB_RISK){bool can_execute=CurrentPlanCanExecute();g_ui.RiskDetail(g_current_plan,(can_execute?"Preview current. Explicit DEMO confirmation required.":"Preview unavailable, stale, blocked or no longer matches the live signal."),can_execute);return;}
    if(tab==AS_TAB_NEWS){if(g_selected>=0&&g_selected<ArraySize(g_symbols))g_ui.News(g_news_state[g_selected],g_symbols[g_selected]);else{AS_NewsStateV13 empty;ZeroMemory(empty);g_ui.News(empty,"");}return;}
    if(tab==AS_TAB_HISTORY){string rows[];g_read.RecentSignals(rows,8);g_ui.History(rows);return;}
    if(tab==AS_TAB_STATS){int total=0,wins=0,losses=0;double wr=0,avg=0,lo=0,hi=0;g_read.OutcomeStats(total,wins,losses,wr,avg,lo,hi);g_ui.Stats(total,wins,losses,wr,avg,lo,hi,AS_MIN_HISTORICAL_PROBABILITY_SAMPLE);return;}
@@ -166,7 +174,8 @@ void ScanOne(const int i){
    g_news_state[i]=news;
    bool calendar_block=InpEnableNewsGate&&news.available&&news.blocked;
    bool news_unavailable=InpEnableNewsGate&&!news.available;
-   bool news_block=calendar_block||news_unavailable;
+   bool news_blind=InpEnableNewsGate&&g_news.NewsBlind(news);
+   bool news_block=InpEnableNewsGate&&g_news.BlocksTrading(news);
    if(news_block){regime.regime=AS_REGIME_NEWS_RISK;regime.tradable=false;regime.reasons+=(news.reason==""?"NEWS_BLOCK":news.reason)+";";}g_cached_regime[i]=regime;
 
    bool tracking_active=(g_cached_signal[i].state==AS_SIGNAL_ACTIVE&&!SignalTerminal(g_cached_signal[i]));
@@ -186,7 +195,7 @@ void ScanOne(const int i){
    }
    if(g_cached_signal[i].state==AS_SIGNAL_ACTIVE)g_outcomes.Update(g_cached_signal[i]);
    string status=(g_cached_signal[i].direction==AS_DIR_NONE?"WATCH":"READY");if(g_cached_signal[i].hard_blocked||news_block)status="BLOCKED";
-   string news_label=(calendar_block?"HIGH":(news_unavailable?"N/A":"CLEAR"));g_ui.Row(i,sym,snap.spread_points,regime,g_cached_signal[i],news_label,status);
+   string news_label=(calendar_block?"HIGH":(news_blind?"BLIND":(news_unavailable?"N/A":"CLEAR")));g_ui.Row(i,sym,snap.spread_points,regime,g_cached_signal[i],news_label,status);
 }
 
 void OnTimer(){
@@ -210,7 +219,11 @@ void OnChartEvent(const int id,const long &lparam,const double &dparam,const str
       if(ok)ok=g_portfolio.AllowNewRisk(g_current_plan.risk_percent,InpMaxTotalOpenRiskPct,AS_MAGIC,reason);if(ok)g_repo.SavePlan(g_current_plan);else g_current_plan.valid=false;
       g_ui.SetTab(AS_TAB_RISK);g_ui.RiskDetail(g_current_plan,ok?"Preview valid. DEMO confirmation required.":reason,false);return;
    }
-   if(g_ui.ParseExecute(sparam,symbol)){if(InpRunMode!=AS_MODE_DEMO_CONFIRM||!g_current_plan.valid||g_current_plan.symbol!=symbol||g_breaker.Blocked())return;string reason="";g_execution.SubmitDemo(g_current_plan,reason);g_ui.SetTab(AS_TAB_SYSTEM);RenderCurrentTab();return;}
+   if(g_ui.ParseExecute(sparam,symbol)){
+      int i=IndexOfSymbol(symbol);
+      if(i<0||!CurrentPlanCanExecute()||g_current_plan.symbol!=symbol||g_current_plan.signal_id!=g_cached_signal[i].signal_id){g_current_plan.valid=false;RenderCurrentTab();return;}
+      string reason="";g_execution.SubmitDemo(g_current_plan,reason);g_current_plan.valid=false;g_ui.SetTab(AS_TAB_SYSTEM);RenderCurrentTab();return;
+   }
 }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result){
