@@ -189,6 +189,19 @@ void TestExposure(AS_TestRunner &t)
    t.Check(portfolio.Allows(exposure, 0.15, 1.00, 0.75, 1.00, reason),
            "trade inside every cap is allowed");
 
+   // A position with no computable worst case must block everything. Treating
+   // it as zero risk lets the caps pass *because* the dangerous position is
+   // invisible to them.
+   AS_ExposureSummary unbounded = exposure;
+   unbounded.unbounded_positions = 1;
+   unbounded.unbounded_symbols = "XAUUSD;";
+   t.Check(!portfolio.Allows(unbounded, 0.01, 99.0, 99.0, 99.0, reason),
+           "unbounded position blocks even with caps set absurdly wide");
+   t.Check(StringFind(reason, "UNBOUNDED_RISK") >= 0,
+           "block reason names unbounded risk");
+   t.Check(StringFind(reason, "XAUUSD") >= 0,
+           "block reason names the offending symbol");
+
    t.Check(!portfolio.Allows(exposure, 0.30, 1.00, 0.75, 1.00, reason),
            "trade breaching the open-risk cap is blocked");
    t.Check(StringFind(reason, "OPEN_RISK") >= 0, "block reason names the open-risk cap");

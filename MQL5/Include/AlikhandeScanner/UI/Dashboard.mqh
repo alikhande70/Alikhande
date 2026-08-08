@@ -329,6 +329,16 @@ public:
                                     exposure.currency_risk_pct), AS_UI_COLOR_TEXT);
       BodyLine(line++, StringFormat("  asset-class risk    %.2f%%", exposure.asset_class_risk_pct),
                AS_UI_COLOR_TEXT);
+      if(exposure.unbounded_positions > 0)
+        {
+         // Stated loudly: while this is non-zero every percentage above is a
+         // lower bound, not a measurement.
+         BodyLine(line++, StringFormat("  UNBOUNDED           %d position(s): %s",
+                                       exposure.unbounded_positions,
+                                       exposure.unbounded_symbols), AS_UI_COLOR_SHORT);
+         BodyLine(line++, "  (figures above are lower bounds; new risk blocked)",
+                  AS_UI_COLOR_SHORT);
+        }
       BodyLine(line++, "", AS_UI_COLOR_TEXT);
       BodyLine(line++, "Account guards", AS_UI_COLOR_ACCENT);
       BodyLine(line++, StringFormat("  peak equity         %.2f", risk.peak_equity), AS_UI_COLOR_TEXT);

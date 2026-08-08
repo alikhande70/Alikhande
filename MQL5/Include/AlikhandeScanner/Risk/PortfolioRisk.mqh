@@ -38,18 +38,27 @@ private:
         }
      }
 
-   // Defined risk of one open position, in account currency. A position with no
-   // stop has no *defined* risk; it is reported separately rather than counted
-   // as zero, because counting it as zero is how an unbounded position hides.
+   // Defined risk of one open position, in account currency.
+   //
+   // `bounded` is an OUTPUT, not a courtesy. A position with no stop, or one
+   // whose symbol cannot be priced, has no computable worst case — and a
+   // position with no computable worst case is not a position with zero risk.
+   // Returning 0.0 and moving on (which this code used to do) makes an
+   // unbounded position read as *free* to every downstream cap, which is the
+   // most dangerous way a risk limit can fail: the more exposed the account
+   // actually is, the more room the caps appear to have.
    double PositionRisk(const string symbol, const double open_price,
-                       const double stop_loss, const double volume) const
+                       const double stop_loss, const double volume,
+                       bool &bounded) const
      {
+      bounded = false;
       if(stop_loss <= 0.0)
          return 0.0;
       const double tick_value = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
       const double tick_size  = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
       if(tick_size <= 0.0 || tick_value <= 0.0)
          return 0.0;
+      bounded = true;
       return MathAbs(open_price - stop_loss) / tick_size * tick_value * volume;
      }
 
@@ -101,11 +110,18 @@ public:
             continue;
 
          const string symbol = PositionGetString(POSITION_SYMBOL);
+         bool bounded = false;
          const double risk = PositionRisk(symbol,
                                           PositionGetDouble(POSITION_PRICE_OPEN),
                                           PositionGetDouble(POSITION_SL),
-                                          PositionGetDouble(POSITION_VOLUME));
+                                          PositionGetDouble(POSITION_VOLUME),
+                                          bounded);
          out.open_positions++;
+         if(!bounded)
+           {
+            out.unbounded_positions++;
+            out.unbounded_symbols += symbol + ";";
+           }
          total_risk += risk;
 
          if(symbol == candidate_symbol)
@@ -148,6 +164,18 @@ public:
                const double max_class_pct, string &reason) const
      {
       reason = "";
+
+      // Checked before every cap. With an unbounded position open, every
+      // percentage below is a lower bound on true exposure, so comparing them
+      // against a limit is meaningless — the limit would pass precisely
+      // because the dangerous position is invisible to it.
+      if(exposure.unbounded_positions > 0)
+        {
+         reason = StringFormat("UNBOUNDED_RISK %d position(s) without a computable "
+                               "worst case: %s", exposure.unbounded_positions,
+                               exposure.unbounded_symbols);
+         return false;
+        }
 
       if(exposure.open_risk_pct + new_risk_pct > max_open_pct)
         {

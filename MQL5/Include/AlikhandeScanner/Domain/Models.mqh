@@ -202,4 +202,9 @@ struct AS_ExposureSummary
    double asset_class_risk_pct;
    string dominant_currency;
    int    open_positions;
+   // Positions whose worst case cannot be computed (no stop, or an unpriceable
+   // symbol). These are NOT zero-risk. While any exist, the measured
+   // percentages are lower bounds and no new risk may be admitted.
+   int    unbounded_positions;
+   string unbounded_symbols;
   };

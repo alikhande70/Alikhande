@@ -218,9 +218,14 @@ public:
                       const MqlTradeRequest &request,
                       const MqlTradeResult &result)
      {
-      // Deals are recorded even when they belong to no tracked execution, so
-      // the account guard sees this EA's closed trades regardless of whether
-      // the scanner was the thing that opened them in this session.
+      // The deal ledger is an ADMISSION GATE, not a log. MetaQuotes documents
+      // that transaction delivery may repeat, so a deal ticket is allowed to
+      // move execution state at most once. Recording the ticket and then
+      // mutating state regardless — which is what this code used to do — makes
+      // the idempotency decorative: a replayed DEAL_ADD double-counts the fill
+      // and can drive a partially-filled order to FILLED on volume that only
+      // ever arrived once.
+      bool deal_admitted = false;
       if(trans.type == TRADE_TRANSACTION_DEAL_ADD && IsOwnDeal(trans.deal))
         {
          const double volume = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
@@ -231,10 +236,16 @@ public:
                                + HistoryDealGetDouble(trans.deal, DEAL_SWAP);
          const string symbol = HistoryDealGetString(trans.deal, DEAL_SYMBOL);
 
-         // Keyed by ticket: a replayed transaction cannot double-count.
-         if(m_repo != NULL)
-            m_repo.RecordDealOnce(trans.deal, m_current.execution_id, symbol,
-                                  entry, volume, price, net);
+         // Deals are admitted even when they belong to no tracked execution, so
+         // the account guard still sees this EA's closed trades from a previous
+         // session.
+         deal_admitted = (m_repo != NULL)
+                         && m_repo.RecordDealOnce(trans.deal, m_current.execution_id,
+                                                  symbol, entry, volume, price, net);
+
+         if(!deal_admitted && m_log != NULL)
+            m_log.Debug("DEAL_REPLAY_IGNORED", symbol,
+                        StringFormat("deal %I64u already applied", trans.deal));
         }
 
       if(!HasUnresolved())
@@ -259,7 +270,10 @@ public:
       if(trans.position > 0) m_current.position_id = trans.position;
       if(result.retcode > 0) m_current.retcode = result.retcode;
 
-      if(trans.type == TRADE_TRANSACTION_DEAL_ADD && HistoryDealSelect(trans.deal))
+      // Only an admitted deal may move fill state. A replay is correlated and
+      // may still refresh tickets above, but it must not be counted again.
+      if(trans.type == TRADE_TRANSACTION_DEAL_ADD && deal_admitted
+         && HistoryDealSelect(trans.deal))
         {
          const long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
          if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY)
