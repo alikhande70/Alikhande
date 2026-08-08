@@ -1,0 +1,28 @@
+#property strict
+#property version "1.20"
+#include <AlikhandeScanner/Core/Config.mqh>
+#include <AlikhandeScanner/Core/VersionInfo.mqh>
+#include <AlikhandeScanner/Domain/Models.mqh>
+#include <AlikhandeScanner/Broker/SymbolResolver.mqh>
+#include <AlikhandeScanner/Broker/SymbolSpec.mqh>
+#include <AlikhandeScanner/Data/MarketData.mqh>
+#include <AlikhandeScanner/Analysis/TrendEngine.mqh>
+#include <AlikhandeScanner/Analysis/ZoneEngine.mqh>
+#include <AlikhandeScanner/Analysis/RegimeEngine.mqh>
+#include <AlikhandeScanner/Persistence/Database.mqh>
+#include <AlikhandeScanner/Persistence/Repositories.mqh>
+#include <AlikhandeScanner/Signals/SignalEngine.mqh>
+#include <AlikhandeScanner/Signals/SignalLifecycle.mqh>
+#include <AlikhandeScanner/Signals/OutcomeEngine.mqh>
+#include <AlikhandeScanner/Statistics/Statistics.mqh>
+#include <AlikhandeScanner/Safety/TradeGuards.mqh>
+#include <AlikhandeScanner/Trading/RiskPlanner.mqh>
+#include <AlikhandeScanner/Risk/PortfolioRisk.mqh>
+#include <AlikhandeScanner/News/NewsGate.mqh>
+#include <AlikhandeScanner/Execution/Preflight.mqh>
+#include <AlikhandeScanner/Execution/ExecutionEngine.mqh>
+#include <AlikhandeScanner/Health/CircuitBreaker.mqh>
+#include <AlikhandeScanner/Health/CapabilityMatrix.mqh>
+#include <AlikhandeScanner/UI/Dashboard.mqh>
+#include <AlikhandeScanner/UI/ChartOverlay.mqh>
+void OnStart(){Print("Alikhande compile-all modules parsed, version ",AS_VERSION);}

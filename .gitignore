@@ -1,0 +1,7 @@
+*.ex5
+*.log
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+MQL5/Files/
+artifacts/

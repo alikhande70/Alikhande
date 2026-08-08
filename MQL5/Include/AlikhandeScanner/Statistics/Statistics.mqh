@@ -1,0 +1,4 @@
+#pragma once
+class AS_Statistics {
+public: bool Wilson(const int wins,const int total,double &low,double &high){if(total<=0)return false;double z=1.96,p=(double)wins/total,den=1+z*z/total,center=(p+z*z/(2*total))/den,margin=z*MathSqrt((p*(1-p)+z*z/(4*total))/total)/den;low=MathMax(0.0,center-margin);high=MathMin(1.0,center+margin);return true;} double ExpectancyR(const int wins,const int losses,const double avg_win_r,const double avg_loss_r){int n=wins+losses;if(n<=0)return 0;double pw=(double)wins/n,pl=(double)losses/n;return pw*avg_win_r+pl*avg_loss_r;} double Brier(const double probabilities[],const int outcomes[]){int n=MathMin(ArraySize(probabilities),ArraySize(outcomes));if(n<=0)return -1;double sum=0;for(int i=0;i<n;i++){double d=probabilities[i]-outcomes[i];sum+=d*d;}return sum/n;}
+};
