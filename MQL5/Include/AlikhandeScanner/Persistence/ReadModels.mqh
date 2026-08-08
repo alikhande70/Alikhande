@@ -30,7 +30,8 @@ public:
    bool OutcomeStats(int &total,int &wins,int &losses,double &win_rate,double &avg_r,double &wilson_low,double &wilson_high){
       total=0;wins=0;losses=0;win_rate=0;avg_r=0;wilson_low=0;wilson_high=0;
       if(m_db==NULL||!m_db.Ready())return false;
-      int q=DatabasePrepare(m_db.Handle(),"SELECT COUNT(*),SUM(CASE WHEN state=4 THEN 1 ELSE 0 END),SUM(CASE WHEN state=5 THEN 1 ELSE 0 END),AVG(r_multiple) FROM outcomes WHERE state IN (4,5)");
+      // ENUM_AS_SIGNAL_STATE: TP=5, SL=6. Only terminal TP/SL outcomes enter win-rate statistics.
+      int q=DatabasePrepare(m_db.Handle(),"SELECT COUNT(*),SUM(CASE WHEN state=5 THEN 1 ELSE 0 END),SUM(CASE WHEN state=6 THEN 1 ELSE 0 END),AVG(r_multiple) FROM outcomes WHERE state IN (5,6)");
       if(q==INVALID_HANDLE)return false;
       if(DatabaseRead(q)){
          DatabaseColumnInteger(q,0,total);DatabaseColumnInteger(q,1,wins);DatabaseColumnInteger(q,2,losses);DatabaseColumnDouble(q,3,avg_r);
