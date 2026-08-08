@@ -28,6 +28,7 @@ foreach ($c in $copies) {
 $targets = @(
   "Scripts\AlikhandeScanner\CompileAllModules.mq5",
   "Scripts\AlikhandeScanner\DatabaseSmoke.mq5",
+  "Scripts\AlikhandeScanner\PersistenceSmoke.mq5",
   "Scripts\AlikhandeScanner\SmokeDomain.mq5",
   "Scripts\AlikhandeScanner\SymbolDiscovery.mq5",
   "Scripts\AlikhandeScanner\SymbolSpec.mq5",
