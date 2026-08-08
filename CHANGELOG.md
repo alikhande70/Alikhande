@@ -29,12 +29,22 @@ Added (net-new modules, additive to the v1.1.0 engines):
 - `Core/ParameterHash.mqh` — hashes the active scoring parameter set for signal snapshots.
 - `docs/ARCHITECTURE_V1.2.md`, `docs/ROADMAP.md`.
 
-Known gap: the v1.1.0 engines themselves (`Analysis/TrendEngine.mqh`, `Analysis/ZoneEngine.mqh`,
-`Signals/SignalEngine.mqh`, `Trading/RiskPlanner.mqh`, `Trading/DemoExecution.mqh`,
-`Broker/SymbolResolver.mqh`, `Broker/SymbolSpec.mqh`, `UI/Dashboard.mqh`, and
-`Experts/AlikhandeScanner/AlikhandeScanner.mq5` itself) have not yet been imported into this
-repository — see `docs/ARCHITECTURE_V1.2.md`. Compilation and the acceptance-test gate cannot be
-verified until that import happens and MetaEditor is run against the result.
+Follow-up pass: since the exact v1.1.0 binary could not be transferred through this session's
+chat channel (confirmed unreliable at 37KB after two attempts), the core engines were rewritten
+from scratch to match the documented v1.1.0 behavior instead — `Analysis/TrendEngine.mqh`,
+`Analysis/ZoneEngine.mqh`, `Signals/SignalEngine.mqh`, `Trading/RiskPlanner.mqh`,
+`Trading/DemoExecution.mqh`, `Broker/SymbolResolver.mqh`, `Broker/SymbolSpec.mqh`, `Safety/*`,
+`Storage/SignalLogger.mqh`, `Statistics/Statistics.mqh`, `Core/{Config,SignalRegistry,Hash,
+NewBarDetector}.mqh`, `Domain/{Enums,Models}.mqh`, and `Experts/AlikhandeScanner/
+AlikhandeScanner.mq5` itself (wiring every module together, sliced scanner, OnTradeTransaction
+reconciliation). See `docs/v1.1.0_README.md` and `docs/v1.1.0_ACCEPTANCE_TESTS.md` for the
+behavior this was built against.
+
+Known incompleteness (tracked in `docs/ROADMAP.md`): the interactive Preview/Confirm-to-execute
+dashboard UI is not wired yet, and `Safety/AccountRiskGuard.mqh` isn't called from the execution
+path yet. No MetaEditor/MT5 terminal is available in this environment, so **nothing here has been
+compiled or run** — every module should be treated as "believed correct, not proven to compile"
+until checked in a real MT5 environment.
 
 ## v1.1.0 — ScannerPanel Hardening Edition
 

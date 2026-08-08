@@ -37,8 +37,8 @@ PreflightResult RunOrderPreflight(const string symbol, const ENUM_ORDER_TYPE ord
       return r;
      }
 
-   double spreadPts = (double)SymbolInfoInteger(symbol, SYMBOL_SPREAD);
-   double maxSpreadPts = 0.0; // caller-configurable; 0 = no override, handled upstream
+   // Spread ceiling is a caller-level concern (handled upstream by the News/
+   // Regime gates); this pass only validates what would make OrderSend fail.
    MqlTick tick;
    if(!SymbolInfoTick(symbol, tick))
      {

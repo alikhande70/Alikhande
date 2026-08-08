@@ -21,13 +21,32 @@ No new strategies or setups. Scope:
 - [x] System health: restart recovery, telemetry, broker-spec drift (`Health/SystemHealth.mqh`)
 - [x] Multi-tab dashboard (`UI/DashboardTabs.mqh`)
 - [x] Unit test skeleton (`Tests/*`)
-- [ ] Import exact v1.1.0 source and wire the new modules into `AlikhandeScanner.mq5` —
-      **blocked**, see `docs/ARCHITECTURE_V1.2.md` "known gap"
-- [ ] `CompileAllModules.mq5` updated to include every new header
-- [ ] Compile-clean in MetaEditor (0 errors / 0 warnings) — cannot be verified in this
-      environment; no MetaEditor/MT5 terminal available here. Must be checked by the user or in
-      a Windows/Wine MT5 environment before this is considered done.
-- [ ] Acceptance tests re-run against `docs/ACCEPTANCE_TESTS.md` plus new P0 gates
+- [x] Exact v1.1.0 binary import abandoned (chat-channel transfer unreliable at 37KB, confirmed
+      after two attempts). Replaced with a fresh, spec-compliant reimplementation of every core
+      engine (`Analysis/TrendEngine.mqh`, `Analysis/ZoneEngine.mqh`, `Signals/SignalEngine.mqh`,
+      `Trading/RiskPlanner.mqh`, `Trading/DemoExecution.mqh`, `Broker/SymbolResolver.mqh`,
+      `Broker/SymbolSpec.mqh`, `Safety/*`, `Storage/SignalLogger.mqh`, `Statistics/Statistics.mqh`,
+      `Core/SignalRegistry.mqh`, `Core/Config.mqh`), matching the documented v1.1.0 behavior from
+      `docs/v1.1.0_README.md` / `docs/v1.1.0_ACCEPTANCE_TESTS.md` line-for-line where testable.
+- [x] `Experts/AlikhandeScanner/AlikhandeScanner.mq5` wired end-to-end: OnInit resolves symbols,
+      warms up specs, opens the DB, recovers restart state; OnTimer runs the sliced scanner
+      (data quality -> news gate -> MTF/zones -> setup -> score -> signal persistence ->
+      dashboard); OnTradeTransaction reconciles fills.
+- [x] `CompileAllModules.mq5` updated to include every header (new + engine)
+- [ ] **Known incompleteness**: the interactive Preview/Confirm-to-execute UI is not wired yet.
+      `Trading/DemoExecution.mqh::ExecuteDemoTrade` and the full Execution/Risk/Guard pipeline
+      behind it are complete and callable, but no dashboard button currently drives a signal from
+      `CONFIRMED` through `PREVIEWED` to an actual `OrderSend`. `Safety/AccountRiskGuard.mqh`'s
+      `EvaluateAccountGuards` is likewise implemented but not yet called from the execution path.
+      This is the next slice of work.
+- [ ] Compile-clean in MetaEditor (0 errors / 0 warnings) — **cannot be verified in this
+      environment**; no MetaEditor/MT5 terminal is available in this remote session. A brace-
+      balance sanity check passed on every file, but that is not a substitute for an actual
+      compile. Must be checked by the user (or in a future session with MT5/Wine access) before
+      this is considered done — treat every module as "believed correct, not proven to compile"
+      until then.
+- [ ] Acceptance tests re-run against `docs/v1.1.0_ACCEPTANCE_TESTS.md` plus the new v1.2.0 gates
+      listed at the bottom of that file — needs a live/demo MT5 terminal, not available here.
 
 ## v1.3.0 — Signal Intelligence (next)
 

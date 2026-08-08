@@ -15,12 +15,21 @@ with zero new strategies/setups in this pass.
 - Phased roadmap (v1.2 → v1.3 → v2.0): [`docs/ROADMAP.md`](docs/ROADMAP.md)
 - Changelog: [`CHANGELOG.md`](CHANGELOG.md)
 
-**Known gap:** the exact v1.1.0 `.mq5`/`.mqh` source (TrendEngine, ZoneEngine, SignalEngine,
-RiskPlanner, DemoExecution, SymbolResolver, the original single-tab Dashboard, etc.) has not yet
-been imported into this repo — see `docs/ARCHITECTURE_V1.2.md`. The new P0 modules under
-`MQL5/Include/AlikhandeScanner/{Storage,Domain,Execution,Risk,News,Health,UI,Tests}` are
-complete and self-contained, but the Expert Advisor entry point (`AlikhandeScanner.mq5`) that
-wires them together still needs the original engines present to compile.
+**Known gaps** (see `docs/ROADMAP.md` for full detail):
+
+- The exact v1.1.0 binary source could not be transferred into this repo (chat-channel transfer
+  unreliable at 37KB). The core engines (TrendEngine, ZoneEngine, SignalEngine, RiskPlanner,
+  DemoExecution, SymbolResolver/Spec, etc.) were **rewritten from scratch** to match the
+  documented v1.1.0 behavior in `docs/v1.1.0_README.md` / `docs/v1.1.0_ACCEPTANCE_TESTS.md`,
+  not ported byte-for-byte.
+- `AlikhandeScanner.mq5` wires the full scan → score → persist → dashboard pipeline, but the
+  interactive Preview/Confirm-to-execute UI (buttons that drive a signal from CONFIRMED through
+  PREVIEWED to an actual order) is not built yet — `Trading/DemoExecution.mqh` is complete and
+  callable, just not yet triggered from the dashboard.
+- **No MetaEditor/MT5 terminal is available in this build environment.** Nothing in this repo has
+  been compiled or run. Every module should be treated as "believed correct, not proven to
+  compile" until checked in a real MT5 environment (0 errors / 0 warnings is the required gate,
+  per `docs/v1.1.0_ACCEPTANCE_TESTS.md`).
 
 ## Layout
 
