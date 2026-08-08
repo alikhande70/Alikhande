@@ -1,5 +1,17 @@
 # Changelog
 
+> **Status note:** the `Analysis/`, `Signals/`, `Trading/`, `Broker/`, `Safety/`,
+> `Storage/SignalLogger.mqh`, `Statistics/`, and `Core/{Config,SignalRegistry,Hash,
+> NewBarDetector}.mqh` files plus `Experts/AlikhandeScanner/AlikhandeScanner.mq5` in this branch
+> are a **provisional, docs-based rewrite** and are NOT the v1.1.0 baseline. The real
+> `alikhande_scanner_v1.1.0.zip` source has been separately retrieved and SHA-256-verified against
+> `MANIFEST.sha256` in another session. That real source is the actual integration base — these
+> provisional files stay on this branch for reference only until the real source is merged in and
+> audited against them (see `docs/ROADMAP.md` task "Get real v1.1.0 source, then audit+merge").
+> The P0 modules (`Storage/Database.mqh`, `Domain/SignalLifecycle.mqh`, `Execution/*`, `Risk/*`,
+> `News/*`, `Health/*`, `UI/DashboardTabs.mqh`, `Tests/*`) are unaffected — they're additive and
+> don't depend on which engine implementation they sit on top of.
+
 ## v1.2.0 — Reliability & Evidence Edition (in progress)
 
 Added (net-new modules, additive to the v1.1.0 engines):
