@@ -1,0 +1,32 @@
+name: mt5-compile-self-hosted
+
+on:
+  workflow_dispatch:
+    inputs:
+      metaeditor:
+        description: "Absolute path to MetaEditor64.exe on the self-hosted runner"
+        required: true
+        default: "C:\\Program Files\\MetaTrader 5\\metaeditor64.exe"
+      terminal_data_path:
+        description: "MT5 terminal data folder containing MQL5"
+        required: true
+
+jobs:
+  compile:
+    runs-on: [self-hosted, Windows, X64, mt5]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile Alikhande in real MetaEditor
+        shell: powershell
+        run: >-
+          ./tools/compile_mt5.ps1
+          -MetaEditor '${{ inputs.metaeditor }}'
+          -TerminalDataPath '${{ inputs.terminal_data_path }}'
+      - name: Upload MetaEditor evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alikhande-metaeditor-logs
+          path: artifacts/metaeditor/
+          if-no-files-found: warn
