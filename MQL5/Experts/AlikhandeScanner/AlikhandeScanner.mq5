@@ -62,6 +62,7 @@ AS_NewsGate g_news;
 AS_Database g_db;
 AS_Repositories g_repo;
 AS_ReadModels g_read;
+AS_RiskStateStore g_risk_state;
 AS_SignalLifecycle g_lifecycle;
 AS_OutcomeEngine g_outcomes;
 AS_ExecutionEngine g_execution;
@@ -134,7 +135,8 @@ int OnInit(){
    }
    g_parameter_hash=CurrentParameterHash();
    bool db_ok=g_db.Open();if(!db_ok)g_breaker.Trip("DB_NOT_READY");
-   g_repo.Attach(g_db);g_read.Attach(g_db);g_lifecycle.Attach(g_repo);g_outcomes.Attach(g_repo);g_execution.Attach(g_repo);
+   g_repo.Attach(g_db);g_read.Attach(g_db);g_risk_state.Attach(g_db);g_account_guard.Attach(g_risk_state);
+   g_lifecycle.Attach(g_repo);g_outcomes.Attach(g_repo);g_execution.Attach(g_repo);
    g_account_guard.Initialize();g_ui.Build();EventSetMillisecondTimer((int)MathMax(100,InpScanTimerMs));
    PrintFormat("%s %s initialized mode=%s parameter_hash=%s",AS_PRODUCT_NAME,AS_VERSION,EnumToString(InpRunMode),g_parameter_hash);
    return INIT_SUCCEEDED;
