@@ -1,47 +1,15 @@
-//+------------------------------------------------------------------+
-//| SymbolDiscovery.mq5                                                |
-//| Diagnostic: resolves each configured symbol and prints how it was |
-//| matched (exact / _o suffix / # prefix / normalized fallback /     |
-//| UNRESOLVED). Run after CompileAllModules, before the EA.          |
-//+------------------------------------------------------------------+
-#property copyright "Alikhande"
-#property version   "1.20"
+#property strict
+#property version "1.10"
 #property script_show_inputs
 
-#include <AlikhandeScanner/Broker/SymbolResolver.mqh>
+input string InpSearchTerms="XAU,EUR,GBP,JPY,CHF,AUD,CAD,NZD,NQ,AAPL,MSFT,NVDA,AMZN,GOOG,META,TSLA";
 
-input string InpSymbolsCsv = "EURUSD,GBPUSD,XAUUSD";
-
-string ResolutionStatusLabel(const ENUM_SYMBOL_RESOLUTION status)
-  {
-   switch(status)
-     {
-      case SYMBOL_RESOLVED_EXACT:      return "EXACT";
-      case SYMBOL_RESOLVED_SUFFIX:     return "SUFFIX(_o)";
-      case SYMBOL_RESOLVED_PREFIX:     return "PREFIX(#)";
-      case SYMBOL_RESOLVED_NORMALIZED: return "NORMALIZED";
-      case SYMBOL_UNRESOLVED:          return "UNRESOLVED";
-     }
-   return "?";
-  }
-
-void OnStart()
-  {
-   string symbols[];
-   int n = StringSplit(InpSymbolsCsv, ',', symbols);
-
-   PrintFormat("=== Alikhande Symbol Discovery — %d symbol(s) ===", n);
-   for(int i = 0; i < n; i++)
-     {
-      string baseName = symbols[i];
-      StringTrimLeft(baseName);
-      StringTrimRight(baseName);
-      if(baseName == "")
-         continue;
-
-      SymbolResolution res = ResolveSymbol(baseName);
-      PrintFormat("%-12s -> %-12s [%s]", baseName,
-                  res.resolvedName == "" ? "UNRESOLVED" : res.resolvedName,
-                  ResolutionStatusLabel(res.status));
-     }
-  }
+void OnStart(){
+   string targets[];int n=StringSplit(InpSearchTerms,',',targets);int total=SymbolsTotal(false);
+   PrintFormat("Alikhande SymbolDiscovery: scanning %d broker symbols for %d terms",total,n);
+   for(int t=0;t<n;t++){StringTrimLeft(targets[t]);StringTrimRight(targets[t]);string needle=targets[t];StringToUpper(needle);int matches=0;Print("------------------------------------------------------");PrintFormat("MATCHES FOR '%s':",targets[t]);
+      for(int i=0;i<total;i++){string name=SymbolName(i,false),hay=name;StringToUpper(hay);if(StringFind(hay,needle)<0)continue;bool selected=(bool)SymbolInfoInteger(name,SYMBOL_SELECT);string spec="?";if(SymbolSelect(name,true)){int d=(int)SymbolInfoInteger(name,SYMBOL_DIGITS);double point=SymbolInfoDouble(name,SYMBOL_POINT);spec=StringFormat("digits=%d point=%s",d,DoubleToString(point,8));if(!selected)SymbolSelect(name,false);}PrintFormat("   %-24s %s %s",name,spec,(selected?"(Market Watch)":""));matches++;}
+      if(matches==0)PrintFormat("   no match for '%s'",targets[t]);
+   }
+   Print("DONE. Copy the exact broker symbols into Alikhande Scanner inputs or extend SymbolResolver.mqh.");
+}

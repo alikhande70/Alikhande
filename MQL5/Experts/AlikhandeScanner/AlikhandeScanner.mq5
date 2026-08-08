@@ -1,29 +1,10 @@
-//+------------------------------------------------------------------+
-//| AlikhandeScanner.mq5                                               |
-//| Multi-timeframe zone-based trend scanner. Alert-only by default;   |
-//| demo execution requires explicit user confirmation via the         |
-//| Detail tab and passes through the full reliability pipeline        |
-//| (RiskPlanner -> TradeGuards -> OrderPreflight -> DemoExecution).    |
-//|                                                                      |
-//| v1.2.0 — Reliability & Evidence Edition. This is a fresh,          |
-//| spec-compliant rebuild (see README.md "Known gap" and               |
-//| docs/ARCHITECTURE_V1.2.md) written to match the documented v1.1.0  |
-//| behavior in docs/v1.1.0_README.md and docs/v1.1.0_ACCEPTANCE_TESTS.md,|
-//| not a byte-exact port of the original source.                       |
-//+------------------------------------------------------------------+
-#property copyright "Alikhande"
-#property version   "1.20"
 #property strict
+#property version   "1.10"
+#property description "Alikhande Scanner MT5 v1.1.0 - ScannerPanel hardening edition, alert-only by default"
 
 #include <AlikhandeScanner/Core/Config.mqh>
 #include <AlikhandeScanner/Core/VersionInfo.mqh>
-#include <AlikhandeScanner/Core/ParameterHash.mqh>
-#include <AlikhandeScanner/Core/NewBarDetector.mqh>
-#include <AlikhandeScanner/Core/SignalRegistry.mqh>
-#include <AlikhandeScanner/Core/Hash.mqh>
-#include <AlikhandeScanner/Storage/Database.mqh>
-#include <AlikhandeScanner/Storage/SignalLogger.mqh>
-#include <AlikhandeScanner/Domain/SignalLifecycle.mqh>
+#include <AlikhandeScanner/Domain/Models.mqh>
 #include <AlikhandeScanner/Broker/SymbolResolver.mqh>
 #include <AlikhandeScanner/Broker/SymbolSpec.mqh>
 #include <AlikhandeScanner/Data/MarketData.mqh>
@@ -31,294 +12,69 @@
 #include <AlikhandeScanner/Analysis/TrendEngine.mqh>
 #include <AlikhandeScanner/Analysis/ZoneEngine.mqh>
 #include <AlikhandeScanner/Signals/SignalEngine.mqh>
-#include <AlikhandeScanner/Risk/PortfolioRisk.mqh>
+#include <AlikhandeScanner/UI/Dashboard.mqh>
+#include <AlikhandeScanner/Storage/SignalLogger.mqh>
 #include <AlikhandeScanner/Trading/RiskPlanner.mqh>
 #include <AlikhandeScanner/Trading/DemoExecution.mqh>
-#include <AlikhandeScanner/Safety/TradeGuards.mqh>
 #include <AlikhandeScanner/Safety/AccountRiskGuard.mqh>
-#include <AlikhandeScanner/News/NewsFilter.mqh>
-#include <AlikhandeScanner/Execution/TradeRequestTracker.mqh>
-#include <AlikhandeScanner/Execution/ExecutionStateMachine.mqh>
-#include <AlikhandeScanner/Execution/OrderPreflight.mqh>
-#include <AlikhandeScanner/Health/SystemHealth.mqh>
-#include <AlikhandeScanner/Statistics/Statistics.mqh>
-#include <AlikhandeScanner/UI/DashboardTabs.mqh>
 
-//--- inputs -----------------------------------------------------------
-input string InpSymbolsCsv        = "EURUSD,GBPUSD,XAUUSD"; // comma-separated base symbol names
-input bool   InpAlertOnly         = CFG_ALERT_ONLY_DEFAULT;
-input double InpRiskPct           = CFG_DEFAULT_RISK_PCT;
-input double InpMaxOpenRiskPct    = CFG_DEFAULT_MAX_OPEN_RISK_PCT;
-input double InpMaxSymbolRiskPct  = CFG_DEFAULT_MAX_SYMBOL_RISK_PCT;
-input double InpMaxCcyRiskPct     = CFG_DEFAULT_MAX_CCY_RISK_PCT;
-input double InpMaxDailyRiskPct   = CFG_DEFAULT_DAILY_RISK_PCT;
-input bool   InpAccountGuardsEnabled = CFG_ACCOUNT_GUARDS_ENABLED_DEFAULT;
-input double InpMaxDailyLossPct   = 3.0;
-input double InpMaxDrawdownPct    = 8.0;
-input int    InpMaxConsecutiveLosses = 4;
-input long   InpMagicNumber       = 20260101;
+input string InpSymbols=AS_DEFAULT_SYMBOLS;
+input int InpScanTimerMs=AS_DEFAULT_SCAN_TIMER_MS;
+input int InpScanBudgetMicroseconds=AS_DEFAULT_SCAN_BUDGET_US;
+input int InpSymbolsPerSlice=AS_DEFAULT_SYMBOLS_PER_SLICE;
+input int InpMinimumBars=AS_DEFAULT_MINIMUM_BARS;
+input int InpSpreadWarmupSamples=AS_DEFAULT_SPREAD_WARMUP_SAMPLES;
+input int InpMaximumTickAgeSeconds=AS_DEFAULT_MAX_TICK_AGE_SECONDS;
+input ENUM_AS_CHART_REUSE InpChartReuseMode=AS_ATLAS_MANAGED_ONLY;
+input bool InpEnableAlerts=true;
+input int InpAlertCooldownMinutes=30;
+input bool InpAlertOnlyMode=true;
+input bool InpEnableAccountRiskGuards=false;
 
-//--- runtime state ------------------------------------------------------
-string g_ResolvedSymbols[];
-string g_UnresolvedSymbols[];
-int    g_ScanCursor = 0;
-AccountGuardState g_AccountGuardState;
-datetime g_LastReconcileTs = 0;
+AS_MarketData g_data;AS_TrendEngine g_trend;AS_ZoneEngine g_zones;AS_SignalEngine g_signal;AS_Dashboard g_ui;AS_SignalLogger g_log;
+AS_SymbolResolver g_resolver;AS_SymbolSpecReader g_spec_reader;AS_AccountRiskGuard g_account_guard;
+string g_requested[],g_symbols[];int g_cursor=0;datetime g_last_alert[];AS_SpreadTracker *g_spreads[];
+datetime g_bar_h4[],g_bar_h1[],g_bar_m15[],g_bar_m5[];AS_TrendResult g_h4[],g_h1[],g_m15[],g_m5[];AS_SignalCandidate g_cached_signal[];
 
-//+------------------------------------------------------------------+
-int OnInit()
-  {
-   Print(AlikhandeVersionString());
+string TrendText(ENUM_AS_TREND_CLASS t){if(t==AS_STRONG_BULLISH)return "STR BULL";if(t==AS_BULLISH)return "BULL";if(t==AS_WEAK_BULLISH)return "WK BULL";if(t==AS_STRONG_BEARISH)return "STR BEAR";if(t==AS_BEARISH)return "BEAR";if(t==AS_WEAK_BEARISH)return "WK BEAR";return "NEUTRAL";}
 
-   if(!AlikhandeDbInit())
-     {
-      Print("Alikhande: FATAL — database init failed, EA will not run");
-      return INIT_FAILED;
-     }
+bool RefreshTrend(const string symbol,const ENUM_TIMEFRAMES tf,datetime &last_bar,AS_TrendResult &out,bool &changed){changed=false;datetime closed=iTime(symbol,tf,1);if(closed<=0)return false;if(closed==last_bar&&out.valid)return true;AS_TrendResult temp;ZeroMemory(temp);if(!g_trend.Analyze(symbol,tf,temp))return false;out=temp;last_bar=closed;changed=true;return true;}
 
-   HealthRecordRestartMarker();
-   TradeRequestRecoverAfterRestart();
-   AccountGuardResetDay(g_AccountGuardState);
+bool IsManagedChart(const long cid){return ObjectFind(cid,AS_MANAGED_CHART_MARKER)>=0;}
+long FindExistingChart(const string symbol,const ENUM_TIMEFRAMES tf,const bool managed_only){for(long cid=ChartFirst();cid>=0;cid=ChartNext(cid)){if(ChartSymbol(cid)==symbol&&ChartPeriod(cid)==tf){if(!managed_only||IsManagedChart(cid))return cid;}}return -1;}
+void OpenManagedChart(const string symbol,const ENUM_TIMEFRAMES tf){long cid=-1;if(InpChartReuseMode==AS_ATLAS_MANAGED_ONLY)cid=FindExistingChart(symbol,tf,true);else if(InpChartReuseMode==AS_REUSE_ANY_MATCHING)cid=FindExistingChart(symbol,tf,false);if(cid<0)cid=ChartOpen(symbol,tf);if(cid>0){ChartSetInteger(cid,CHART_BRING_TO_TOP,true);if(ObjectFind(cid,AS_MANAGED_CHART_MARKER)<0){ObjectCreate(cid,AS_MANAGED_CHART_MARKER,OBJ_LABEL,0,0,0);ObjectSetString(cid,AS_MANAGED_CHART_MARKER,OBJPROP_TEXT,"");ObjectSetInteger(cid,AS_MANAGED_CHART_MARKER,OBJPROP_COLOR,clrNONE);ObjectSetInteger(cid,AS_MANAGED_CHART_MARKER,OBJPROP_HIDDEN,true);}}}
 
-   string rawSymbols[];
-   int n = StringSplit(InpSymbolsCsv, ',', rawSymbols);
-   ArrayResize(g_ResolvedSymbols, 0);
-   ArrayResize(g_UnresolvedSymbols, 0);
+int OnInit(){
+   string raw[];int n=StringSplit(InpSymbols,',',raw);if(n<=0)return INIT_PARAMETERS_INCORRECT;
+   ArrayResize(g_requested,n);ArrayResize(g_symbols,n);ArrayResize(g_last_alert,n);ArrayResize(g_spreads,n);ArrayResize(g_bar_h4,n);ArrayResize(g_bar_h1,n);ArrayResize(g_bar_m15,n);ArrayResize(g_bar_m5,n);ArrayResize(g_h4,n);ArrayResize(g_h1,n);ArrayResize(g_m15,n);ArrayResize(g_m5,n);ArrayResize(g_cached_signal,n);
+   for(int i=0;i<n;i++){g_requested[i]=raw[i];StringTrimLeft(g_requested[i]);StringTrimRight(g_requested[i]);string resolved="";if(!g_resolver.Resolve(g_requested[i],resolved))PrintFormat("Alikhande: unresolved symbol '%s'",g_requested[i]);g_symbols[i]=resolved;g_spreads[i]=new AS_SpreadTracker();}
+   g_account_guard.Initialize();g_ui.Header();EventSetMillisecondTimer((int)MathMax(100,InpScanTimerMs));PrintFormat("Alikhande Scanner v%s initialized. AlertOnly=%s",AS_VERSION,(InpAlertOnlyMode?"true":"false"));return INIT_SUCCEEDED;
+}
 
-   for(int i = 0; i < n; i++)
-     {
-      string baseName = rawSymbols[i];
-      StringTrimLeft(baseName);
-      StringTrimRight(baseName);
-      if(baseName == "")
-         continue;
+void OnDeinit(const int reason){EventKillTimer();for(int i=0;i<ArraySize(g_spreads);i++)if(CheckPointer(g_spreads[i])==POINTER_DYNAMIC)delete g_spreads[i];g_ui.Clear();}
 
-      SymbolResolution res = ResolveSymbol(baseName);
-      if(res.status == SYMBOL_UNRESOLVED)
-        {
-         int u = ArraySize(g_UnresolvedSymbols);
-         ArrayResize(g_UnresolvedSymbols, u + 1);
-         g_UnresolvedSymbols[u] = baseName;
-         AlikhandeDbLogEvent("WARN", "SYMBOL_UNRESOLVED", baseName);
-         continue;
-        }
+void OnTimer(){
+   int total=ArraySize(g_symbols);if(total==0)return;ulong started=GetMicrosecondCount();int processed=0,limit=(int)MathMin(InpSymbolsPerSlice,total);
+   while(processed<limit){if(processed>0&&GetMicrosecondCount()-started>=(ulong)MathMax(1000,InpScanBudgetMicroseconds))break;int i=(g_cursor+processed)%total;processed++;string sym=g_symbols[i];
+      if(sym==""){g_ui.Row(i,g_requested[i],0,"DATA","DATA",0,0,"UNRESOLVED");continue;}
+      AS_SymbolSpec spec;if(!g_spec_reader.Read(sym,spec)){g_ui.Row(i,sym,0,"SPEC","SPEC",0,0,"SPEC WARMUP");continue;}
+      AS_SymbolSnapshot snap;if(!g_data.Snapshot(g_requested[i],sym,InpMaximumTickAgeSeconds,snap)){g_ui.Row(i,sym,0,"DATA","DATA",0,0,"NO TICK");continue;}
+      if(snap.spread_state!=AS_SPREAD_STALE){g_spreads[i].Add(snap.spread_points);snap.spread_state=g_spreads[i].Classify(snap.spread_points,InpSpreadWarmupSamples,snap.spread_ratio);}
+      ENUM_AS_DATA_STATE ds;if(!g_data.EnsureAllReady(sym,InpMinimumBars,ds)){g_ui.Row(i,sym,snap.spread_points,"SYNC","SYNC",0,0,"LOADING");continue;}
+      bool c4=false,c1=false,c15=false,c5=false;
+      if(!RefreshTrend(sym,PERIOD_H4,g_bar_h4[i],g_h4[i],c4)||!RefreshTrend(sym,PERIOD_H1,g_bar_h1[i],g_h1[i],c1)||!RefreshTrend(sym,PERIOD_M15,g_bar_m15[i],g_m15[i],c15)||!RefreshTrend(sym,PERIOD_M5,g_bar_m5[i],g_m5[i],c5)){g_ui.Row(i,sym,snap.spread_points,"WAIT","WAIT",0,0,"IND DATA");continue;}
+      if(c4||c1||c15||c5||g_cached_signal[i].confirmation_bar_time==0){AS_Zone z[];g_zones.Build(sym,PERIOD_H1,300,3,3,0.20,z);AS_SignalCandidate candidate;ZeroMemory(candidate);if(g_signal.Evaluate(sym,g_h4[i],g_h1[i],g_m15[i],g_m5[i],snap,z,candidate))g_cached_signal[i]=candidate;}
+      AS_SignalCandidate s;s=g_cached_signal[i];string status=(s.direction==AS_DIR_LONG?"LONG":(s.direction==AS_DIR_SHORT?"SHORT":(s.hard_blocked?"BLOCKED":"NO TRADE")));
+      string risk_codes="";if(!g_account_guard.Check(InpEnableAccountRiskGuards,risk_codes))status="RISK HALT";
+      g_ui.Row(i,sym,snap.spread_points,TrendText(g_h1[i].trend_class),TrendText(g_m15[i].trend_class),s.long_score,s.short_score,status);
+      if((s.direction==AS_DIR_LONG||s.direction==AS_DIR_SHORT)&&status!="RISK HALT"&&g_log.AppendUnique(s)){if(InpEnableAlerts&&TimeCurrent()-g_last_alert[i]>=InpAlertCooldownMinutes*60){Alert(StringFormat("%s %s score L%.0f/S%.0f",sym,status,s.long_score,s.short_score));g_last_alert[i]=TimeCurrent();}}
+   }
+   if(processed>0)g_cursor=(g_cursor+processed)%total;ChartRedraw();
+}
 
-      int r = ArraySize(g_ResolvedSymbols);
-      ArrayResize(g_ResolvedSymbols, r + 1);
-      g_ResolvedSymbols[r] = res.resolvedName;
-     }
+void OnChartEvent(const int id,const long &lparam,const double &dparam,const string &sparam){if(id!=CHARTEVENT_OBJECT_CLICK)return;string symbol;if(g_ui.ParseOpen(sparam,symbol))OpenManagedChart(symbol,PERIOD_M15);}
 
-   for(int i = 0; i < ArraySize(g_ResolvedSymbols); i++)
-      HealthCheckSymbolSpecDrift(g_ResolvedSymbols[i]);
-
-   DashboardCreate();
-   EventSetMillisecondTimer(CFG_TIMER_SLICE_MS);
-
-   return INIT_SUCCEEDED;
-  }
-
-//+------------------------------------------------------------------+
-void OnDeinit(const int reason)
-  {
-   EventKillTimer();
-   DashboardDestroy();
-   ExportSignalsToCsv();
-   AlikhandeDbShutdown();
-  }
-
-//+------------------------------------------------------------------+
-//| Sliced scheduler: at most CFG_SYMBOLS_PER_SLICE symbols per timer  |
-//| event, budget-tracked so a slow broker/symbol never blows the      |
-//| CFG_TIMER_BUDGET_MS ceiling for the whole EA.                      |
-//+------------------------------------------------------------------+
-void OnTimer()
-  {
-   ulong sliceStart = GetMicrosecondCount();
-
-   AccountGuardMaybeRollDay(g_AccountGuardState);
-
-   int total = ArraySize(g_ResolvedSymbols);
-   if(total > 0)
-     {
-      for(int i = 0; i < CFG_SYMBOLS_PER_SLICE && i < total; i++)
-        {
-         int idx = (g_ScanCursor + i) % total;
-         ProcessSymbol(g_ResolvedSymbols[idx]);
-        }
-      g_ScanCursor = (g_ScanCursor + CFG_SYMBOLS_PER_SLICE) % total;
-     }
-
-   if(TimeCurrent() - g_LastReconcileTs >= CFG_RECONCILE_GRACE_SECONDS)
-     {
-      ReconcileStaleRequests(CFG_RECONCILE_GRACE_SECONDS);
-      g_LastReconcileTs = TimeCurrent();
-     }
-
-   HealthTrackTimerSlice(sliceStart, CFG_TIMER_BUDGET_MS);
-  }
-
-//+------------------------------------------------------------------+
-//| Per-symbol pipeline: Data Quality -> News Gate -> MTF+Zones ->     |
-//| Setup -> Score -> Risk Gate -> Signal Lifecycle -> Dashboard.      |
-//| Heavy analysis (trend/zones) only re-runs on a new closed H1 bar — |
-//| everything else (spread/tick) refreshes every slice.                |
-//+------------------------------------------------------------------+
-void ProcessSymbol(const string symbol)
-  {
-   MarketSnapshot snap = FetchMarketSnapshot(symbol, CFG_TF_H1, CFG_ATR_PERIOD);
-
-   bool stale = IsQuoteStale(symbol, CFG_STALE_QUOTE_SECONDS);
-
-   NewsGateResult news = EvaluateNewsGate(symbol, CFG_NEWS_PRE_MINUTES, CFG_NEWS_POST_MINUTES,
-                                           CFG_NEWS_INCLUDE_MEDIUM);
-
-   string status = "SCANNING";
-   color statusColor = DASH_COLOR_MUTED;
-
-   if(stale)
-     {
-      status = "STALE";
-      statusColor = DASH_COLOR_BAD;
-     }
-   else if(news.blocked)
-     {
-      status = "NEWS BLOCK";
-      statusColor = DASH_COLOR_WARN;
-     }
-
-   if(!stale && IsNewClosedBar(symbol, CFG_TF_H1))
-      EvaluateCandidates(symbol, snap, news);
-
-   int row = FindSymbolRow(symbol);
-   DashboardUpdateOverviewRow(row, symbol, "-", "-", "-", 0, 0,
-                              StringFormat("%.0f pts", snap.spreadPoints),
-                              news.blocked ? "BLOCK" : "clear", status, statusColor);
-  }
-
-int FindSymbolRow(const string symbol)
-  {
-   for(int i = 0; i < ArraySize(g_ResolvedSymbols); i++)
-      if(g_ResolvedSymbols[i] == symbol)
-         return i;
-   return 0;
-  }
-
-//+------------------------------------------------------------------+
-void EvaluateCandidates(const string symbol, const MarketSnapshot &snap,
-                         const NewsGateResult &news)
-  {
-   MtfSnapshot mtf = ComputeMtfSnapshot(symbol);
-
-   Zone zones[];
-   FindZones(symbol, CFG_TF_H1, 300, 3, zones);
-   ApplyZoneAtrBuffer(zones, snap.atr, CFG_ZONE_TOLERANCE_ATR);
-
-   MqlTick tick;
-   if(!SymbolInfoTick(symbol, tick))
-      return;
-
-   ENUM_TREND_DIRECTION directions[2] = {TREND_BULLISH, TREND_BEARISH};
-   for(int d = 0; d < 2; d++)
-     {
-      Candidate cand;
-      string blockLines[];
-      double price = (directions[d] == TREND_BULLISH) ? tick.ask : tick.bid;
-
-      if(!BuildCandidate(symbol, directions[d], mtf, zones, price, snap.atr, cand, blockLines))
-         continue;
-      cand.spread = snap.spreadPoints;
-
-      if(news.blocked)
-        {
-         AlikhandeDbLogEvent("INFO", "SIGNAL_BLOCKED_NEWS",
-            StringFormat("%s %s: %s (%s)", symbol, TrendDirectionToString(directions[d]),
-                        news.eventTitle, news.currency));
-         continue;
-        }
-
-      ComputeScore(mtf, snap.atrQualityRatio, cand.nearestZone.touches, cand.score);
-
-      double relevantScore = (directions[d] == TREND_BULLISH) ? cand.score.longScore
-                                                                : cand.score.shortScore;
-      if(relevantScore < 60.0) // [ASSUMED] minimum score to register as a candidate
-         continue;
-
-      PersistCandidate(symbol, directions[d], cand);
-     }
-  }
-
-//+------------------------------------------------------------------+
-void PersistCandidate(const string symbol, const ENUM_TREND_DIRECTION direction,
-                       const Candidate &cand)
-  {
-   string paramBlob = BuildScoringParameterBlob(CFG_ATR_SL_BUFFER_MULT, CFG_MIN_RR,
-                                                 CFG_PULLBACK_LOOKBACK_BARS,
-                                                 CFG_ZONE_TOLERANCE_ATR, ALIKHANDE_RULE_VERSION);
-   string parameterHash = ComputeParameterHash(paramBlob);
-   string brokerSpecHash = ComputeSymbolSpecHash(symbol);
-
-   string signalId = AlikhandeHashWithPrefix(symbol,
-      StringFormat("%s|%d|%.5f|%.5f|%.5f|%d", symbol, (int)direction, cand.entry, cand.sl,
-                   cand.tp, (int)cand.ts));
-
-   if(!SignalRegistryTryAdd(signalId))
-      return; // duplicate SignalID for this timer pass — already logged
-
-   SignalRecord rec;
-   rec.signalId = signalId;
-   rec.ts = cand.ts;
-   rec.symbol = symbol;
-   rec.direction = (direction == TREND_BULLISH) ? "LONG" : "SHORT";
-   rec.setup = SetupTypeToString(cand.setup);
-   rec.h4State = TrendDirectionToString(cand.mtf.h4.direction);
-   rec.h1State = TrendDirectionToString(cand.mtf.h1.direction);
-   rec.m15State = TrendDirectionToString(cand.mtf.m15.direction);
-   rec.m5State = "-"; // M5 confirmation is boolean (setup type), not a trend state
-   rec.spread = cand.spread;
-   rec.atr = cand.atr;
-   rec.support = (cand.nearestZone.type == ZONE_SUPPORT) ? cand.nearestZone.priceLow : 0.0;
-   rec.resistance = (cand.nearestZone.type == ZONE_RESISTANCE) ? cand.nearestZone.priceHigh : 0.0;
-   rec.entry = cand.entry;
-   rec.sl = cand.sl;
-   rec.tp = cand.tp;
-   rec.longScore = cand.score.longScore;
-   rec.shortScore = cand.score.shortScore;
-   rec.ruleVersion = ALIKHANDE_RULE_VERSION;
-   rec.parameterHash = parameterHash;
-   rec.brokerSpecHash = brokerSpecHash;
-   rec.state = SIGNAL_CANDIDATE;
-
-   if(!SignalPersistNew(rec))
-     {
-      AlikhandeDbLogEvent("ERROR", "SIGNAL_PERSIST_FAILED", signalId);
-      return;
-     }
-
-   SignalTransition(signalId, SIGNAL_CANDIDATE, SIGNAL_CONFIRMED);
-
-   string explanationLines[1];
-   explanationLines[0] = StringFormat("score %.0f from MTF alignment + zone quality",
-                                       (direction == TREND_BULLISH) ? cand.score.longScore
-                                                                     : cand.score.shortScore);
-   string noBlocks[0];
-   DashboardUpdateDetail(symbol, rec.h4State, rec.h1State, rec.m15State, rec.m5State,
-                         rec.support, rec.resistance, rec.entry, rec.sl, rec.tp,
-                         explanationLines, noBlocks);
-
-   SendNotification(StringFormat("Alikhande: %s %s %s candidate ready", symbol,
-                                 rec.direction, rec.setup));
-  }
-
-//+------------------------------------------------------------------+
-void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request,
-                         const MqlTradeResult &result)
-  {
-   HandleTradeTransaction(trans, request, result);
-  }
-
-//+------------------------------------------------------------------+
-void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
-  {
-   if(id == CHARTEVENT_OBJECT_CLICK)
-      DashboardHandleClick(sparam);
-  }
+void OnTradeTransaction(const MqlTradeTransaction &trans,const MqlTradeRequest &request,const MqlTradeResult &result){
+   if(trans.type==TRADE_TRANSACTION_DEAL_ADD&&trans.deal>0&&HistoryDealSelect(trans.deal)){long entry=HistoryDealGetInteger(trans.deal,DEAL_ENTRY);if(entry==DEAL_ENTRY_OUT||entry==DEAL_ENTRY_OUT_BY){double net=HistoryDealGetDouble(trans.deal,DEAL_PROFIT)+HistoryDealGetDouble(trans.deal,DEAL_COMMISSION)+HistoryDealGetDouble(trans.deal,DEAL_SWAP);g_account_guard.RegisterClosedProfit(net);}}
+   PrintFormat("Alikhande trade transaction type=%d order=%I64u deal=%I64u retcode=%u",trans.type,trans.order,trans.deal,result.retcode);
+}

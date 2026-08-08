@@ -1,53 +1,48 @@
-# Alikhande Scanner
+# Alikhande Scanner MT5 v1.1.0
 
-MQL5 (MetaTrader 5) Expert Advisor — a multi-timeframe, zone-based trend scanner with an
-alert-only dashboard. Real-account execution is not approved; demo execution is gated behind
-explicit confirmation and risk checks.
+**Edition:** ScannerPanel Hardening Edition  
+**Safety default:** Alert-only; demo execution remains inaccessible from the dashboard.
 
-## Status
+## What changed
 
-This repository is being rebuilt on top of the `v1.1.0` release (source: Google Drive,
-`alikhande_scanner_v1.1.0.zip`) into **v1.2.0 — Reliability & Evidence Edition**: a persistence,
-execution-reliability, and portfolio-risk layer added around the existing scoring engines,
-with zero new strategies/setups in this pass.
+- Broker-aware symbol resolution: exact name, `_o` suffix, `#` prefix and full-tree normalized fallback.
+- `SymbolDiscovery.mq5` and `SymbolSpec.mq5` diagnostic scripts.
+- Centralized defaults and explicit `[ASSUMED]` values in `Core/Config.mqh`.
+- 250 ms sliced scheduler with a 20 ms processing budget and two symbols per slice by default.
+- Tick-staleness detection and symbol-spec warm-up.
+- Heavy analysis is refreshed only after a new closed bar on its timeframe.
+- Corrected EMA buffer chronology and ATR quality normalization.
+- Corrected H4-neutral and two-sided trend-strength scoring bugs.
+- Setup labels now require an actual pullback/rejection condition.
+- Stop Loss is structural, based on the nearest confirmed H1 zone plus an ATR buffer.
+- 2R room-to-target validation.
+- Duplicate SignalID logging prevention.
+- Managed-chart reuse policy.
+- Risk planner rejects trades below broker minimum volume instead of increasing risk.
+- Optional account-level daily loss, drawdown and consecutive-loss guards; disabled by default.
+- Compile-all harness includes every header so MetaEditor parses all modules.
 
-- Architecture blueprint: [`docs/ARCHITECTURE_V1.2.md`](docs/ARCHITECTURE_V1.2.md)
-- Phased roadmap (v1.2 → v1.3 → v2.0): [`docs/ROADMAP.md`](docs/ROADMAP.md)
-- Changelog: [`CHANGELOG.md`](CHANGELOG.md)
+## Install
 
-**Known gaps** (see `docs/ROADMAP.md` for full detail):
+Copy the contents of `MQL5/` into the terminal Data Folder's `MQL5/` directory:
 
-- The exact v1.1.0 binary source could not be transferred into this repo (chat-channel transfer
-  unreliable at 37KB). The core engines (TrendEngine, ZoneEngine, SignalEngine, RiskPlanner,
-  DemoExecution, SymbolResolver/Spec, etc.) were **rewritten from scratch** to match the
-  documented v1.1.0 behavior in `docs/v1.1.0_README.md` / `docs/v1.1.0_ACCEPTANCE_TESTS.md`,
-  not ported byte-for-byte.
-- `AlikhandeScanner.mq5` wires the full scan → score → persist → dashboard pipeline, but the
-  interactive Preview/Confirm-to-execute UI (buttons that drive a signal from CONFIRMED through
-  PREVIEWED to an actual order) is not built yet — `Trading/DemoExecution.mqh` is complete and
-  callable, just not yet triggered from the dashboard.
-- **No MetaEditor/MT5 terminal is available in this build environment.** Nothing in this repo has
-  been compiled or run. Every module should be treated as "believed correct, not proven to
-  compile" until checked in a real MT5 environment (0 errors / 0 warnings is the required gate,
-  per `docs/v1.1.0_ACCEPTANCE_TESTS.md`).
+- `Experts/AlikhandeScanner/AlikhandeScanner.mq5`
+- `Include/AlikhandeScanner/...`
+- `Scripts/AlikhandeScanner/...`
 
-## Layout
+Compile in this order:
 
-```
-MQL5/
-  Experts/AlikhandeScanner/       EA entry point (pending v1.1.0 import)
-  Scripts/AlikhandeScanner/       compile/test/discovery scripts
-  Include/AlikhandeScanner/
-    Core/                         config, hashing, version, new-bar detection
-    Storage/                      SQLite persistence (NEW in v1.2.0)
-    Domain/                       enums, models, signal lifecycle (NEW)
-    Execution/                    order preflight, trade tracking, state machine (NEW)
-    Risk/                         portfolio-level exposure gates (NEW)
-    News/                         economic calendar gate (NEW)
-    Health/                       restart recovery, telemetry, spec-drift detection (NEW)
-    UI/                           multi-tab dashboard (NEW, replaces single-tab Dashboard.mqh)
-    Tests/                        dependency-free unit tests (NEW)
-    Analysis/ Broker/ Data/ Safety/ Signals/ Statistics/ Trading/
-                                   existing engines (pending v1.1.0 import)
-docs/                             architecture, roadmap, acceptance tests, technical spec
-```
+1. `Scripts/AlikhandeScanner/CompileAllModules.mq5`
+2. `Scripts/AlikhandeScanner/SymbolDiscovery.mq5`
+3. `Scripts/AlikhandeScanner/SymbolSpec.mq5`
+4. `Experts/AlikhandeScanner/AlikhandeScanner.mq5`
+
+Required gate: **0 errors / 0 warnings** for all four programs.
+
+## Important limitations
+
+- Historical Win Rate and outcome tracking are still not implemented; no probability is displayed.
+- Breakout-Retest remains reserved in the enum but is not yet an active setup.
+- Demo execution classes are compiled but not exposed through dashboard buttons.
+- Real-account execution is not approved.
+- This package has not been compiled in MetaEditor in the current environment.

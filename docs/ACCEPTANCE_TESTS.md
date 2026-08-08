@@ -1,9 +1,5 @@
 # Acceptance Tests — v1.1.0
 
-> Reference copy pulled from Google Drive (`alikhande_scanner_v1.1.0_ACCEPTANCE_TESTS.md`).
-> v1.2.0 must pass all of these plus the new P0 gates (execution reliability, portfolio risk,
-> news gate, restart recovery) before it can claim the v1.2.0 label.
-
 ## Compile Gate
 
 - CompileAllModules: 0 errors / 0 warnings.
@@ -42,17 +38,3 @@
 - Preview expiry and price drift block demo execution.
 - Alert-only mode blocks order sending.
 - Real accounts remain blocked.
-
-## v1.2.0 additions (new gates, not yet exercised — no MetaEditor/MT5 terminal in this build environment)
-
-- A trade request that never receives an `OnTradeTransaction` confirmation within the grace
-  period is marked for reconciliation, not left `SUBMITTING` forever.
-- A duplicate `RequestID` (replay after restart) is rejected, never resubmitted.
-- A new trade that would breach per-symbol, total-open, currency-exposure, or daily-risk-budget
-  caps is blocked with a stated reason, never silently resized.
-- A high-impact news event inside the configured pre/post window blocks new candidate signals
-  for the affected symbol's currencies.
-- A broker changing a symbol's spec (digits, contract size, stops level, freeze level, tick
-  value) mid-session raises a `SYMBOL_SPEC_DRIFT` warning instead of silently mispricing risk.
-- `OnInit` after a restart reconciles any trade request left in a non-terminal state before
-  scanning resumes.

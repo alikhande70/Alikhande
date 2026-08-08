@@ -1,91 +1,35 @@
-//+------------------------------------------------------------------+
-//| MarketData.mqh                                                     |
-//| Live quote + indicator buffer access. EMA buffers are read with   |
-//| explicit chronological indexing (index 0 = current/forming bar,   |
-//| ascending index = further into the past) — the v1.1.0 changelog   |
-//| calls out a chronology bug here, so every read is index-explicit  |
-//| rather than assumed.                                              |
-//+------------------------------------------------------------------+
-#property strict
+#pragma once
+#include "../Domain/Models.mqh"
 
-struct MarketSnapshot
-  {
-   double bid, ask, spreadPoints;
-   double atr;
-   double atrQualityRatio; // ATR / its own N-bar average — normalizes "is ATR unusually high/low"
-   double ema20, ema50, ema200;
-   datetime tickTime;
-  };
+class AS_MarketData {
+public:
+   bool EnsureReady(const string symbol,const ENUM_TIMEFRAMES tf,const int min_bars,ENUM_AS_DATA_STATE &state) {
+      if(!SymbolSelect(symbol,true)) { state=AS_DATA_ERROR; return false; }
+      if(!SymbolIsSynchronized(symbol)) { state=AS_DATA_SYNCHRONIZING; return false; }
+      long synced=0; ResetLastError();
+      if(!SeriesInfoInteger(symbol,tf,SERIES_SYNCHRONIZED,synced) || synced==0) { state=AS_DATA_DOWNLOADING; return false; }
+      if(Bars(symbol,tf)<min_bars) { state=AS_DATA_DOWNLOADING; return false; }
+      state=AS_DATA_READY; return true;
+   }
 
-double ReadAtr(const string symbol, const ENUM_TIMEFRAMES tf, const int period, const int shift)
-  {
-   int handle = iATR(symbol, tf, period);
-   if(handle == INVALID_HANDLE)
-      return 0.0;
+   bool EnsureAllReady(const string symbol,const int min_bars,ENUM_AS_DATA_STATE &state){
+      ENUM_TIMEFRAMES tfs[4]={PERIOD_H4,PERIOD_H1,PERIOD_M15,PERIOD_M5};
+      for(int i=0;i<4;i++)if(!EnsureReady(symbol,tfs[i],min_bars,state))return false;
+      state=AS_DATA_READY;return true;
+   }
 
-   double buf[];
-   ArraySetAsSeries(buf, true);
-   if(CopyBuffer(handle, 0, shift, 1, buf) <= 0)
-      return 0.0;
-   return buf[0];
-  }
+   bool Snapshot(const string requested,const string symbol,const int max_tick_age_seconds,AS_SymbolSnapshot &s) {
+      ZeroMemory(s); MqlTick tick; s.requested_symbol=requested; s.symbol=symbol;
+      if(!SymbolInfoTick(symbol,tick)) { s.spread_state=AS_SPREAD_NO_TICK; s.data_state=AS_DATA_ERROR; return false; }
+      s.bid=tick.bid; s.ask=tick.ask; s.tick_time=(datetime)tick.time;
+      s.point=SymbolInfoDouble(symbol,SYMBOL_POINT); s.digits=(int)SymbolInfoInteger(symbol,SYMBOL_DIGITS);
+      if(s.point<=0 || s.ask<=0 || s.bid<=0) { s.data_state=AS_DATA_ERROR; return false; }
+      s.spread_points=(s.ask-s.bid)/s.point;
+      if(max_tick_age_seconds>0 && TimeCurrent()-s.tick_time>max_tick_age_seconds){s.spread_state=AS_SPREAD_STALE;s.data_state=AS_DATA_STALE;return true;}
+      s.data_state=AS_DATA_READY; return true;
+   }
 
-double ReadAtrQualityRatio(const string symbol, const ENUM_TIMEFRAMES tf, const int period,
-                            const int avgWindow)
-  {
-   int handle = iATR(symbol, tf, period);
-   if(handle == INVALID_HANDLE)
-      return 1.0;
-
-   double buf[];
-   ArraySetAsSeries(buf, true);
-   if(CopyBuffer(handle, 0, 0, avgWindow, buf) <= 0 || ArraySize(buf) < avgWindow)
-      return 1.0;
-
-   double sum = 0.0;
-   for(int i = 0; i < avgWindow; i++)
-      sum += buf[i];
-   double avg = sum / avgWindow;
-   if(avg <= 0.0)
-      return 1.0;
-
-   return buf[0] / avg;
-  }
-
-double ReadEma(const string symbol, const ENUM_TIMEFRAMES tf, const int period, const int shift)
-  {
-   int handle = iMA(symbol, tf, period, 0, MODE_EMA, PRICE_CLOSE);
-   if(handle == INVALID_HANDLE)
-      return 0.0;
-
-   double buf[];
-   ArraySetAsSeries(buf, true); // index 0 = most recent — explicit, not assumed
-   if(CopyBuffer(handle, 0, shift, 1, buf) <= 0)
-      return 0.0;
-   return buf[0];
-  }
-
-MarketSnapshot FetchMarketSnapshot(const string symbol, const ENUM_TIMEFRAMES atrTf,
-                                    const int atrPeriod)
-  {
-   MarketSnapshot snap;
-   MqlTick tick;
-   if(SymbolInfoTick(symbol, tick))
-     {
-      snap.bid = tick.bid;
-      snap.ask = tick.ask;
-      snap.tickTime = tick.time;
-     }
-
-   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-   snap.spreadPoints = (point > 0.0) ? (snap.ask - snap.bid) / point : 0.0;
-
-   snap.atr = ReadAtr(symbol, atrTf, atrPeriod, 0);
-   snap.atrQualityRatio = ReadAtrQualityRatio(symbol, atrTf, atrPeriod, 20);
-
-   snap.ema20  = ReadEma(symbol, atrTf, 20, 0);
-   snap.ema50  = ReadEma(symbol, atrTf, 50, 0);
-   snap.ema200 = ReadEma(symbol, atrTf, 200, 0);
-
-   return snap;
-  }
+   bool Rates(const string symbol,const ENUM_TIMEFRAMES tf,const int start_shift,const int count,MqlRates &rates[]) {
+      ArraySetAsSeries(rates,true); int copied=CopyRates(symbol,tf,start_shift,count,rates); return copied==count;
+   }
+};

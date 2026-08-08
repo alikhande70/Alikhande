@@ -1,81 +1,18 @@
-//+------------------------------------------------------------------+
-//| DemoExecution.mqh                                                  |
-//| The only execution path in this codebase. Real-account execution  |
-//| is not approved (docs/v1.1.0_README.md limitations) — this module |
-//| refuses outright on a non-demo account, independent of any other  |
-//| config. Routes through TradeGuards -> OrderPreflight ->            |
-//| TradeRequestTracker so every send is idempotent and reconciled.    |
-//+------------------------------------------------------------------+
-#property strict
+#pragma once
+#include <Trade/Trade.mqh>
+#include "../Domain/Models.mqh"
 #include "../Safety/TradeGuards.mqh"
-#include "../Execution/OrderPreflight.mqh"
-#include "../Domain/SignalLifecycle.mqh"
 
-struct DemoExecutionResult
-  {
-   bool   submitted;
-   string reason;
-   string requestId;
-  };
-
-bool IsDemoAccount()
-  {
-   return (ENUM_ACCOUNT_TRADE_MODE)AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_DEMO;
-  }
-
-//+------------------------------------------------------------------+
-//| Attempt to execute a previewed, user-confirmed signal. Every gate |
-//| is re-checked here even if it was already checked earlier in the  |
-//| pipeline — a plan can sit in PREVIEWED state for a while, and      |
-//| nothing about market conditions is assumed still true.             |
-//+------------------------------------------------------------------+
-DemoExecutionResult ExecuteDemoTrade(const string symbol, const ENUM_TREND_DIRECTION direction,
-                                      const double lot, const double previewedEntry,
-                                      const double sl, const double tp,
-                                      const datetime previewedAt, const int previewExpirySeconds,
-                                      const double maxDriftAtr, const double atr,
-                                      const bool alertOnlyMode, const string planId,
-                                      const int attempt)
-  {
-   DemoExecutionResult result;
-   result.submitted = false;
-
-   if(IsOrderSendBlocked(alertOnlyMode, !IsDemoAccount()))
-     {
-      result.reason = !IsDemoAccount() ? "real-account execution is not approved"
-                                        : "alert-only mode";
-      return result;
-     }
-
-   MqlTick tick;
-   if(!SymbolInfoTick(symbol, tick))
-     {
-      result.reason = "no live tick";
-      return result;
-     }
-   double currentPrice = (direction == TREND_BULLISH) ? tick.ask : tick.bid;
-
-   PreviewGuardResult guard = CheckPreviewGuard(previewedAt, previewExpirySeconds,
-                                                 previewedEntry, currentPrice, atr, maxDriftAtr);
-   if(!guard.passed)
-     {
-      result.reason = guard.reason;
-      return result;
-     }
-
-   ENUM_ORDER_TYPE orderType = (direction == TREND_BULLISH) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   PreflightResult preflight = RunOrderPreflight(symbol, orderType, lot, currentPrice, sl, tp);
-   if(!preflight.passed)
-     {
-      result.reason = preflight.failReason;
-      return result;
-     }
-
-   string requestId = BuildRequestId(planId, attempt);
-   bool sent = SubmitPreflightedOrder(symbol, orderType, lot, sl, tp, requestId, planId);
-
-   result.submitted = sent;
-   result.requestId = requestId;
-   result.reason = sent ? "" : "OrderSend rejected — see trade_requests.retcode";
-   return result;
-  }
+class AS_DemoExecution {
+private:CTrade m_trade; AS_TradeGuards m_guards;
+public:
+   AS_DemoExecution(void){m_trade.SetAsyncMode(false);}
+   bool IsDemo(void){return AccountInfoInteger(ACCOUNT_TRADE_MODE)==ACCOUNT_TRADE_MODE_DEMO;}
+   bool Execute(const AS_TradePlan &p,const bool alert_only,const ulong magic,const string comment,string &result){
+      if(alert_only){result="ALERT_ONLY_MODE";return false;}if(!IsDemo()){result="REAL_ACCOUNT_BLOCKED";return false;}if(!p.valid||TimeCurrent()>p.expires_at){result="PREVIEW_EXPIRED_OR_INVALID";return false;}if(m_guards.HasExposure(p.symbol)){result="EXPOSURE_EXISTS";return false;}
+      string codes="";if(!m_guards.TradePermissions(p.symbol,codes)||!m_guards.StopsValid(p,codes)){result=codes;return false;}
+      MqlTick tick;if(!SymbolInfoTick(p.symbol,tick)){result="NO_TICK";return false;}double point=SymbolInfoDouble(p.symbol,SYMBOL_POINT);double current=(p.direction==AS_DIR_LONG?tick.ask:tick.bid);if(point<=0||MathAbs(current-p.entry)/point>p.max_drift_points){result="PRICE_DRIFT_EXCEEDED";return false;}
+      m_trade.SetExpertMagicNumber(magic);m_trade.SetTypeFillingBySymbol(p.symbol);bool ok=(p.direction==AS_DIR_LONG?m_trade.Buy(p.lot_size,p.symbol,0,p.stop_loss,p.take_profit,comment):m_trade.Sell(p.lot_size,p.symbol,0,p.stop_loss,p.take_profit,comment));
+      result=StringFormat("retcode=%u %s",m_trade.ResultRetcode(),m_trade.ResultRetcodeDescription());return ok && (m_trade.ResultRetcode()==TRADE_RETCODE_DONE||m_trade.ResultRetcode()==TRADE_RETCODE_PLACED||m_trade.ResultRetcode()==TRADE_RETCODE_DONE_PARTIAL);
+   }
+};

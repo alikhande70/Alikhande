@@ -1,60 +1,12 @@
-//+------------------------------------------------------------------+
-//| Enums.mqh                                                          |
-//| Core domain enums shared across the scoring pipeline.             |
-//+------------------------------------------------------------------+
-#property strict
+#pragma once
 
-enum ENUM_TREND_DIRECTION
-  {
-   TREND_BULLISH,
-   TREND_BEARISH,
-   TREND_NEUTRAL
-  };
-
-string TrendDirectionToString(const ENUM_TREND_DIRECTION d)
-  {
-   switch(d)
-     {
-      case TREND_BULLISH: return "Bullish";
-      case TREND_BEARISH: return "Bearish";
-      case TREND_NEUTRAL:  return "Neutral";
-     }
-   return "?";
-  }
-
-enum ENUM_SETUP_TYPE
-  {
-   SETUP_NONE,
-   SETUP_PULLBACK,
-   SETUP_REJECTION,
-   SETUP_BREAKOUT_RETEST // reserved, not active — see docs/v1.1.0_README.md limitations
-  };
-
-string SetupTypeToString(const ENUM_SETUP_TYPE s)
-  {
-   switch(s)
-     {
-      case SETUP_NONE:            return "-";
-      case SETUP_PULLBACK:        return "Pullback";
-      case SETUP_REJECTION:       return "Rejection";
-      case SETUP_BREAKOUT_RETEST: return "Breakout-Retest";
-     }
-   return "?";
-  }
-
-enum ENUM_ZONE_TYPE
-  {
-   ZONE_SUPPORT,
-   ZONE_RESISTANCE
-  };
-
-// Symbol resolution outcome — SymbolResolver.mqh tries these in order:
-// exact name, "_o" suffix, "#" prefix, normalized fallback.
-enum ENUM_SYMBOL_RESOLUTION
-  {
-   SYMBOL_RESOLVED_EXACT,
-   SYMBOL_RESOLVED_SUFFIX,
-   SYMBOL_RESOLVED_PREFIX,
-   SYMBOL_RESOLVED_NORMALIZED,
-   SYMBOL_UNRESOLVED
-  };
+enum ENUM_AS_DATA_STATE { AS_DATA_UNINITIALIZED, AS_DATA_SELECTING, AS_DATA_DOWNLOADING, AS_DATA_SYNCHRONIZING, AS_DATA_READY, AS_DATA_STALE, AS_DATA_ERROR };
+enum ENUM_AS_TREND_CLASS { AS_STRONG_BEARISH=-3, AS_BEARISH=-2, AS_WEAK_BEARISH=-1, AS_NEUTRAL=0, AS_WEAK_BULLISH=1, AS_BULLISH=2, AS_STRONG_BULLISH=3 };
+enum ENUM_AS_SIGNAL_STATE { AS_SIGNAL_NONE, AS_SIGNAL_WATCH, AS_SIGNAL_CANDIDATE, AS_SIGNAL_ACTIVE, AS_SIGNAL_TP, AS_SIGNAL_SL, AS_SIGNAL_EXPIRED, AS_SIGNAL_INVALIDATED, AS_SIGNAL_AMBIGUOUS };
+enum ENUM_AS_SETUP_TYPE { AS_SETUP_NONE, AS_TREND_PULLBACK, AS_BREAKOUT_RETEST, AS_SUPPORT_REJECTION, AS_RESISTANCE_REJECTION };
+enum ENUM_AS_SPREAD_STATE { AS_SPREAD_WARMING_UP, AS_SPREAD_NORMAL, AS_SPREAD_ELEVATED, AS_SPREAD_HIGH, AS_SPREAD_EXTREME, AS_SPREAD_STALE, AS_SPREAD_NO_TICK };
+enum ENUM_AS_DIRECTION { AS_DIR_NONE=0, AS_DIR_LONG=1, AS_DIR_SHORT=-1 };
+enum ENUM_AS_CHART_REUSE { AS_ATLAS_MANAGED_ONLY, AS_REUSE_ANY_MATCHING, AS_ALWAYS_OPEN_NEW };
+enum ENUM_AS_EXEC_STATE { AS_EXEC_IDLE, AS_EXEC_PREVIEWED, AS_EXEC_REVALIDATING, AS_EXEC_SENDING, AS_EXEC_SERVER_ACCEPTED, AS_EXEC_ORDER_PLACED, AS_EXEC_PARTIALLY_FILLED, AS_EXEC_FILLED, AS_EXEC_REJECTED, AS_EXEC_CANCELLED, AS_EXEC_UNKNOWN, AS_EXEC_RECONCILING, AS_EXEC_COMPLETED };
+enum ENUM_AS_EXPOSURE_POLICY { AS_REJECT_ANY_EXPOSURE, AS_REJECT_SCANNER_EXPOSURE, AS_ALLOW_WITH_WARNING };
+enum ENUM_AS_ASSET_CLASS { AS_ASSET_UNKNOWN, AS_ASSET_METAL, AS_ASSET_FX_MAJOR, AS_ASSET_INDEX, AS_ASSET_STOCK, AS_ASSET_CRYPTO };

@@ -1,62 +1,20 @@
-//+------------------------------------------------------------------+
-//| SpreadTracker.mqh                                                  |
-//| Tick-staleness detection and a rolling spread sample used both by |
-//| the Runtime Gate ("a stale quote blocks candidates") and by the   |
-//| v1.3 spread-percentile regime input.                              |
-//+------------------------------------------------------------------+
-#property strict
+#pragma once
+#include "../Domain/Models.mqh"
+#include "../Core/Config.mqh"
 
-#define SPREAD_SAMPLE_SIZE 100
-
-struct SpreadSample
-  {
-   double values[SPREAD_SAMPLE_SIZE];
-   int    count;
-   int    nextIndex;
-  };
-
-void SpreadSampleReset(SpreadSample &s)
-  {
-   s.count = 0;
-   s.nextIndex = 0;
-  }
-
-void SpreadSamplePush(SpreadSample &s, const double spreadPoints)
-  {
-   s.values[s.nextIndex] = spreadPoints;
-   s.nextIndex = (s.nextIndex + 1) % SPREAD_SAMPLE_SIZE;
-   if(s.count < SPREAD_SAMPLE_SIZE)
-      s.count++;
-  }
-
-double SpreadSampleAverage(const SpreadSample &s)
-  {
-   if(s.count == 0)
-      return 0.0;
-   double sum = 0.0;
-   for(int i = 0; i < s.count; i++)
-      sum += s.values[i];
-   return sum / s.count;
-  }
-
-// Percentile of `value` within the sample (0..1). Used by v1.3's Regime
-// Engine input; v1.2.0 only needs the average for the "abnormal spread"
-// dashboard label, but this is cheap to have ready now.
-double SpreadSamplePercentile(const SpreadSample &s, const double value)
-  {
-   if(s.count == 0)
-      return 0.5;
-   int below = 0;
-   for(int i = 0; i < s.count; i++)
-      if(s.values[i] <= value)
-         below++;
-   return (double)below / (double)s.count;
-  }
-
-bool IsQuoteStale(const string symbol, const int staleSeconds)
-  {
-   MqlTick tick;
-   if(!SymbolInfoTick(symbol, tick))
-      return true;
-   return (TimeCurrent() - tick.time) > staleSeconds;
-  }
+class AS_SpreadTracker {
+private:
+   double m_samples[]; int m_capacity; int m_count; int m_pos;
+public:
+   AS_SpreadTracker(void){m_capacity=240;m_count=0;m_pos=0;ArrayResize(m_samples,m_capacity);}
+   void Add(const double value){ if(value<=0)return; m_samples[m_pos]=value; m_pos=(m_pos+1)%m_capacity; if(m_count<m_capacity)m_count++; }
+   int Count(void)const{return m_count;}
+   double Median(void) {
+      if(m_count==0)return 0; double tmp[]; ArrayResize(tmp,m_count); for(int i=0;i<m_count;i++)tmp[i]=m_samples[i];
+      ArraySort(tmp); if((m_count%2)==1)return tmp[m_count/2]; return (tmp[m_count/2-1]+tmp[m_count/2])/2.0;
+   }
+   ENUM_AS_SPREAD_STATE Classify(const double current,const int minimum_samples,double &ratio) {
+      if(m_count<minimum_samples){ratio=0;return AS_SPREAD_WARMING_UP;} double med=Median(); if(med<=0){ratio=0;return AS_SPREAD_WARMING_UP;}
+      ratio=current/med; if(ratio<AS_SPREAD_NORMAL_MAX_RATIO)return AS_SPREAD_NORMAL; if(ratio<AS_SPREAD_ELEVATED_MAX_RATIO)return AS_SPREAD_ELEVATED; if(ratio<AS_SPREAD_HIGH_MAX_RATIO)return AS_SPREAD_HIGH; return AS_SPREAD_EXTREME;
+   }
+};

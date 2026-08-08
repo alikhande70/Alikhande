@@ -1,111 +1,26 @@
-//+------------------------------------------------------------------+
-//| RiskPlanner.mqh                                                    |
-//| Converts a Candidate into a sized TradePlan. Per                  |
-//| docs/v1.1.0_ACCEPTANCE_TESTS.md "Risk Gate":                       |
-//|  - a raw lot below broker minimum REJECTS the plan (never bumps   |
-//|    risk to force a fillable lot)                                   |
-//|  - normalized lot cannot exceed requested monetary risk by more   |
-//|    than 1% rounding tolerance                                      |
-//| v1.2.0 addition: consults Risk/PortfolioRisk.mqh before accepting. |
-//+------------------------------------------------------------------+
-#property strict
+#pragma once
 #include "../Domain/Models.mqh"
-#include "../Broker/SymbolSpec.mqh"
-#include "../Risk/PortfolioRisk.mqh"
+#include "../Core/Config.mqh"
 
-struct RiskPlanResult
-  {
-   bool   accepted;
-   string rejectReason;
-   double lot;
-   double riskMoney;
-   double riskPct;
-  };
-
-//+------------------------------------------------------------------+
-//| Pure sizing math: given a risk percentage and the stop distance,  |
-//| compute the lot, then reject (not clamp-up) if it falls below the |
-//| broker's minimum tradable volume.                                  |
-//+------------------------------------------------------------------+
-RiskPlanResult ComputeTradePlan(const string symbol, const double entry, const double sl,
-                                 const double riskPct)
-  {
-   RiskPlanResult r;
-   r.accepted = false;
-   r.lot = 0.0;
-
-   SymbolSpecSnapshot spec = FetchSymbolSpec(symbol);
-   if(!spec.ready)
-     {
-      r.rejectReason = "symbol spec not ready";
-      return r;
-     }
-
-   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   double riskMoney = equity * (riskPct / 100.0);
-
-   double stopDistance = MathAbs(entry - sl);
-   if(stopDistance <= 0.0 || spec.tickSize <= 0.0)
-     {
-      r.rejectReason = "invalid stop distance";
-      return r;
-     }
-
-   double lossPerLot = (stopDistance / spec.tickSize) * spec.tickValue;
-   if(lossPerLot <= 0.0)
-     {
-      r.rejectReason = "cannot price stop distance for this symbol";
-      return r;
-     }
-
-   double rawLot = riskMoney / lossPerLot;
-
-   if(rawLot < spec.volumeMin)
-     {
-      r.rejectReason = StringFormat("raw lot %.4f below broker minimum %.2f — plan rejected, "
-                                     "not risk-increased", rawLot, spec.volumeMin);
-      return r;
-     }
-
-   double steps = MathFloor((rawLot - spec.volumeMin) / spec.volumeStep);
-   double normalizedLot = spec.volumeMin + steps * spec.volumeStep;
-   normalizedLot = MathMin(normalizedLot, spec.volumeMax);
-
-   double actualRiskMoney = normalizedLot * lossPerLot;
-   double overshootPct = (actualRiskMoney - riskMoney) / riskMoney * 100.0;
-   if(overshootPct > 1.0)
-     {
-      r.rejectReason = StringFormat("normalized lot overshoots requested risk by %.2f%% "
-                                     "(tolerance 1%%)", overshootPct);
-      return r;
-     }
-
-   r.accepted = true;
-   r.lot = normalizedLot;
-   r.riskMoney = actualRiskMoney;
-   r.riskPct = actualRiskMoney / equity * 100.0;
-   return r;
-  }
-
-//+------------------------------------------------------------------+
-//| Full plan build: sizing + portfolio exposure gate. This is the    |
-//| function callers should use — ComputeTradePlan alone doesn't know |
-//| about open positions.                                              |
-//+------------------------------------------------------------------+
-RiskPlanResult BuildRiskPlan(const string symbol, const double entry, const double sl,
-                              const double riskPct, const PortfolioRiskLimits &portfolioLimits,
-                              const long magicNumber, const double dailyUsedRiskPct)
-  {
-   RiskPlanResult r = ComputeTradePlan(symbol, entry, sl, riskPct);
-   if(!r.accepted)
-      return r;
-
-   PortfolioRiskGateResult gate = EvaluatePortfolioRiskGate(symbol, r.riskPct, portfolioLimits,
-                                                             magicNumber, dailyUsedRiskPct);
-   if(!gate.allowed)
-     {
-      r.accepted = false;
-      r.rejectReason = gate.blockReason;
-     }
-   return r;
-  }
+class AS_RiskPlanner {
+private:
+   int VolumeDigits(const double step){int d=0;double x=step;while(d<8&&MathAbs(x-MathRound(x))>1e-8){x*=10.0;d++;}return d;}
+   bool NormalizeVolume(const string symbol,const double raw,double &normalized,string &code){
+      double mn=SymbolInfoDouble(symbol,SYMBOL_VOLUME_MIN),mx=SymbolInfoDouble(symbol,SYMBOL_VOLUME_MAX),st=SymbolInfoDouble(symbol,SYMBOL_VOLUME_STEP);
+      if(st<=0||mn<=0||mx<mn){code="INVALID_VOLUME_SPEC";return false;}
+      if(raw<mn){code="RISK_BELOW_BROKER_MIN_VOLUME";return false;}
+      normalized=MathFloor(raw/st+1e-9)*st;normalized=NormalizeDouble(normalized,VolumeDigits(st));
+      if(normalized<mn||normalized>mx){code="VOLUME_OUT_OF_RANGE";return false;}return true;
+   }
+public:
+   bool Build(const AS_SignalCandidate &s,const double risk_percent,const int ttl_seconds,const double max_drift,AS_TradePlan &p){
+      ZeroMemory(p);if(s.direction==AS_DIR_NONE||s.hard_blocked)return false;if(risk_percent<=0||risk_percent>AS_MAXIMUM_RISK_PERCENT)return false;
+      double equity=AccountInfoDouble(ACCOUNT_EQUITY),risk=equity*risk_percent/100.0,loss1=0;ENUM_ORDER_TYPE type=(s.direction==AS_DIR_LONG?ORDER_TYPE_BUY:ORDER_TYPE_SELL);
+      if(!OrderCalcProfit(type,s.symbol,1.0,s.preferred_entry,s.stop_loss,loss1))return false;loss1=MathAbs(loss1);if(loss1<=0)return false;
+      double lot=0;string code="";if(!NormalizeVolume(s.symbol,risk/loss1,lot,code)){p.validation_codes=code;return false;}
+      double actual_loss=0;if(!OrderCalcProfit(type,s.symbol,lot,s.preferred_entry,s.stop_loss,actual_loss))return false;actual_loss=MathAbs(actual_loss);
+      if(actual_loss>risk*1.01){p.validation_codes="NORMALIZED_VOLUME_EXCEEDS_RISK";return false;}
+      double margin=0;if(!OrderCalcMargin(type,s.symbol,lot,s.preferred_entry,margin))return false;if(margin>AccountInfoDouble(ACCOUNT_MARGIN_FREE)){p.validation_codes="INSUFFICIENT_FREE_MARGIN";return false;}
+      p.plan_id=s.signal_id+"_PLAN";p.symbol=s.symbol;p.direction=s.direction;p.entry=s.preferred_entry;p.stop_loss=s.stop_loss;p.take_profit=s.take_profit;p.risk_percent=risk_percent;p.risk_amount=risk;p.actual_risk_amount=actual_loss;p.lot_size=lot;p.margin_required=margin;p.created_at=TimeCurrent();p.expires_at=p.created_at+ttl_seconds;p.max_drift_points=max_drift;p.minimum_rr=AS_MINIMUM_RISK_REWARD;p.preview_bid=SymbolInfoDouble(s.symbol,SYMBOL_BID);p.preview_ask=SymbolInfoDouble(s.symbol,SYMBOL_ASK);p.valid=true;p.validation_codes="";return true;
+   }
+};

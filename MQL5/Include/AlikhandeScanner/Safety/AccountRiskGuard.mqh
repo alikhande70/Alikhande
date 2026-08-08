@@ -1,101 +1,17 @@
-//+------------------------------------------------------------------+
-//| AccountRiskGuard.mqh                                               |
-//| Optional account-level daily loss, drawdown, and consecutive-loss |
-//| guards — disabled by default, per v1.1.0 changelog.                |
-//+------------------------------------------------------------------+
-#property strict
+#pragma once
+#include "../Core/Config.mqh"
 
-struct AccountGuardConfig
-  {
-   bool   enabled;
-   double maxDailyLossPct;
-   double maxDrawdownPct;
-   int    maxConsecutiveLosses;
-  };
-
-struct AccountGuardState
-  {
-   double dayStartEquity;
-   datetime dayStartTs;
-   double peakEquity;
-   int    consecutiveLosses;
-  };
-
-void AccountGuardResetDay(AccountGuardState &state)
-  {
-   state.dayStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
-   state.dayStartTs = TimeTradeServer();
-  }
-
-// Call once per tick/timer; rolls the daily baseline forward on a broker
-// server day change so "daily loss" always means "since today's server open".
-void AccountGuardMaybeRollDay(AccountGuardState &state)
-  {
-   MqlDateTime now, start;
-   TimeToStruct(TimeTradeServer(), now);
-   TimeToStruct(state.dayStartTs, start);
-
-   bool sameDay = (now.year == start.year && now.mon == start.mon && now.day == start.day);
-   if(!sameDay)
-      AccountGuardResetDay(state);
-
-   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   if(equity > state.peakEquity)
-      state.peakEquity = equity;
-  }
-
-struct AccountGuardResult
-  {
-   bool   tripped;
-   string reason;
-  };
-
-AccountGuardResult EvaluateAccountGuards(const AccountGuardConfig &cfg, const AccountGuardState &state)
-  {
-   AccountGuardResult r;
-   r.tripped = false;
-
-   if(!cfg.enabled)
-      return r;
-
-   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-
-   if(state.dayStartEquity > 0.0)
-     {
-      double dailyLossPct = (state.dayStartEquity - equity) / state.dayStartEquity * 100.0;
-      if(dailyLossPct >= cfg.maxDailyLossPct)
-        {
-         r.tripped = true;
-         r.reason = StringFormat("daily loss %.2f%% >= cap %.2f%%", dailyLossPct, cfg.maxDailyLossPct);
-         return r;
-        }
-     }
-
-   if(state.peakEquity > 0.0)
-     {
-      double drawdownPct = (state.peakEquity - equity) / state.peakEquity * 100.0;
-      if(drawdownPct >= cfg.maxDrawdownPct)
-        {
-         r.tripped = true;
-         r.reason = StringFormat("drawdown %.2f%% >= cap %.2f%%", drawdownPct, cfg.maxDrawdownPct);
-         return r;
-        }
-     }
-
-   if(state.consecutiveLosses >= cfg.maxConsecutiveLosses)
-     {
-      r.tripped = true;
-      r.reason = StringFormat("%d consecutive losses >= cap %d",
-                               state.consecutiveLosses, cfg.maxConsecutiveLosses);
-      return r;
-     }
-
-   return r;
-  }
-
-// Called from the Outcome Engine (v1.3) or, in v1.2.0, directly when a
-// SIGNAL_TP/SIGNAL_SL transition is recorded.
-void AccountGuardRecordTradeResult(AccountGuardState &state, const bool wasWin)
-  {
-   state.consecutiveLosses = wasWin ? 0 : state.consecutiveLosses + 1;
-  }
+class AS_AccountRiskGuard {
+private:
+   int m_day_key;double m_day_start_equity;double m_peak_equity;int m_consecutive_losses;
+   int DayKey(){MqlDateTime dt;TimeToStruct(TimeCurrent(),dt);return dt.year*1000+dt.day_of_year;}
+   void RollDay(){int k=DayKey();if(k!=m_day_key){m_day_key=k;m_day_start_equity=AccountInfoDouble(ACCOUNT_EQUITY);m_consecutive_losses=0;}}
+public:
+   AS_AccountRiskGuard(void){m_day_key=0;m_day_start_equity=0;m_peak_equity=0;m_consecutive_losses=0;}
+   void Initialize(){m_day_key=DayKey();m_day_start_equity=AccountInfoDouble(ACCOUNT_EQUITY);m_peak_equity=m_day_start_equity;m_consecutive_losses=0;}
+   void RegisterClosedProfit(const double net_profit){if(net_profit<0)m_consecutive_losses++;else if(net_profit>0)m_consecutive_losses=0;}
+   bool Check(const bool enabled,string &codes){if(!enabled)return true;RollDay();double eq=AccountInfoDouble(ACCOUNT_EQUITY);if(eq>m_peak_equity)m_peak_equity=eq;bool ok=true;
+      if(m_day_start_equity>0&&(m_day_start_equity-eq)/m_day_start_equity*100.0>=AS_DEFAULT_DAILY_LOSS_LIMIT_PCT){ok=false;codes+="DAILY_LOSS_HALT;";}
+      if(m_peak_equity>0&&(m_peak_equity-eq)/m_peak_equity*100.0>=AS_DEFAULT_TOTAL_DRAWDOWN_LIMIT_PCT){ok=false;codes+="TOTAL_DRAWDOWN_HALT;";}
+      if(m_consecutive_losses>=AS_DEFAULT_MAX_CONSECUTIVE_LOSSES){ok=false;codes+="CONSECUTIVE_LOSS_HALT;";}return ok;}
+};

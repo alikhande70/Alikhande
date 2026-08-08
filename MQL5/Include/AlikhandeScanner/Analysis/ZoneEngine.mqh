@@ -1,116 +1,33 @@
-//+------------------------------------------------------------------+
-//| ZoneEngine.mqh                                                     |
-//| H1 support/resistance zones from confirmed swing pivots. A pivot  |
-//| is confirmed once `confirmBars` bars have closed on both sides    |
-//| with lower/higher highs-lows — ConfirmationTime is stamped as the |
-//| CLOSE time of the confirming bar (not the pivot bar itself), per  |
-//| docs/v1.1.0_ACCEPTANCE_TESTS.md "Logic Gate".                     |
-//+------------------------------------------------------------------+
-#property strict
+#pragma once
 #include "../Domain/Models.mqh"
 
-#define ZONE_MAX_TRACKED 32
-
-//+------------------------------------------------------------------+
-//| Scans the last `lookbackBars` H1 bars for confirmed swing highs/  |
-//| lows and returns them as zones. `confirmBars` bars on each side   |
-//| of the pivot must be less extreme for it to count as confirmed.   |
-//+------------------------------------------------------------------+
-int FindZones(const string symbol, const ENUM_TIMEFRAMES tf, const int lookbackBars,
-              const int confirmBars, Zone &zones[])
-  {
-   ArrayResize(zones, 0);
-
-   double highs[], lows[];
-   datetime times[];
-   ArraySetAsSeries(highs, true);
-   ArraySetAsSeries(lows, true);
-   ArraySetAsSeries(times, true);
-
-   int copied = CopyHigh(symbol, tf, 0, lookbackBars, highs);
-   CopyLow(symbol, tf, 0, lookbackBars, lows);
-   CopyTime(symbol, tf, 0, lookbackBars, times);
-   if(copied < (2 * confirmBars + 1))
-      return 0;
-
-   int count = 0;
-   for(int i = confirmBars; i < lookbackBars - confirmBars && count < ZONE_MAX_TRACKED; i++)
-     {
-      bool isSwingHigh = true, isSwingLow = true;
-      for(int k = 1; k <= confirmBars; k++)
-        {
-         if(highs[i - k] >= highs[i] || highs[i + k] >= highs[i])
-            isSwingHigh = false;
-         if(lows[i - k] <= lows[i] || lows[i + k] <= lows[i])
-            isSwingLow = false;
-        }
-
-      if(isSwingHigh)
-        {
-         ArrayResize(zones, count + 1);
-         zones[count].type = ZONE_RESISTANCE;
-         zones[count].priceHigh = highs[i];
-         zones[count].priceLow  = highs[i]; // pivot zones start as a single price; width added below
-         // Confirming bar is `confirmBars` bars closer to "now" than the pivot
-         // (i - confirmBars, since index 0 is most recent) — its CLOSE time,
-         // i.e. the open time of the NEXT bar toward the present.
-         int confirmIdx = MathMax(i - confirmBars - 1, 0);
-         zones[count].confirmationTime = times[confirmIdx];
-         zones[count].touches = 1;
-         count++;
-        }
-      else if(isSwingLow)
-        {
-         ArrayResize(zones, count + 1);
-         zones[count].type = ZONE_SUPPORT;
-         zones[count].priceHigh = lows[i];
-         zones[count].priceLow  = lows[i];
-         int confirmIdx = MathMax(i - confirmBars - 1, 0);
-         zones[count].confirmationTime = times[confirmIdx];
-         zones[count].touches = 1;
-         count++;
-        }
-     }
-
-   return count;
-  }
-
-//+------------------------------------------------------------------+
-//| Widen each zone by an ATR-scaled buffer so "proximity to zone"    |
-//| checks aren't pixel-exact against a single historical price.      |
-//+------------------------------------------------------------------+
-void ApplyZoneAtrBuffer(Zone &zones[], const double atr, const double bufferMult)
-  {
-   double buffer = atr * bufferMult;
-   for(int i = 0; i < ArraySize(zones); i++)
-     {
-      zones[i].priceHigh += buffer;
-      zones[i].priceLow  -= buffer;
-     }
-  }
-
-//+------------------------------------------------------------------+
-//| Nearest zone of the requested type to `price`, or a zero-filled   |
-//| zone with touches=0 if none exist within `maxDistance`.           |
-//+------------------------------------------------------------------+
-bool FindNearestZone(const Zone &zones[], const ENUM_ZONE_TYPE type, const double price,
-                      const double maxDistance, Zone &outZone)
-  {
-   double bestDist = DBL_MAX;
-   bool found = false;
-
-   for(int i = 0; i < ArraySize(zones); i++)
-     {
-      if(zones[i].type != type)
-         continue;
-      double mid = (zones[i].priceHigh + zones[i].priceLow) / 2.0;
-      double dist = MathAbs(price - mid);
-      if(dist < bestDist && dist <= maxDistance)
-        {
-         bestDist = dist;
-         outZone = zones[i];
-         found = true;
-        }
-     }
-   return found;
-  }
+class AS_ZoneEngine {
+public:
+   int Build(const string symbol,const ENUM_TIMEFRAMES tf,const int bars,const int left,const int right,const double atr_fraction,AS_Zone &zones[]) {
+      ArrayResize(zones,0); if(bars<50||left<1||right<1)return 0;
+      MqlRates r[]; ArraySetAsSeries(r,true); if(CopyRates(symbol,tf,1,bars,r)!=bars)return 0;
+      int ha=iATR(symbol,tf,14); if(ha==INVALID_HANDLE)return 0; double a[];ArrayResize(a,bars);ArraySetAsSeries(a,true);
+      if(CopyBuffer(ha,0,1,bars,a)!=bars){IndicatorRelease(ha);return 0;} IndicatorRelease(ha);
+      AS_Zone pivots[]; int n=0;
+      for(int i=right;i<bars-left;i++) {
+         bool hi=true,lo=true;
+         for(int k=1;k<=left;k++){ if(r[i].high<=r[i+k].high)hi=false; if(r[i].low>=r[i+k].low)lo=false; }
+         for(int k=1;k<=right;k++){ if(r[i].high<r[i-k].high)hi=false; if(r[i].low>r[i-k].low)lo=false; }
+         double width=MathMax(a[i]*atr_fraction,SymbolInfoDouble(symbol,SYMBOL_POINT)*5);
+         if(hi||lo){
+            ArrayResize(pivots,n+1);double p=hi?r[i].high:r[i].low;
+            pivots[n].center=p;pivots[n].low=p-width;pivots[n].high=p+width;pivots[n].timeframe=tf;
+            pivots[n].pivot_time=r[i].time;pivots[n].confirmation_time=r[i-right].time+PeriodSeconds(tf);
+            pivots[n].touches=1;pivots[n].quality=30;pivots[n].valid=true;pivots[n].broken=false;
+            pivots[n].id=StringFormat("%s_%d_%I64d",symbol,(int)tf,(long)r[i].time);n++;
+         }
+      }
+      int z=0;
+      for(int i=0;i<n;i++){
+         int found=-1;for(int j=0;j<z;j++)if(pivots[i].center>=zones[j].low && pivots[i].center<=zones[j].high){found=j;break;}
+         if(found<0){ArrayResize(zones,z+1);zones[z]=pivots[i];z++;}
+         else{zones[found].low=MathMin(zones[found].low,pivots[i].low);zones[found].high=MathMax(zones[found].high,pivots[i].high);zones[found].center=(zones[found].low+zones[found].high)/2.0;zones[found].touches++;zones[found].quality=MathMin(100.0,zones[found].quality+10.0);}
+      }
+      return z;
+   }
+};

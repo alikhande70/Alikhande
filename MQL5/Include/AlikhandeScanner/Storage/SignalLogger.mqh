@@ -1,61 +1,16 @@
-//+------------------------------------------------------------------+
-//| SignalLogger.mqh                                                   |
-//| CSV export — a read-only projection of the `signals` table for    |
-//| Excel/Python, per docs/ARCHITECTURE_V1.2.md section 3. SQLite is   |
-//| the source of truth; this module never writes anything the DB     |
-//| doesn't already have.                                              |
-//+------------------------------------------------------------------+
-#property strict
-#include "Database.mqh"
+#pragma once
+#include "../Domain/Models.mqh"
+#include "../Core/VersionInfo.mqh"
+#include "../Core/SignalRegistry.mqh"
 
-#define SIGNAL_CSV_FILENAME "AlikhandeScanner\\signals_export.csv"
-
-bool ExportSignalsToCsv()
-  {
-   if(!AlikhandeDbIsOpen())
-      return false;
-
-   int fileHandle = FileOpen(SIGNAL_CSV_FILENAME, FILE_WRITE | FILE_CSV | FILE_ANSI, ',');
-   if(fileHandle == INVALID_HANDLE)
-      return false;
-
-   FileWrite(fileHandle, "signal_id", "ts", "symbol", "direction", "setup", "long_score",
-             "short_score", "entry", "sl", "tp", "state", "rule_version");
-
-   int stmt = DatabasePrepare(g_AlikhandeDbHandle,
-      "SELECT signal_id, ts, symbol, direction, setup, long_score, short_score, entry, sl, tp, "
-      "state, rule_version FROM signals ORDER BY ts DESC");
-   if(stmt == INVALID_HANDLE)
-     {
-      FileClose(fileHandle);
-      return false;
-     }
-
-   while(DatabaseRead(stmt))
-     {
-      string signalId, symbol, direction, setup, state;
-      long ts;
-      double longScore, shortScore, entry, sl, tp;
-      int ruleVersion;
-
-      DatabaseColumnText(stmt, 0, signalId);
-      DatabaseColumnLong(stmt, 1, ts);
-      DatabaseColumnText(stmt, 2, symbol);
-      DatabaseColumnText(stmt, 3, direction);
-      DatabaseColumnText(stmt, 4, setup);
-      DatabaseColumnDouble(stmt, 5, longScore);
-      DatabaseColumnDouble(stmt, 6, shortScore);
-      DatabaseColumnDouble(stmt, 7, entry);
-      DatabaseColumnDouble(stmt, 8, sl);
-      DatabaseColumnDouble(stmt, 9, tp);
-      DatabaseColumnText(stmt, 10, state);
-      DatabaseColumnInteger(stmt, 11, ruleVersion);
-
-      FileWrite(fileHandle, signalId, TimeToString((datetime)ts, TIME_DATE|TIME_SECONDS),
-                symbol, direction, setup, longScore, shortScore, entry, sl, tp, state, ruleVersion);
-     }
-
-   DatabaseFinalize(stmt);
-   FileClose(fileHandle);
-   return true;
-  }
+class AS_SignalLogger {
+private: AS_SignalRegistry m_registry;
+public:
+   bool AppendUnique(const AS_SignalCandidate &s){
+      if(s.signal_id==""||m_registry.Contains(s.signal_id))return false;
+      int h=FileOpen("AlikhandeScanner\\signals_v2.csv",FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_SHARE_READ,';');if(h==INVALID_HANDLE)return false;
+      if(FileSize(h)==0)FileWrite(h,"schema","signal_id","server_time","confirmation_time","symbol","direction","setup","long_score","short_score","entry","sl","tp","support","resistance","rule_version","scoring_version","parameter_hash","reasons","codes");
+      FileSeek(h,0,SEEK_END);FileWrite(h,AS_SCHEMA_VERSION,s.signal_id,(long)s.creation_time,(long)s.confirmation_bar_time,s.symbol,(int)s.direction,(int)s.setup,s.long_score,s.short_score,s.preferred_entry,s.stop_loss,s.take_profit,s.nearest_support,s.nearest_resistance,s.rule_version,s.scoring_version,s.parameter_hash,s.reasons,s.validation_codes);
+      FileFlush(h);FileClose(h);m_registry.Remember(s.signal_id);return true;
+   }
+};

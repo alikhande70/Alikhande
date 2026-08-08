@@ -1,174 +1,71 @@
-//+------------------------------------------------------------------+
-//| SignalEngine.mqh                                                   |
-//| Combines TrendEngine + ZoneEngine into scored candidates. Rules   |
-//| enforced per docs/v1.1.0_ACCEPTANCE_TESTS.md "Logic Gate":         |
-//|  - no setup label without zone proximity AND M5 confirmation       |
-//|  - SL outside the relevant H1 zone with ATR protection             |
-//|  - TP = 2R and a nearer opposing zone blocks the candidate         |
-//+------------------------------------------------------------------+
-#property strict
-#include "../Analysis/TrendEngine.mqh"
-#include "../Analysis/ZoneEngine.mqh"
+#pragma once
+#include "../Domain/Models.mqh"
+#include "../Core/VersionInfo.mqh"
+#include "../Core/Hash.mqh"
 #include "../Core/Config.mqh"
 
-//+------------------------------------------------------------------+
-//| M5 confirmation: an actual pullback (price re-entered the zone    |
-//| then closed back in the trade direction) or rejection (wick       |
-//| through the zone, close outside it) — not just "price is near a   |
-//| zone", which was the pre-fix bug.                                 |
-//+------------------------------------------------------------------+
-ENUM_SETUP_TYPE DetectM5Confirmation(const string symbol, const ENUM_TREND_DIRECTION direction,
-                                      const Zone &zone, const int lookbackBars)
-  {
-   double close[], low[], high[], open[];
-   ArraySetAsSeries(close, true);
-   ArraySetAsSeries(low, true);
-   ArraySetAsSeries(high, true);
-   ArraySetAsSeries(open, true);
+class AS_SignalEngine {
+private:
+   double Clamp(double v){return MathMax(0.0,MathMin(100.0,v));}
+   void NearestZones(const AS_Zone &zones[],const AS_SymbolSnapshot &snap,int &support_index,int &resistance_index){
+      support_index=-1;resistance_index=-1;
+      for(int i=0;i<ArraySize(zones);i++){
+         if(!zones[i].valid)continue;
+         if(zones[i].high<=snap.bid && (support_index<0||zones[i].high>zones[support_index].high))support_index=i;
+         if(zones[i].low>=snap.ask && (resistance_index<0||zones[i].low<zones[resistance_index].low))resistance_index=i;
+      }
+   }
+public:
+   bool Evaluate(const string symbol,const AS_TrendResult &h4,const AS_TrendResult &h1,const AS_TrendResult &m15,const AS_TrendResult &m5,const AS_SymbolSnapshot &snap,const AS_Zone &zones[],AS_SignalCandidate &s) {
+      ZeroMemory(s);if(!h4.valid||!h1.valid||!m15.valid||!m5.valid)return false;
+      int si,ri;NearestZones(zones,snap,si,ri);
+      double support=(si>=0?zones[si].high:0),resistance=(ri>=0?zones[ri].low:0);
+      bool near_support=(si>=0 && snap.bid>=zones[si].low-h1.atr*0.10 && snap.bid-zones[si].high<=h1.atr*1.50);
+      bool near_resistance=(ri>=0 && snap.ask<=zones[ri].high+h1.atr*0.10 && zones[ri].low-snap.ask<=h1.atr*1.50);
+      ENUM_AS_SETUP_TYPE long_setup=AS_SETUP_NONE,short_setup=AS_SETUP_NONE;
+      if(h1.direction_score>=20 && near_support && m15.direction_score>-20 && m5.direction_score>=15)long_setup=AS_TREND_PULLBACK;
+      else if(h1.direction_score>-45 && near_support && m15.direction_score>=0 && m5.direction_score>=20)long_setup=AS_SUPPORT_REJECTION;
+      if(h1.direction_score<=-20 && near_resistance && m15.direction_score<20 && m5.direction_score<=-15)short_setup=AS_TREND_PULLBACK;
+      else if(h1.direction_score<45 && near_resistance && m15.direction_score<=0 && m5.direction_score<=-20)short_setup=AS_RESISTANCE_REJECTION;
 
-   if(CopyClose(symbol, PERIOD_M5, 0, lookbackBars, close) <= 0)
-      return SETUP_NONE;
-   CopyLow(symbol, PERIOD_M5, 0, lookbackBars, low);
-   CopyHigh(symbol, PERIOD_M5, 0, lookbackBars, high);
-   CopyOpen(symbol, PERIOD_M5, 0, lookbackBars, open);
+      double long_base=0,short_base=0;string lr="",sr="";
+      if(h4.direction_score>0){long_base+=10;lr+="H4_SUPPORTS_LONG;";}else if(h4.direction_score<0){short_base+=10;sr+="H4_SUPPORTS_SHORT;";}
+      if(h1.direction_score>=20){long_base+=20+MathMin(10.0,h1.strength*0.10);lr+="H1_BULL;";}
+      else if(h1.direction_score<=-20){short_base+=20+MathMin(10.0,h1.strength*0.10);sr+="H1_BEAR;";}
+      if(long_setup!=AS_SETUP_NONE){long_base+=25;lr+="VALID_LONG_SETUP;";}if(short_setup!=AS_SETUP_NONE){short_base+=25;sr+="VALID_SHORT_SETUP;";}
+      if(si>=0){long_base+=MathMin(15.0,zones[si].quality*0.15);lr+="STRUCTURAL_SUPPORT;";}
+      if(ri>=0){short_base+=MathMin(15.0,zones[ri].quality*0.15);sr+="STRUCTURAL_RESISTANCE;";}
+      if(m5.direction_score>=15){long_base+=15;lr+="M5_CONFIRM;";}else if(m5.direction_score<=-15){short_base+=15;sr+="M5_CONFIRM;";}
+      if(h1.direction_score>0&&m15.direction_score>0&&m5.direction_score>0){long_base+=10;lr+="MTF_ALIGNED;";}
+      if(h1.direction_score<0&&m15.direction_score<0&&m5.direction_score<0){short_base+=10;sr+="MTF_ALIGNED;";}
+      if(snap.spread_state==AS_SPREAD_NORMAL){long_base+=5;short_base+=5;}else if(snap.spread_state==AS_SPREAD_ELEVATED){long_base+=2;short_base+=2;}
 
-   bool wasInsideZone = false;
-   for(int i = 1; i < lookbackBars; i++)
-      if(low[i] <= zone.priceHigh && high[i] >= zone.priceLow)
-        {
-         wasInsideZone = true;
-         break;
-        }
-   if(!wasInsideZone)
-      return SETUP_NONE;
+      double long_pen=0,short_pen=0;bool hard=false;string codes="";
+      if(h4.direction_score<=-45 && h1.direction_score>=45){long_pen+=30;codes+="H4_H1_CONFLICT_LONG;";}
+      if(h4.direction_score>=45 && h1.direction_score<=-45){short_pen+=30;codes+="H4_H1_CONFLICT_SHORT;";}
+      if(snap.spread_state==AS_SPREAD_HIGH||snap.spread_state==AS_SPREAD_EXTREME||snap.spread_state==AS_SPREAD_STALE||snap.spread_state==AS_SPREAD_NO_TICK||snap.spread_state==AS_SPREAD_WARMING_UP){hard=true;codes+="SPREAD_OR_QUOTE_BLOCK;";}
+      if(long_setup==AS_SETUP_NONE&&short_setup==AS_SETUP_NONE)codes+="NO_CONFIRMED_SETUP;";
 
-   double lastClose = close[0];
-   double lastLow = low[0], lastHigh = high[0], lastOpen = open[0];
+      s.long_score=Clamp(long_base-long_pen);s.short_score=Clamp(short_base-short_pen);s.direction=AS_DIR_NONE;s.setup=AS_SETUP_NONE;
+      if(!hard && long_setup!=AS_SETUP_NONE && s.long_score>=75 && s.long_score-s.short_score>=10){s.direction=AS_DIR_LONG;s.setup=long_setup;}
+      else if(!hard && short_setup!=AS_SETUP_NONE && s.short_score>=75 && s.short_score-s.long_score>=10){s.direction=AS_DIR_SHORT;s.setup=short_setup;}
 
-   if(direction == TREND_BULLISH)
-     {
-      bool closedBackAbove = lastClose > zone.priceHigh && lastOpen <= zone.priceHigh;
-      bool rejectionWick = lastLow < zone.priceLow && lastClose > zone.priceLow;
-      if(closedBackAbove) return SETUP_PULLBACK;
-      if(rejectionWick)   return SETUP_REJECTION;
-     }
-   else if(direction == TREND_BEARISH)
-     {
-      bool closedBackBelow = lastClose < zone.priceLow && lastOpen >= zone.priceLow;
-      bool rejectionWick = lastHigh > zone.priceHigh && lastClose < zone.priceHigh;
-      if(closedBackBelow) return SETUP_PULLBACK;
-      if(rejectionWick)   return SETUP_REJECTION;
-     }
-
-   return SETUP_NONE;
-  }
-
-//+------------------------------------------------------------------+
-//| Build a scored candidate for one direction, or return false if it |
-//| fails any gate (no zone proximity, no M5 confirmation, insufficient|
-//| room-to-target, etc). blockLines explains why when it fails.      |
-//+------------------------------------------------------------------+
-bool BuildCandidate(const string symbol, const ENUM_TREND_DIRECTION direction,
-                     const MtfSnapshot &mtf, const Zone &zones[], const double price,
-                     const double atr, Candidate &outCandidate, string &blockLines[])
-  {
-   ArrayResize(blockLines, 0);
-   ENUM_ZONE_TYPE relevantZoneType = (direction == TREND_BULLISH) ? ZONE_SUPPORT : ZONE_RESISTANCE;
-   ENUM_ZONE_TYPE opposingZoneType = (direction == TREND_BULLISH) ? ZONE_RESISTANCE : ZONE_SUPPORT;
-
-   Zone nearZone;
-   double maxDistance = atr * (CFG_ZONE_TOLERANCE_ATR + 1.0);
-   if(!FindNearestZone(zones, relevantZoneType, price, maxDistance, nearZone))
-     {
-      int n = ArraySize(blockLines);
-      ArrayResize(blockLines, n + 1);
-      blockLines[n] = "no zone within proximity tolerance";
-      return false;
-     }
-
-   ENUM_SETUP_TYPE setup = DetectM5Confirmation(symbol, direction, nearZone, 20);
-   if(setup == SETUP_NONE)
-     {
-      int n = ArraySize(blockLines);
-      ArrayResize(blockLines, n + 1);
-      blockLines[n] = "no M5 pullback/rejection confirmation";
-      return false;
-     }
-
-   double slBuffer = atr * CFG_ATR_SL_BUFFER_MULT;
-   double entry = price;
-   double sl, tp;
-
-   if(direction == TREND_BULLISH)
-     {
-      sl = nearZone.priceLow - slBuffer;
-      double riskDistance = entry - sl;
-      tp = entry + riskDistance * CFG_MIN_RR;
-     }
-   else
-     {
-      sl = nearZone.priceHigh + slBuffer;
-      double riskDistance = sl - entry;
-      tp = entry - riskDistance * CFG_MIN_RR;
-     }
-
-   Zone opposingZone;
-   bool hasOpposing = FindNearestZone(zones, opposingZoneType, price, DBL_MAX, opposingZone);
-   if(hasOpposing)
-     {
-      bool blocksRoom = (direction == TREND_BULLISH) ? (opposingZone.priceLow < tp)
-                                                       : (opposingZone.priceHigh > tp);
-      if(blocksRoom)
-        {
-         int n = ArraySize(blockLines);
-         ArrayResize(blockLines, n + 1);
-         blockLines[n] = "nearer opposing zone blocks 2R room-to-target";
-         return false;
-        }
-     }
-
-   outCandidate.symbol = symbol;
-   outCandidate.direction = direction;
-   outCandidate.setup = setup;
-   outCandidate.mtf = mtf;
-   outCandidate.nearestZone = nearZone;
-   outCandidate.entry = entry;
-   outCandidate.sl = sl;
-   outCandidate.tp = tp;
-   outCandidate.atr = atr;
-   outCandidate.ts = TimeCurrent();
-   return true;
-  }
-
-//+------------------------------------------------------------------+
-//| Rule score. Each timeframe contributes only to its own direction  |
-//| (TrendEngine.DirectionalBonus already enforces that), plus a zone |
-//| quality term and a volatility-regime term (v1.2.0: ATR quality    |
-//| ratio only; the full multi-input Regime Engine is v1.3).          |
-//+------------------------------------------------------------------+
-void ComputeScore(const MtfSnapshot &mtf, const double atrQualityRatio, const int zoneTouches,
-                   ScoreBreakdown &score)
-  {
-   ArrayResize(score.explanationLines, 0);
-
-   double longScore = 0.0, shortScore = 0.0;
-
-   double h4Long = DirectionalBonus(mtf.h4, TREND_BULLISH);
-   double h4Short = DirectionalBonus(mtf.h4, TREND_BEARISH);
-   double h1Long = DirectionalBonus(mtf.h1, TREND_BULLISH);
-   double h1Short = DirectionalBonus(mtf.h1, TREND_BEARISH);
-   double m15Long = DirectionalBonus(mtf.m15, TREND_BULLISH);
-   double m15Short = DirectionalBonus(mtf.m15, TREND_BEARISH);
-
-   longScore  = h4Long * 0.30 + h1Long * 0.35 + m15Long * 0.20;
-   shortScore = h4Short * 0.30 + h1Short * 0.35 + m15Short * 0.20;
-
-   double zoneQuality = MathMin(zoneTouches, 5) * 2.0; // [ASSUMED] weighting
-   double volatilityTerm = MathMax(0.0, MathMin(10.0, (atrQualityRatio - 1.0) * 10.0));
-
-   longScore  += zoneQuality + volatilityTerm;
-   shortScore += zoneQuality + volatilityTerm;
-
-   score.longScore = MathMin(longScore, 100.0);
-   score.shortScore = MathMin(shortScore, 100.0);
-  }
+      double entry=(s.direction==AS_DIR_SHORT?snap.bid:snap.ask),buffer=MathMax(h1.atr*0.15,snap.point*5),stop=0;
+      if(s.direction==AS_DIR_LONG){if(si<0){hard=true;codes+="NO_STRUCTURAL_SUPPORT;";}else stop=zones[si].low-buffer;}
+      if(s.direction==AS_DIR_SHORT){if(ri<0){hard=true;codes+="NO_STRUCTURAL_RESISTANCE;";}else stop=zones[ri].high+buffer;}
+      double risk_distance=(stop>0?MathAbs(entry-stop):0),tp=0;
+      if(s.direction!=AS_DIR_NONE){
+         if(risk_distance<=0||risk_distance>h1.atr*2.50){hard=true;codes+="INVALID_STRUCTURAL_STOP;";}
+         else tp=(s.direction==AS_DIR_LONG?entry+AS_MINIMUM_RISK_REWARD*risk_distance:entry-AS_MINIMUM_RISK_REWARD*risk_distance);
+         if(s.direction==AS_DIR_LONG&&ri>=0&&zones[ri].low<tp){hard=true;codes+="OPPOSING_ZONE_BEFORE_2R;";}
+         if(s.direction==AS_DIR_SHORT&&si>=0&&zones[si].high>tp){hard=true;codes+="OPPOSING_ZONE_BEFORE_2R;";}
+      }
+      if(hard)s.direction=AS_DIR_NONE;
+      s.symbol=symbol;s.preferred_entry=entry;s.entry_low=entry-h1.atr*0.10;s.entry_high=entry+h1.atr*0.10;s.stop_loss=stop;s.take_profit=tp;
+      s.nearest_support=support;s.nearest_resistance=resistance;s.creation_time=TimeCurrent();s.confirmation_bar_time=m5.available_information_time;s.expires_at=s.creation_time+15*60;
+      s.rule_version=AS_RULE_VERSION;s.scoring_version=AS_SCORING_VERSION;
+      string key=StringFormat("%s|%d|%d|%I64d|%s",symbol,(int)s.direction,(int)s.setup,(long)s.confirmation_bar_time,AS_RULE_VERSION);s.signal_id=AS_Fnv1a(key);s.parameter_hash=AS_Fnv1a("alikhande-v1.1-defaults");
+      s.reasons=(s.direction==AS_DIR_LONG?lr:(s.direction==AS_DIR_SHORT?sr:""));s.hard_blocked=hard;s.validation_codes=codes;
+      s.has_historical_estimate=false;s.historical_win_rate=0;s.sample_size=0;s.confidence_low=0;s.confidence_high=0;return true;
+   }
+};
