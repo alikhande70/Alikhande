@@ -40,8 +40,11 @@ class Card(QFrame):
     def body(self) -> QVBoxLayout:
         return self._layout
 
-    def add(self, widget: QWidget) -> QWidget:
-        self._layout.addWidget(widget)
+    def add(self, widget: QWidget, stretch: int = 0) -> QWidget:
+        """Add a child. Pass ``stretch=1`` for the one child that should absorb
+        spare height — without it Qt distributes the slack evenly and a table
+        ends up floating below a gap instead of filling its card."""
+        self._layout.addWidget(widget, stretch)
         return widget
 
 

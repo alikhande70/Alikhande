@@ -70,7 +70,7 @@ class OverviewTab(QWidget):
         card = Card("Live scan")
         self._table = Table(HEADERS)
         self._table.itemDoubleClicked.connect(self._on_double_click)
-        card.add(self._table)
+        card.add(self._table, 1)
         root.addWidget(card, 1)
 
     def _on_double_click(self, item) -> None:

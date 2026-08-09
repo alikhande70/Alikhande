@@ -111,7 +111,7 @@ class ExecutionTab(QWidget):
 
         history = Card("Working orders")
         self._orders = Table(["Ticket", "Symbol", "State", "Initial", "Current", "Price"])
-        history.add(self._orders)
+        history.add(self._orders, 1)
         root.addWidget(history, 1)
 
     def update_view(self, snapshot, execution, orders, config) -> None:

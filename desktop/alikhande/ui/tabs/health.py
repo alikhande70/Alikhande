@@ -96,14 +96,14 @@ class HealthTab(QWidget):
                 PALETTE.warning if entry["kind"] == "ASSUMED" else PALETTE.accent,
             )
         table.fit_columns()
-        assumptions.add(table)
+        assumptions.add(table, 1)
         middle.addWidget(assumptions, 1)
 
         events = Card("Event journal")
         self._journal = QPlainTextEdit()
         self._journal.setReadOnly(True)
         self._journal.setMaximumBlockCount(400)
-        events.add(self._journal)
+        events.add(self._journal, 1)
         middle.addWidget(events, 1)
 
         root.addLayout(middle, 1)

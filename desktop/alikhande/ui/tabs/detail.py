@@ -115,8 +115,7 @@ class DetailTab(QWidget):
         # ---- score breakdown -------------------------------------------------
         breakdown = Card("Why this score")
         self._components = Table(["Component", "Contribution"])
-        self._components.setMaximumHeight(230)
-        breakdown.add(self._components)
+        breakdown.add(self._components, 1)
         root.addWidget(breakdown, 1)
 
         # ---- arm / confirm ---------------------------------------------------

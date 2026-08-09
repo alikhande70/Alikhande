@@ -94,7 +94,7 @@ class RiskTab(QWidget):
         self._table = Table(
             ["Symbol", "Side", "Volume", "Entry", "Stop", "Target", "Profit", "Risk"]
         )
-        table_card.add(self._table)
+        table_card.add(self._table, 1)
         root.addWidget(table_card, 1)
 
         self._render_policy()
