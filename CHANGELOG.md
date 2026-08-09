@@ -1,5 +1,66 @@
 # Changelog
 
+## Desktop 2.0.0 — Standalone
+
+The scanner as a Windows application running outside MetaTrader: its own
+process, window, database and logic, with the terminal reduced to a headless
+quote-and-execution gateway. MetaQuotes publishes no other supported path for an
+external program to reach an MT5 account — `desktop/README.md` opens with what
+that does and does not make possible.
+
+### Fixed — a P0 in the strategy, present in the MQL5 build too
+
+- **An inverted stop could pass every gate.** `find_nearest_zone` deliberately
+  does not require a zone to sit on one side of price; that was the v1.1.0 fix
+  which made the INSIDE case findable at all. The cost was that a demand zone
+  price had fallen *below* was still "nearest", so a LONG took
+  `stop = zone.low - buffer` — **above** its entry — and `abs(entry - stop)` hid
+  the inversion from the distance check. The result is a position whose stop and
+  target sit in the same direction.
+
+  Found by running the backtest and noticing its arithmetic was impossible:
+  1,197 wins and 8,444 losses at 2R cannot total +8,130 R. 76 trades labelled
+  `SL` had returned +1.0 R. Fixed in both builds as
+  `STOP_ON_WRONG_SIDE_OF_ENTRY`, plus relation-aware zone anchoring so a broken
+  zone cannot anchor a trade at all. The static gate could not have found it —
+  the code is well-formed, reachable and type-correct.
+
+### Added
+
+- **A pure core with no external imports.** Analysis, risk, execution and
+  statistics import no MetaTrader, no Qt and no sqlite. This is what makes the
+  whole pipeline executable and testable anywhere, which the MQL5 build never
+  was. CI installs no dependencies for the desktop job specifically to keep it
+  that way.
+- **The outcome loop, closed.** `core/outcomes.py` tracks an ACTIVE signal to
+  its TP or SL and records realised R, MFE and MAE. In the MQL5 build
+  `SaveOutcome` was defined and called by nothing, so `has_historical_estimate`
+  was permanently false and every probability rendered "n/a" forever. A backtest
+  run now writes 1,247 outcomes that the statistics layer reads back and turns
+  into a Wilson interval.
+- **A backtest engine that shares the strategy rather than reimplementing it.**
+  It advances a cursor on an offline gateway and calls the same `SignalEngine`,
+  `RiskPlanner` and `OutcomeTracker` the live app uses. Look-ahead is prevented
+  structurally: the cursor truncates every series and higher timeframes advance
+  proportionally, so H1 cannot leak a bar past M5. Every report states its own
+  limits, including that a bar spanning both stop and target is scored a stop.
+- **180 executed tests**, covering every safety gate — including a mechanical
+  assertion that `send_order` appears nowhere outside the execution boundary.
+- **A third independent real-account refusal.** The MT5 adapter refuses in
+  `send_order` through code sharing nothing with the engine's check.
+- **Indicators computed in-process**, removing MetaTrader's handle exhaustion,
+  `BarsCalculated` timing hazards, and the untestability of both.
+- **A five-tab PySide6 desktop UI** — Overview, Signal Detail, Risk, Execution,
+  Health — with Arm and Confirm as separate controls and a live TTL countdown.
+  All broker access is confined to one worker thread.
+- **PyInstaller packaging** that refuses to build from a failing test suite.
+
+### Known gaps
+
+Live broker access has never executed, indicator agreement with MetaTrader is
+derived from documentation rather than measured, and no out-of-sample result on
+real data exists. `desktop/docs/VERIFICATION.md` is explicit about all three.
+
 ## 1.3.0 — Evidence Integrity
 
 Produced by studying an independent GPT rebuild, then acting on what it got

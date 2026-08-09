@@ -170,11 +170,25 @@ public:
       s.demand_relation = demand_relation;
       s.supply_relation = supply_relation;
 
-      // A zone may only anchor a trade in the direction it supports.
+      // A zone may only anchor a trade in the direction it supports, AND price
+      // must be on the side of it that the trade assumes.
+      //
+      // The second half is not pedantry. AS_FindNearestZone deliberately does
+      // not require the zone to sit on one side of the quote — that was the
+      // v1.1.0 fix which made the INSIDE case findable at all. The cost is that
+      // a demand zone price has fallen *below* is still "nearest", and buying
+      // it means buying support that has already broken. Worse, the stop
+      // derived from it (zone.low - buffer) then lands ABOVE the entry, and
+      // because the distance check below uses MathAbs, an inverted trade would
+      // otherwise pass every downstream gate.
       const bool demand_anchors = has_demand
-                                  && AS_ZoneAnchors(ctx.zones[demand_index], AS_DIR_LONG);
+                                  && AS_ZoneAnchors(ctx.zones[demand_index], AS_DIR_LONG)
+                                  && (demand_relation == AS_ZONE_REL_INSIDE
+                                      || demand_relation == AS_ZONE_REL_ABOVE);
       const bool supply_anchors = has_supply
-                                  && AS_ZoneAnchors(ctx.zones[supply_index], AS_DIR_SHORT);
+                                  && AS_ZoneAnchors(ctx.zones[supply_index], AS_DIR_SHORT)
+                                  && (supply_relation == AS_ZONE_REL_INSIDE
+                                      || supply_relation == AS_ZONE_REL_BELOW);
 
       const ENUM_AS_SETUP_TYPE long_setup  = QualifyLong(ctx, demand_anchors);
       const ENUM_AS_SETUP_TYPE short_setup = QualifyShort(ctx, supply_anchors);
@@ -290,8 +304,21 @@ public:
          else
             stop = ctx.zones[supply_index].high + buffer;
 
+         // A stop must sit on the LOSING side of the entry. Checking the signed
+         // relationship before the distance is the whole point: MathAbs cannot
+         // tell an inverted trade from a valid one, and an inverted trade is
+         // not a wide stop — it is a position whose stop and target both sit in
+         // the same direction, which can only ever lose.
+         const bool inverted = (direction == AS_DIR_LONG && stop >= entry)
+                               || (direction == AS_DIR_SHORT && stop <= entry);
          const double risk_distance = MathAbs(entry - stop);
-         if(risk_distance <= 0.0 || risk_distance > atr * AS_MAX_STOP_DISTANCE_ATR)
+
+         if(inverted)
+           {
+            hard = true;
+            codes += "STOP_ON_WRONG_SIDE_OF_ENTRY;";
+           }
+         else if(risk_distance <= 0.0 || risk_distance > atr * AS_MAX_STOP_DISTANCE_ATR)
            {
             hard = true;
             codes += "INVALID_STRUCTURAL_STOP;";

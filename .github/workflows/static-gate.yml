@@ -22,3 +22,25 @@ jobs:
 
       - name: Static gate
         run: python3 tools/static_gate.py
+
+  desktop:
+    name: desktop tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # No dependencies installed, on purpose. The desktop core imports nothing
+      # outside the standard library, and this job is what keeps that true: the
+      # moment somebody reaches for numpy or PySide6 inside core/, it fails here
+      # rather than six months later when the tests quietly stop running.
+      - name: Core, safety, persistence and integration tests
+        working-directory: desktop
+        run: python3 -m unittest discover -s tests -t .
+
+      - name: Backtest smoke run
+        working-directory: desktop
+        run: python3 -m alikhande backtest --symbols EURUSD --h4-bars 400 --warmup 9900 --steps 300

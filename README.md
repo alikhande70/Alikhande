@@ -1,4 +1,18 @@
-# Alikhande Scanner MT5 v1.3.0
+# Alikhande Scanner
+
+Two builds of one system:
+
+| | |
+|---|---|
+| **[`desktop/`](desktop/) — Desktop 2.0.0** | A standalone Windows application. Its own process, window and database; MetaTrader runs headless in the background purely as a quote/execution gateway. 180 tests execute; the backtest runs; the outcome loop is closed. |
+| **`MQL5/` — MT5 v1.3.0** | The MetaTrader Expert Advisor. Statically verified, never compiled. |
+
+Read [`desktop/README.md`](desktop/README.md) first if you want the application,
+and note its opening section on what "outside MetaTrader" can and cannot mean.
+
+---
+
+## Alikhande Scanner MT5 v1.3.0
 
 **Edition:** Evidence Integrity
 **Default mode:** Alert-only. Real accounts are blocked unconditionally.
@@ -105,7 +119,16 @@ do and do not prove.
 
 ## Status
 
-**The outcome loop is not closed.** Signals, plans, executions and deals are
+**A P0 was found in this build by running its Python port.** `find_nearest_zone`
+does not require a zone to sit on one side of price — that was the v1.1.0 fix
+which made the INSIDE case findable — so when price traded *below* a demand
+zone, a LONG took `stop = zone.low - buffer`, which is **above** its entry.
+`MathAbs(entry - stop)` hid the inversion from the distance check and every
+downstream gate passed it. Fixed here as `STOP_ON_WRONG_SIDE_OF_ENTRY` plus
+relation-aware zone anchoring. The static gate could never have caught it: the
+code is well-formed and fully reachable. See `desktop/docs/VERIFICATION.md`.
+
+**The outcome loop is not closed in this build.** It is closed in `desktop/`. Signals, plans, executions and deals are
 persisted with full version provenance, but nothing writes the `outcomes` table
 yet, so no win rate or probability is ever produced — `has_historical_estimate`
 is permanently false and the UI correctly renders "n/a". See
