@@ -416,3 +416,79 @@ class TestScanEngine(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUiContracts(unittest.TestCase):
+    """Rules the UI must keep, asserted rather than trusted to review.
+
+    These need no display: they check structure and colour policy, which is
+    where the visual defects that actually matter live.
+    """
+
+    def test_status_chip_requires_an_icon_and_a_label(self):
+        """Colour must never carry meaning alone.
+
+        Warning and serious sit in the same warm family by design, so hue cannot
+        separate them, and a bare coloured dot tells a colour-blind reader
+        nothing. Requiring both arguments makes the omission impossible.
+        """
+        import inspect
+
+        from alikhande.ui.components import StatusChip
+
+        parameters = list(inspect.signature(StatusChip.__init__).parameters)
+        self.assertEqual(parameters[1], "icon")
+        self.assertEqual(parameters[2], "text")
+        for name in ("icon", "text"):
+            self.assertIs(
+                inspect.signature(StatusChip.__init__).parameters[name].default,
+                inspect.Parameter.empty,
+                f"{name} must be required so a bare coloured dot cannot ship",
+            )
+
+    def test_unknown_never_borrows_a_status_colour(self):
+        """UNKNOWN is the absence of a status, not a mild one."""
+        from alikhande.ui.theme import PALETTE
+
+        for status in (PALETTE.good, PALETTE.warning, PALETTE.serious, PALETTE.critical):
+            self.assertNotEqual(PALETTE.unknown, status)
+
+    def test_direction_does_not_reuse_the_permission_colours(self):
+        """LONG/SHORT must not be green/red — that pair means allowed/blocked
+        here, and a SHORT painted red reads as an error."""
+        from alikhande.ui.theme import PALETTE
+
+        for direction in (PALETTE.long, PALETTE.short):
+            self.assertNotEqual(direction, PALETTE.good)
+            self.assertNotEqual(direction, PALETTE.critical)
+
+    def test_the_score_ramp_is_a_single_hue(self):
+        """Magnitude uses one hue darkening with value, never a rainbow."""
+        from alikhande.ui.theme import PALETTE, score_ramp
+
+        ramp = {score_ramp(v, 75.0) for v in (95.0, 80.0, 60.0)}
+        self.assertTrue(ramp <= {PALETTE.seq_100, PALETTE.seq_250, PALETTE.seq_400})
+        # Below the threshold a score is not a failure, so it recedes rather
+        # than turning red.
+        self.assertEqual(score_ramp(20.0, 75.0), PALETTE.ink_muted)
+
+    def test_the_symbol_view_carries_what_the_chart_needs(self):
+        """The detail chart must be able to draw the structure, not just be
+        told about it."""
+        from alikhande.app.engine import SymbolView
+
+        view = SymbolView()
+        self.assertEqual(view.bars, [])
+        self.assertEqual(view.zones, [])
+
+    def test_the_ui_never_reaches_into_engine_privates(self):
+        """The UI reads only what the engine offers publicly."""
+        import pathlib
+        import re
+
+        root = pathlib.Path(__file__).resolve().parent.parent / "alikhande" / "ui"
+        offenders = []
+        for path in root.rglob("*.py"):
+            for match in re.finditer(r"_engine\.(_\w+)", path.read_text(encoding="utf-8")):
+                offenders.append(f"{path.name}: _engine.{match.group(1)}")
+        self.assertEqual(offenders, [], f"UI reached into engine privates: {offenders}")

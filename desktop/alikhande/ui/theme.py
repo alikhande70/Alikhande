@@ -1,21 +1,37 @@
 """Design tokens and the application stylesheet.
 
-Tokens first, stylesheet second. Every colour, radius and spacing value in the
-UI comes from the palette below, so a change is made once rather than hunted
-through widget code — the same reason the MQL5 build had a ``Theme.mqh``.
+Tokens first, stylesheet second. Every colour, size and space in the UI comes
+from here, so a change is made once rather than hunted through widget code.
 
-The visual language is deliberately restrained. This is an instrument panel for
-a system whose entire argument is "do not trust unverified numbers", and a
-dashboard that looks like a casino undermines that before a single figure is
-read. Colour carries meaning and nothing else:
+## Colour is assigned by job, and the palette was validated, not eyeballed
 
-* **Accent (blue)** — interactive, neutral.
-* **Long (teal) / Short (amber)** — direction. Not green/red, because
-  green/red is reserved for *permission*, and using it for direction makes a
-  short signal look like an error.
-* **Danger (red)** — blocked, refused, or requiring human attention.
-* **Muted grey** — anything unknown or unavailable. Unknown must never look
-  like a value.
+Four distinct jobs, four rules:
+
+**Identity — direction.** LONG and SHORT are two categories, so they take
+categorical slots 1 and 2. Validated all-pairs against this app's own dark
+surface (`#12161F`): CVD ΔE 26.8, normal-vision ΔE 31.8, both well clear of
+their floors, and both above 3:1 contrast.
+
+Not green/red, deliberately. Green/red is reserved here for *permission* —
+allowed versus blocked — and a SHORT signal painted red reads as an error at a
+glance. Blue/orange keeps direction and permission in separate colour families.
+
+**Magnitude — the rule score.** One hue, light to dark. A sequential blue ramp,
+never a rainbow, never a hue change part-way up.
+
+**Polarity — realised R.** Diverging blue↔red around a neutral grey midpoint.
+
+**State — gates and guards.** The fixed status palette. These four are *not* a
+categorical palette and do not pass a categorical validation, which is expected:
+warning and serious sit in the same warm family by design. The mitigation is
+structural — **every status colour in this UI ships with an icon and a text
+label**, so hue never carries meaning on its own. `StatusChip` enforces that by
+taking the icon and the label as required arguments.
+
+## Type
+
+A real scale, because uniform 13px everywhere is what makes an interface read as
+a data dump: nothing is emphasised, so the eye has nowhere to land.
 """
 
 from __future__ import annotations
@@ -25,228 +41,342 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Palette:
-    # Surfaces, darkest to lightest.
-    base: str = "#0B0E14"
-    surface: str = "#12161F"
-    surface_high: str = "#1A1F2B"
-    surface_hover: str = "#222836"
-    border: str = "#2A3140"
-    border_strong: str = "#3A4356"
+    # ---- surfaces, darkest to lightest ---------------------------------
+    plane: str = "#0B0E14"  # the window behind everything
+    surface: str = "#12161F"  # cards; the surface the palette was validated on
+    surface_high: str = "#1A1F2B"  # nested panels, table headers
+    surface_hover: str = "#232A38"
+    border: str = "#242B39"
+    border_strong: str = "#37415480"
 
-    # Text.
-    text: str = "#E4E8F0"
-    text_dim: str = "#96A0B5"
-    text_faint: str = "#5E6980"
+    # ---- ink ------------------------------------------------------------
+    ink: str = "#F2F5FA"
+    ink_secondary: str = "#A6B0C3"
+    ink_muted: str = "#6C7789"
+    ink_faint: str = "#4A5364"
 
-    # Meaning.
-    accent: str = "#4C8DFF"
-    accent_dim: str = "#2E5FB0"
-    long: str = "#2BC4A5"
-    short: str = "#F0A63C"
-    danger: str = "#F0553C"
-    warning: str = "#E8C547"
-    ok: str = "#2BC46A"
-    muted: str = "#5E6980"
+    # ---- identity: direction (categorical slots 1 and 2) -----------------
+    long: str = "#3987E5"
+    short: str = "#D95926"
+    long_wash: str = "rgba(57,135,229,0.14)"
+    short_wash: str = "rgba(217,89,38,0.14)"
 
-    # Typography and metrics.
-    font_family: str = "'Segoe UI', 'Inter', 'DejaVu Sans', system-ui, sans-serif"
-    font_mono: str = "'Cascadia Mono', 'Consolas', 'DejaVu Sans Mono', monospace"
-    radius: int = 8
-    radius_small: int = 5
-    gap: int = 12
+    # ---- interactive ----------------------------------------------------
+    accent: str = "#3987E5"
+    accent_hover: str = "#5A9DEC"
+    accent_ink: str = "#06101F"
+
+    # ---- state: the fixed status palette (icon + label always) ----------
+    good: str = "#0CA30C"
+    warning: str = "#FAB219"
+    serious: str = "#EC835A"
+    critical: str = "#D03B3B"
+    good_wash: str = "rgba(12,163,12,0.13)"
+    warning_wash: str = "rgba(250,178,25,0.13)"
+    serious_wash: str = "rgba(236,131,90,0.13)"
+    critical_wash: str = "rgba(208,59,59,0.13)"
+    # Unknown is not a status. It is the absence of one, and it must never
+    # borrow a status colour — an unseen calendar that renders amber reads as
+    # "mildly concerning" when the truth is "nobody looked".
+    unknown: str = "#6C7789"
+    unknown_wash: str = "rgba(108,119,137,0.12)"
+
+    # ---- magnitude: sequential blue, light -> dark -----------------------
+    seq_100: str = "#CDE2FB"
+    seq_250: str = "#86B6EF"
+    seq_400: str = "#3987E5"
+    seq_550: str = "#1C5CAB"
+    seq_700: str = "#0D366B"
+
+    # ---- chart chrome ---------------------------------------------------
+    grid: str = "#1E2532"
+    axis: str = "#2C3444"
+
+    # ---- type -----------------------------------------------------------
+    font: str = "'Segoe UI Variable', 'Segoe UI', 'Inter', 'DejaVu Sans', system-ui, sans-serif"
+    mono: str = "'Cascadia Mono', 'JetBrains Mono', 'Consolas', 'DejaVu Sans Mono', monospace"
 
 
 PALETTE = Palette()
 
 
-def score_colour(score: float, threshold: float) -> str:
-    """Colour for a rule score.
+@dataclass(frozen=True)
+class Type:
+    """Type scale. Sizes in px, weights as Qt expects them."""
 
-    Below threshold reads as muted rather than red: a score of 40 is not an
-    error, it is simply not a signal, and colouring it as a failure trains the
-    operator to ignore the colour that does mean failure.
+    display: int = 34
+    h1: int = 22
+    h2: int = 17
+    h3: int = 15
+    body: int = 14
+    small: int = 12
+    micro: int = 11
+
+
+@dataclass(frozen=True)
+class Space:
+    """Spacing scale. Everything is one of these; nothing is a magic number."""
+
+    xs: int = 4
+    sm: int = 8
+    md: int = 12
+    lg: int = 16
+    xl: int = 24
+    xxl: int = 32
+
+
+TYPE = Type()
+SPACE = Space()
+
+RADIUS = 10
+RADIUS_SM = 6
+RADIUS_PILL = 999
+
+
+def score_ramp(score: float, threshold: float) -> str:
+    """Sequential blue for a rule score.
+
+    One hue, darkening with magnitude. Below threshold the score is not a
+    failure — it is simply not a signal — so it recedes to muted ink rather than
+    turning red. Colouring an ordinary low score as an error is how an operator
+    learns to ignore the colour that does mean one.
     """
+    if score >= threshold + 15:
+        return PALETTE.seq_100
     if score >= threshold:
-        return PALETTE.accent
-    if score >= threshold * 0.8:
-        return PALETTE.text_dim
-    return PALETTE.text_faint
+        return PALETTE.seq_250
+    if score >= threshold * 0.75:
+        return PALETTE.seq_400
+    return PALETTE.ink_muted
 
 
-def stylesheet(palette: Palette = PALETTE) -> str:
-    p = palette
+def r_colour(value: float) -> str:
+    """Diverging colour for a realised R multiple."""
+    if value > 0.05:
+        return PALETTE.long
+    if value < -0.05:
+        return PALETTE.critical
+    return PALETTE.ink_muted
+
+
+def stylesheet(p: Palette = PALETTE) -> str:
+    t, s = TYPE, SPACE
     return f"""
     * {{
-        font-family: {p.font_family};
-        font-size: 13px;
-        color: {p.text};
+        font-family: {p.font};
+        font-size: {t.body}px;
+        color: {p.ink};
         outline: none;
     }}
-    QWidget#Root, QMainWindow {{ background: {p.base}; }}
+    QMainWindow, QWidget#Plane {{ background: {p.plane}; }}
+    QWidget#Content {{ background: {p.plane}; }}
 
-    /* ---------------------------------------------------------- header */
-    QFrame#Header {{
+    /* ------------------------------------------------------ sidebar rail */
+    QFrame#Sidebar {{
         background: {p.surface};
+        border-right: 1px solid {p.border};
+    }}
+    QLabel#Brand {{
+        font-size: {t.h3}px;
+        font-weight: 700;
+        letter-spacing: 0.4px;
+        color: {p.ink};
+    }}
+    QLabel#BrandSub {{
+        font-size: {t.micro}px;
+        color: {p.ink_faint};
+        letter-spacing: 0.6px;
+    }}
+    QPushButton#NavItem {{
+        background: transparent;
+        border: none;
+        border-radius: {RADIUS_SM}px;
+        padding: 10px 12px;
+        text-align: left;
+        color: {p.ink_secondary};
+        font-size: {t.body}px;
+        font-weight: 500;
+    }}
+    QPushButton#NavItem:hover {{ background: {p.surface_high}; color: {p.ink}; }}
+    QPushButton#NavItem:checked {{
+        background: rgba(57,135,229,0.14);
+        color: {p.ink};
+        font-weight: 600;
+    }}
+    QLabel#NavBadge {{
+        background: {p.accent};
+        color: {p.accent_ink};
+        border-radius: {RADIUS_PILL}px;
+        padding: 1px 7px;
+        font-size: {t.micro}px;
+        font-weight: 700;
+    }}
+
+    /* ------------------------------------------------------------ topbar */
+    QFrame#TopBar {{
+        background: {p.plane};
         border-bottom: 1px solid {p.border};
     }}
-    QLabel#AppTitle {{ font-size: 15px; font-weight: 600; letter-spacing: 0.3px; }}
-    QLabel#AppVersion {{ color: {p.text_faint}; font-size: 11px; }}
+    QLabel#ViewTitle {{ font-size: {t.h1}px; font-weight: 600; }}
+    QLabel#ViewSubtitle {{ font-size: {t.small}px; color: {p.ink_muted}; }}
 
-    /* Status pills. The banner variant is for states the operator must not be
-       able to miss — a real account, or an execution needing review. */
-    QLabel#Pill {{
-        background: {p.surface_high};
-        border: 1px solid {p.border};
-        border-radius: {p.radius_small}px;
-        padding: 3px 10px;
-        color: {p.text_dim};
-        font-size: 11px;
-        font-weight: 600;
-    }}
-    QLabel#PillOk     {{ background: rgba(43,196,106,0.14); border-color: {p.ok};      color: {p.ok}; }}
-    QLabel#PillWarn   {{ background: rgba(232,197,71,0.14); border-color: {p.warning}; color: {p.warning}; }}
-    QLabel#PillDanger {{ background: rgba(240,85,60,0.16);  border-color: {p.danger};  color: {p.danger}; }}
-
-    QFrame#Banner {{
-        background: rgba(240,85,60,0.13);
-        border: 1px solid {p.danger};
-        border-radius: {p.radius}px;
-    }}
-    QLabel#BannerText {{ color: {p.danger}; font-weight: 600; }}
-
-    /* ------------------------------------------------------------ tabs */
-    QTabWidget::pane {{
-        border: none;
-        background: {p.base};
-        top: -1px;
-    }}
-    QTabBar {{ background: transparent; }}
-    QTabBar::tab {{
-        background: transparent;
-        color: {p.text_faint};
-        padding: 9px 20px;
-        margin-right: 2px;
-        border: none;
-        border-bottom: 2px solid transparent;
-        font-weight: 600;
-        font-size: 12px;
-    }}
-    QTabBar::tab:hover  {{ color: {p.text_dim}; }}
-    QTabBar::tab:selected {{
-        color: {p.text};
-        border-bottom: 2px solid {p.accent};
-    }}
-
-    /* ----------------------------------------------------------- cards */
+    /* ------------------------------------------------------------- cards */
     QFrame#Card {{
         background: {p.surface};
         border: 1px solid {p.border};
-        border-radius: {p.radius}px;
+        border-radius: {RADIUS}px;
     }}
-    QLabel#CardTitle {{
-        color: {p.text_faint};
-        font-size: 10px;
-        font-weight: 700;
-        letter-spacing: 1.1px;
-    }}
-    QLabel#Metric      {{ font-size: 21px; font-weight: 600; }}
-    QLabel#MetricSmall {{ font-size: 15px; font-weight: 600; }}
-    QLabel#Caption     {{ color: {p.text_faint}; font-size: 11px; }}
-    QLabel#Mono        {{ font-family: {p.font_mono}; font-size: 12px; }}
-
-    /* ---------------------------------------------------------- tables */
-    QTableWidget {{
-        background: {p.surface};
-        alternate-background-color: {p.surface_high};
+    QFrame#CardQuiet {{
+        background: transparent;
         border: 1px solid {p.border};
-        border-radius: {p.radius}px;
-        gridline-color: {p.border};
-        selection-background-color: {p.accent_dim};
-        selection-color: #FFFFFF;
+        border-radius: {RADIUS}px;
     }}
-    QTableWidget::item {{ padding: 7px 9px; border: none; }}
-    QHeaderView::section {{
-        background: {p.surface_high};
-        color: {p.text_faint};
-        padding: 8px 9px;
+    /* A signal card is the one surface allowed to draw attention to itself. */
+    QFrame#SignalCard {{
+        background: {p.surface};
+        border: 1px solid {p.border_strong};
+        border-radius: {RADIUS}px;
+    }}
+    QFrame#SignalCard:hover {{ background: {p.surface_high}; }}
+
+    QLabel#CardTitle {{
+        color: {p.ink_muted};
+        font-size: {t.micro}px;
+        font-weight: 700;
+        letter-spacing: 1.2px;
+    }}
+    QLabel#Display  {{ font-size: {t.display}px; font-weight: 600; }}
+    QLabel#H1       {{ font-size: {t.h1}px; font-weight: 600; }}
+    QLabel#H2       {{ font-size: {t.h2}px; font-weight: 600; }}
+    QLabel#H3       {{ font-size: {t.h3}px; font-weight: 600; }}
+    QLabel#Body     {{ font-size: {t.body}px; color: {p.ink_secondary}; }}
+    QLabel#Caption  {{ font-size: {t.small}px; color: {p.ink_muted}; }}
+    QLabel#Micro    {{ font-size: {t.micro}px; color: {p.ink_faint}; }}
+    QLabel#Mono     {{ font-family: {p.mono}; font-size: {t.small}px; }}
+    QLabel#MonoBig  {{ font-family: {p.mono}; font-size: {t.h3}px; font-weight: 600; }}
+
+    /* ------------------------------------------------------------ tables */
+    QTableWidget {{
+        background: transparent;
+        border: none;
+        gridline-color: transparent;
+        selection-background-color: {p.surface_hover};
+        selection-color: {p.ink};
+    }}
+    QTableWidget::item {{
+        padding: {s.md}px {s.sm}px;
         border: none;
         border-bottom: 1px solid {p.border};
-        font-size: 10px;
-        font-weight: 700;
-        letter-spacing: 0.7px;
     }}
-    QTableCornerButton::section {{ background: {p.surface_high}; border: none; }}
+    QTableWidget::item:selected {{ background: {p.surface_hover}; }}
+    /* The header VIEW needs its own background. Styling only ::section leaves
+       Qt's default light palette showing through behind the sections, which
+       renders as a white strip across the top of every table. */
+    QHeaderView {{ background: transparent; border: none; }}
+    QTableWidget QHeaderView::section:horizontal {{ background: transparent; }}
+    QHeaderView::section {{
+        background: transparent;
+        color: {p.ink_faint};
+        padding: {s.sm}px;
+        border: none;
+        border-bottom: 1px solid {p.border};
+        font-size: {t.micro}px;
+        font-weight: 700;
+        letter-spacing: 0.9px;
+    }}
+    QTableCornerButton::section {{ background: transparent; border: none; }}
 
-    /* --------------------------------------------------------- buttons */
+    /* ----------------------------------------------------------- buttons */
     QPushButton {{
         background: {p.surface_high};
         border: 1px solid {p.border_strong};
-        border-radius: {p.radius_small}px;
-        padding: 8px 16px;
+        border-radius: {RADIUS_SM}px;
+        padding: 9px 18px;
         font-weight: 600;
     }}
-    QPushButton:hover    {{ background: {p.surface_hover}; }}
-    QPushButton:disabled {{ color: {p.text_faint}; background: {p.surface}; border-color: {p.border}; }}
+    QPushButton:hover {{ background: {p.surface_hover}; }}
+    QPushButton:disabled {{
+        color: {p.ink_faint};
+        background: transparent;
+        border-color: {p.border};
+    }}
+    QPushButton#Primary {{
+        background: {p.accent}; border-color: {p.accent}; color: {p.accent_ink};
+    }}
+    QPushButton#Primary:hover {{ background: {p.accent_hover}; }}
+    QPushButton#Primary:disabled {{
+        background: transparent; border-color: {p.border}; color: {p.ink_faint};
+    }}
+    QPushButton#Ghost {{
+        background: transparent; border: 1px solid {p.border_strong};
+        color: {p.ink_secondary};
+    }}
+    QPushButton#Ghost:hover {{ background: {p.surface_high}; color: {p.ink}; }}
 
-    QPushButton#Primary {{ background: {p.accent}; border-color: {p.accent}; color: #06101F; }}
-    QPushButton#Primary:hover {{ background: #6BA1FF; }}
-    QPushButton#Primary:disabled {{ background: {p.surface}; border-color: {p.border}; color: {p.text_faint}; }}
-
-    /* Arm and Confirm are visually distinct on purpose. They are two separate
+    /* Arm and Confirm look different on purpose. They are two separate
        deliberate actions, and making them look alike invites a double-click
-       through both. */
-    QPushButton#Arm {{ background: rgba(232,197,71,0.16); border-color: {p.warning}; color: {p.warning}; }}
-    QPushButton#Arm:hover {{ background: rgba(232,197,71,0.26); }}
-    QPushButton#Confirm {{ background: rgba(240,85,60,0.18); border-color: {p.danger}; color: {p.danger}; }}
-    QPushButton#Confirm:hover {{ background: rgba(240,85,60,0.30); }}
+       straight through both. */
+    QPushButton#Arm {{
+        background: {p.warning_wash}; border-color: {p.warning}; color: {p.warning};
+        padding: 12px 26px; font-size: {t.h3}px;
+    }}
+    QPushButton#Arm:hover {{ background: rgba(250,178,25,0.24); }}
+    QPushButton#Confirm {{
+        background: {p.critical_wash}; border-color: {p.critical}; color: {p.critical};
+        padding: 12px 26px; font-size: {t.h3}px;
+    }}
+    QPushButton#Confirm:hover {{ background: rgba(208,59,59,0.26); }}
     QPushButton#Arm:disabled, QPushButton#Confirm:disabled {{
-        background: {p.surface}; border-color: {p.border}; color: {p.text_faint};
+        background: transparent; border-color: {p.border}; color: {p.ink_faint};
     }}
 
-    /* --------------------------------------------------------- inputs */
+    /* ------------------------------------------------------------ inputs */
     QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox {{
         background: {p.surface_high};
         border: 1px solid {p.border_strong};
-        border-radius: {p.radius_small}px;
-        padding: 6px 10px;
+        border-radius: {RADIUS_SM}px;
+        padding: 8px 12px;
+        selection-background-color: {p.accent};
     }}
     QComboBox:focus, QLineEdit:focus {{ border-color: {p.accent}; }}
+    QComboBox::drop-down {{ border: none; width: 22px; }}
     QComboBox QAbstractItemView {{
         background: {p.surface_high};
         border: 1px solid {p.border_strong};
-        selection-background-color: {p.accent_dim};
+        border-radius: {RADIUS_SM}px;
+        selection-background-color: {p.surface_hover};
+        padding: 4px;
     }}
 
     QPlainTextEdit, QTextEdit {{
-        background: {p.surface};
-        border: 1px solid {p.border};
-        border-radius: {p.radius}px;
-        font-family: {p.font_mono};
-        font-size: 12px;
-    }}
-
-    QProgressBar {{
         background: {p.surface_high};
         border: 1px solid {p.border};
-        border-radius: 3px;
-        height: 6px;
-        text-align: center;
+        border-radius: {RADIUS_SM}px;
+        font-family: {p.mono};
+        font-size: {t.small}px;
+        padding: {s.sm}px;
     }}
-    QProgressBar::chunk {{ background: {p.warning}; border-radius: 3px; }}
 
+    /* --------------------------------------------------------- scrollbars */
+    QScrollArea {{ background: transparent; border: none; }}
     QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
-    QScrollBar::handle:vertical {{ background: {p.border_strong}; border-radius: 5px; min-height: 30px; }}
-    QScrollBar::handle:vertical:hover {{ background: {p.text_faint}; }}
-    QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+    QScrollBar::handle:vertical {{
+        background: {p.border_strong}; border-radius: 5px; min-height: 32px;
+    }}
+    QScrollBar::handle:vertical:hover {{ background: {p.ink_faint}; }}
     QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 0; }}
-    QScrollBar::handle:horizontal {{ background: {p.border_strong}; border-radius: 5px; min-width: 30px; }}
+    QScrollBar::handle:horizontal {{
+        background: {p.border_strong}; border-radius: 5px; min-width: 32px;
+    }}
+    QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+    QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 
-    QStatusBar {{ background: {p.surface}; border-top: 1px solid {p.border}; color: {p.text_faint}; }}
     QSplitter::handle {{ background: {p.border}; }}
     QToolTip {{
         background: {p.surface_high};
         border: 1px solid {p.border_strong};
-        color: {p.text};
-        padding: 6px 8px;
+        color: {p.ink};
+        padding: 7px 9px;
+        border-radius: {RADIUS_SM}px;
     }}
     """

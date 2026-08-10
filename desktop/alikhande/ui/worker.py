@@ -70,16 +70,15 @@ class ScanWorker(QObject):
             self.failed.emit(f"{type(error).__name__}: {error}")
 
     def _now(self) -> int:
-        try:
-            return self._engine._gateway.server_time()  # noqa: SLF001
-        except Exception:
-            # A gateway that cannot state the time cannot be traded against, but
-            # the UI still has to render something. Local time is used only to
-            # keep the loop turning; every gate that matters refuses without a
-            # tick anyway.
-            import time
+        """The engine's clock, falling back to local time only to keep turning.
 
-            return int(time.time())
+        A gateway that cannot state the time cannot be traded against, but the
+        UI still has to render something. Local time here only advances the
+        loop; every gate that matters refuses without a fresh tick anyway.
+        """
+        import time
+
+        return self._engine.server_time(fallback=int(time.time()))
 
     def _drain_actions(self, now: int) -> None:
         while True:

@@ -37,12 +37,14 @@ from ..core.guards import AccountRiskGuard, TradeGuards
 from ..core.journal import Journal
 from ..core.models import (
     AccountInfo,
+    Bar,
     NewsVerdict,
     RuntimeContext,
     SignalCandidate,
     SymbolSnapshot,
     SymbolSpec,
     TradePlan,
+    Zone,
 )
 from ..core.outcomes import OutcomeTracker
 from ..core.ports import BrokerGateway
@@ -74,6 +76,13 @@ class SymbolView:
     news_blocks: bool = False
     structure_built_at: int = 0
     last_error: str = ""
+    # Carried so the detail view can DRAW the structure rather than assert it.
+    # A scanner whose whole thesis is "price is inside a demand zone" has to let
+    # the operator see that and disagree; without the bars there is nothing to
+    # check the claim against.
+    bars: list[Bar] = field(default_factory=list)
+    zones: list[Zone] = field(default_factory=list)
+    regime_reason: str = ""
 
 
 @dataclass
@@ -161,6 +170,36 @@ class ScanEngine:
     @property
     def journal(self) -> Journal:
         return self._journal
+
+    @property
+    def guard_state(self):
+        return self._account_guard.state
+
+    # Public read accessors for the UI. The window used to reach into private
+    # attributes for these, which quietly made every internal rename a UI break
+    # and blurred the rule that the UI only ever reads what the engine offers.
+    def server_time(self, fallback: int = 0) -> int:
+        """Broker server time, or ``fallback`` when the gateway cannot say.
+
+        Deliberately not the local clock as a silent substitute: every TTL, news
+        window and staleness check in the system is measured against the
+        server's idea of now, so a caller that needs a clock has to decide for
+        itself what to do when there isn't one.
+        """
+        try:
+            return self._gateway.server_time()
+        except Exception:
+            return fallback
+
+    def own_positions(self):
+        return self._own_positions()
+
+    def working_orders(self):
+        return self._safe_orders()
+
+    def exposure_summary(self, account=None):
+        equity = account.equity if account and account.equity > 0 else 1.0
+        return self._risk.exposure("", self._own_positions(), self._specs, equity)
 
     def set_mode(self, mode: RunMode, now: int) -> tuple[bool, str]:
         """Change run mode.
@@ -384,9 +423,16 @@ class ScanEngine:
         if context is None or not context.valid:
             view.signal = None
             view.plan = None
+            view.bars = []
+            view.zones = []
             return
 
         view.last_error = ""
+        # A bounded slice: the chart shows about 120 candles and copying the
+        # whole 300-bar window every pass would be wasted work on the hot path.
+        view.bars = m5_bars[-140:]
+        view.zones = context.zones
+        view.regime_reason = context.regime.reason
 
         # ---- live evaluation --------------------------------------------------
         signal = self._signals.evaluate(context, snapshot, now)
