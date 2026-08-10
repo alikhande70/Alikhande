@@ -1,0 +1,297 @@
+"""Guide — how to use this application safely, inside the application.
+
+The operator should never have to open ``docs/`` to find out what UNBOUNDED
+means, why an order needs two clicks, or why a win rate says "n/a". A trading
+tool whose safety properties are only documented outside itself has documented
+them for the wrong audience.
+
+The content lives in ``GUIDE`` as structured sections rather than one blob of
+markup, so the same data renders in either language and the test suite can
+assert that both are complete.
+"""
+
+from __future__ import annotations
+
+import re
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
+
+from ...i18n import current, t
+from ..components import Card, StatusChip, label
+from ..theme import PALETTE, SPACE
+
+# Each section is (icon, English title, English body, Persian title, Persian body).
+# Kept as one table rather than two catalogues so a section can never exist in
+# one language and not the other — the test asserts every tuple is complete.
+GUIDE: list[tuple[str, str, str, str, str]] = [
+    (
+        "◈",
+        "What this application is",
+        "A standalone scanner for MetaTrader 5 symbols. It reads prices, finds "
+        "pullback and rejection setups at confirmed H1 structure, scores them "
+        "against a fixed rule set, and sizes them under a hard risk policy.\n\n"
+        "It runs as its own Windows program with its own window and database. "
+        "MetaTrader is not part of its interface — but it must be RUNNING and "
+        "LOGGED IN in the background, because the MetaTrader5 Python package is "
+        "the only path MetaQuotes publishes for reaching an MT5 account from "
+        "outside. There is no REST or FIX alternative for a retail account.",
+        "این برنامه چیست",
+        "یک اسکنر مستقل برای نمادهای متاتریدر ۵. قیمت‌ها را می‌خواند، ستاپ‌های "
+        "پولبک و برگشت روی ساختار تأییدشدهٔ H1 را پیدا می‌کند، آن‌ها را با یک "
+        "مجموعه قوانین ثابت امتیاز می‌دهد و حجمشان را زیر یک سیاست ریسک سخت‌گیرانه "
+        "محاسبه می‌کند.\n\n"
+        "این برنامه یک نرم‌افزار ویندوزی مستقل با پنجره و پایگاه‌دادهٔ خودش است. "
+        "متاتریدر بخشی از رابط آن نیست — اما باید در پس‌زمینه **باز و لاگین‌شده** "
+        "باشد، چون پکیج پایتونی MetaTrader5 تنها راهی است که مِتاکوتس برای دسترسی "
+        "بیرونی به حساب MT5 منتشر کرده. برای حساب خرده‌فروشی هیچ جایگزین REST یا "
+        "FIX وجود ندارد.",
+    ),
+    (
+        "✓",
+        "Before you connect",
+        "1. Start MetaTrader 5 and log in to a DEMO account.\n"
+        "2. Tools → Options → Expert Advisors → enable Algo Trading.\n"
+        "3. Add every symbol you want scanned to Market Watch — a symbol that is "
+        "not in Market Watch returns no history and will show as unresolved.\n"
+        "4. Run `python -m alikhande doctor` if anything looks wrong; it reports "
+        "exactly which of these is missing.",
+        "قبل از اتصال",
+        "۱. متاتریدر ۵ را باز کنید و وارد یک حساب **دمو** شوید.\n"
+        "۲. Tools ← Options ← Expert Advisors ← گزینهٔ Algo Trading را فعال کنید.\n"
+        "۳. هر نمادی را که می‌خواهید پویش شود به Market Watch اضافه کنید — نمادی "
+        "که در Market Watch نباشد هیچ تاریخچه‌ای برنمی‌گرداند و «شناسایی‌نشده» "
+        "نمایش داده می‌شود.\n"
+        "۴. اگر چیزی درست به نظر نمی‌رسد `python -m alikhande doctor` را اجرا کنید؛ "
+        "دقیقاً می‌گوید کدام‌یک از این‌ها کم است.",
+    ),
+    (
+        "✕",
+        "Real accounts are refused — three times",
+        "This build never trades a live account, and that is structural rather "
+        "than a setting:\n\n"
+        "• There is no run mode that selects live trading — the enum has no such "
+        "member, so no configuration mistake can reach it.\n"
+        "• The execution engine returns REAL_ACCOUNT_BLOCKED on any non-demo "
+        "account.\n"
+        "• The MetaTrader adapter refuses again inside send_order, through code "
+        "that shares nothing with the check above.\n\n"
+        "Deleting one of those does not disable the others.",
+        "حساب واقعی سه بار رد می‌شود",
+        "این نسخه هرگز روی حساب واقعی معامله نمی‌کند، و این یک تنظیم نیست بلکه "
+        "ساختاری است:\n\n"
+        "• هیچ حالت اجرایی برای معاملهٔ واقعی وجود ندارد — enum اصلاً چنین عضوی "
+        "ندارد، پس هیچ اشتباه پیکربندی به آن نمی‌رسد.\n"
+        "• موتور اجرا روی هر حساب غیر دمو مقدار REAL_ACCOUNT_BLOCKED برمی‌گرداند.\n"
+        "• آداپتور متاتریدر داخل send_order دوباره رد می‌کند، با کدی که هیچ "
+        "اشتراکی با بررسی بالا ندارد.\n\n"
+        "حذف یکی از این‌ها بقیه را غیرفعال نمی‌کند.",
+    ),
+    (
+        "◆",
+        "The three run modes",
+        "ALERT ONLY (default) — scans and reports. No order can leave the "
+        "application in this mode.\n\n"
+        "SHADOW — builds the plan and runs the full preflight, then stops short "
+        "of sending. It exercises the real code path rather than a simulation of "
+        "it, so a shadow run tells you what a live run would have done.\n\n"
+        "DEMO · ARM + CONFIRM — demo accounts only. Requires two separate "
+        "deliberate actions on two different controls, with a 20-second expiry "
+        "between them. No mode sends automatically; an application that fires on "
+        "its own is not supervised, it is merely watched.",
+        "سه حالت اجرا",
+        "**فقط هشدار** (پیش‌فرض) — پویش و گزارش. در این حالت هیچ سفارشی از برنامه "
+        "خارج نمی‌شود.\n\n"
+        "**سایه** — طرح را می‌سازد و کل بررسی‌های پیش از ارسال را اجرا می‌کند، اما "
+        "درست پیش از ارسال متوقف می‌شود. مسیر کد واقعی را اجرا می‌کند نه شبیه‌سازی "
+        "آن، پس یک اجرای سایه به شما می‌گوید یک اجرای واقعی چه می‌کرد.\n\n"
+        "**دمو · مسلح + تأیید** — فقط حساب دمو. دو اقدام جداگانه و عمدی روی دو "
+        "کنترل متفاوت لازم دارد، با مهلت ۲۰ ثانیه‌ای بینشان. هیچ حالتی خودکار "
+        "ارسال نمی‌کند؛ برنامه‌ای که خودش شلیک کند تحت نظارت نیست، فقط تماشا می‌شود.",
+    ),
+    (
+        "◎",
+        "Reading a signal",
+        "The score is a RULE SCORE — a weighted sum of conditions the author "
+        "believes matter. It is NOT a probability and must never be read as one.\n\n"
+        "A real probability appears in the 'Historical' row, and only after at "
+        "least 30 resolved trades on the same symbol, setup and rule version. "
+        "Below that it shows 'n/a' with the sample count, because a win rate from "
+        "eight trades is not evidence.\n\n"
+        "The chart draws the supply and demand zones on the same price scale as "
+        "the candles, with entry, stop and target as labelled lines. It is there "
+        "so you can disagree with the system — trusting a claim you cannot check "
+        "is not trust.",
+        "خواندن یک سیگنال",
+        "امتیاز یک **امتیاز قانونی** است — جمع وزنی شرط‌هایی که نویسنده مهم "
+        "می‌داند. این **احتمال نیست** و هرگز نباید به‌عنوان احتمال خوانده شود.\n\n"
+        "احتمال واقعی در ردیف «سابقهٔ آماری» ظاهر می‌شود، و فقط پس از دست‌کم ۳۰ "
+        "معاملهٔ بسته‌شده روی همان نماد، ستاپ و نسخهٔ قوانین. زیر آن، «نامعلوم» با "
+        "تعداد نمونه نشان داده می‌شود، چون نرخ برد از هشت معامله شواهد نیست.\n\n"
+        "نمودار نواحی عرضه و تقاضا را روی همان مقیاس قیمت کندل‌ها می‌کشد، با ورود، "
+        "حد ضرر و حد سود به‌صورت خطوط برچسب‌دار. این برای آن است که بتوانید با "
+        "سیستم مخالفت کنید — اعتماد به ادعایی که نمی‌توانید بررسی کنید، اعتماد نیست.",
+    ),
+    (
+        "!",
+        "UNBOUNDED — the most important warning",
+        "A position with no stop loss, or on a symbol that cannot be priced, has "
+        "no computable worst case. It is NOT a zero-risk position.\n\n"
+        "While any such position is open, every exposure percentage on the Risk "
+        "view is a LOWER BOUND on your true exposure, and the application refuses "
+        "all new risk. This is deliberate: the alternative — treating an "
+        "unmeasurable position as free — makes the caps look roomiest precisely "
+        "when the account is most exposed.",
+        "بدون کران — مهم‌ترین هشدار",
+        "پوزیشنی که حد ضرر ندارد، یا روی نمادی است که قیمت‌گذاری نمی‌شود، بدترین "
+        "حالت قابل محاسبه ندارد. این پوزیشن **بدون ریسک نیست**.\n\n"
+        "تا وقتی چنین پوزیشنی باز باشد، همهٔ درصدهای ریسک در نمای «ریسک» **کران "
+        "پایین** ریسک واقعی شما هستند و برنامه هر ریسک جدیدی را رد می‌کند. این "
+        "عمدی است: حالت جایگزین — یعنی رایگان فرض کردن پوزیشن غیرقابل‌اندازه‌گیری — "
+        "باعث می‌شود سقف‌ها دقیقاً وقتی خالی‌ترین به نظر برسند که حساب بیشترین "
+        "ریسک را دارد.",
+    ),
+    (
+        "?",
+        "UNKNOWN is not CLEAR",
+        "The news gate has three states, not two. CLEAR means a calendar was "
+        "consulted and the window is empty. BLOCKED means a relevant event was "
+        "found. UNKNOWN means no calendar could be consulted at all.\n\n"
+        "The MetaTrader5 Python package exposes no calendar API, so a live "
+        "session has no source unless you supply one. UNKNOWN blocks trading in a "
+        "live session and does not block in a replay, where it is flagged "
+        "NEWS-BLIND instead — a backtest that refused every trade would make the "
+        "filter unfalsifiable rather than safe.\n\n"
+        "The same principle governs execution: an order the broker cannot account "
+        "for is UNKNOWN, and UNKNOWN holds the submit gate shut, across restarts, "
+        "until a human clears it.",
+        "«نامعلوم» با «پاک» فرق دارد",
+        "دروازهٔ اخبار سه حالت دارد، نه دو تا. **پاک** یعنی یک تقویم بررسی شد و "
+        "پنجره خالی بود. **مسدود** یعنی رویداد مرتبطی پیدا شد. **نامعلوم** یعنی "
+        "اصلاً هیچ تقویمی قابل بررسی نبود.\n\n"
+        "پکیج پایتونی MetaTrader5 هیچ API تقویمی ندارد، پس یک نشست زنده تا وقتی "
+        "خودتان منبعی ندهید هیچ منبعی ندارد. «نامعلوم» در نشست زنده معامله را "
+        "مسدود می‌کند و در بازپخش مسدود نمی‌کند بلکه با برچسب «کور نسبت به اخبار» "
+        "علامت می‌خورد — بک‌تستی که همهٔ معاملات را رد کند فیلتر را به‌جای ایمن، "
+        "غیرقابل‌ابطال می‌کند.\n\n"
+        "همین اصل بر اجرا هم حاکم است: سفارشی که بروکر نتواند حسابش را بدهد "
+        "«نامعلوم» است، و «نامعلوم» دروازهٔ ارسال را بسته نگه می‌دارد — حتی پس از "
+        "ری‌استارت — تا یک انسان آن را پاک کند.",
+    ),
+    (
+        "◇",
+        "What is NOT proven",
+        "Be clear about the limits of this build:\n\n"
+        "• The live broker path has never executed. No Windows machine with "
+        "MetaTrader existed where it was written.\n"
+        "• Indicator agreement with MetaTrader is derived from the documented "
+        "algorithms, not measured against a terminal.\n"
+        "• There is NO out-of-sample result on real data. Nothing here "
+        "establishes that the strategy is profitable, and nothing claims it.\n\n"
+        "The Health view lists all of this per subsystem, and every assumed "
+        "parameter is labelled [ASSUMED] so you can go and check it.",
+        "چه چیزی اثبات نشده",
+        "دربارهٔ محدودیت‌های این نسخه صریح باشیم:\n\n"
+        "• مسیر بروکر زنده هرگز اجرا نشده است. جایی که این کد نوشته شد هیچ ماشین "
+        "ویندوزی با متاتریدر وجود نداشت.\n"
+        "• تطابق اندیکاتورها با متاتریدر از روی الگوریتم‌های مستند استنتاج شده، نه "
+        "اندازه‌گیری‌شده روی ترمینال.\n"
+        "• **هیچ نتیجهٔ خارج از نمونه روی دادهٔ واقعی وجود ندارد.** هیچ چیز اینجا "
+        "سودآوری استراتژی را اثبات نمی‌کند و هیچ ادعایی هم نمی‌شود.\n\n"
+        "نمای «سلامت» همهٔ این‌ها را به تفکیک زیرسیستم فهرست می‌کند، و هر پارامتر "
+        "فرض‌شده با برچسب [ASSUMED] مشخص است تا بتوانید بررسی‌اش کنید.",
+    ),
+    (
+        "◈",
+        "Keyboard",
+        "Ctrl+1 … Ctrl+6 — jump to a view\n"
+        "Ctrl+L — switch language\n"
+        "Ctrl+F — focus the symbol picker on the Signal view\n"
+        "F1 — open this guide\n"
+        "Ctrl+Q — quit",
+        "میان‌برهای صفحه‌کلید",
+        "‏Ctrl+1 تا Ctrl+6 — پرش به یک نما\n"
+        "‏Ctrl+L — تعویض زبان\n"
+        "‏Ctrl+F — فوکوس روی انتخابگر نماد در نمای سیگنال\n"
+        "‏F1 — باز کردن همین راهنما\n"
+        "‏Ctrl+Q — خروج",
+    ),
+]
+
+
+def _rich(text: str) -> str:
+    """Turn the guide's light markup into the HTML subset QLabel understands.
+
+    The bodies are written with ``**emphasis**`` and blank-line paragraphs
+    because that is readable in the source. Without this they render as literal
+    asterisks, which looks like a bug in the one view whose job is to inspire
+    confidence.
+    """
+    import html
+
+    escaped = html.escape(text)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"`(.+?)`", r"<code>\1</code>", escaped)
+    return escaped.replace("\n\n", "<br/><br/>").replace("\n", "<br/>")
+
+
+class GuideView(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer.addWidget(scroll)
+
+        page = QWidget()
+        page.setObjectName("Content")
+        self._root = QVBoxLayout(page)
+        self._root.setContentsMargins(SPACE.xl, SPACE.lg, SPACE.xl, SPACE.xl)
+        self._root.setSpacing(SPACE.md)
+        scroll.setWidget(page)
+
+        self._cards: list[tuple[Card, object, object]] = []
+        for icon, en_title, en_body, fa_title, fa_body in GUIDE:
+            card = Card()
+            header = QHBoxLayout()
+            header.setSpacing(SPACE.sm)
+            chip = StatusChip(icon, "", "neutral")
+            chip.setVisible(False)  # the icon lives in the title row instead
+            title = label("", "H2")
+            icon_label = label(icon, "H2", PALETTE.accent)
+            header.addWidget(icon_label)
+            header.addWidget(title, 1)
+            card.add_layout(header)
+
+            body = label("", "Body")
+            body.setTextFormat(Qt.TextFormat.RichText)
+            body.setWordWrap(True)
+            body.setStyleSheet(f"color: {PALETTE.ink_secondary}; line-height: 160%;")
+            card.add(body)
+
+            self._root.addWidget(card)
+            self._cards.append((card, title, body))
+
+        self._root.addStretch(1)
+        self.retranslate()
+
+    def retranslate(self) -> None:
+        """Re-render the guide in the current language.
+
+        Called on construction and whenever the language changes, so the guide
+        never lags a language switch — which, for the one view whose whole job is
+        explaining things, would be the worst place to lag.
+        """
+        persian = current().code == "fa"
+        alignment = (
+            Qt.AlignmentFlag.AlignRight if persian else Qt.AlignmentFlag.AlignLeft
+        )
+        for (_, title, body), section in zip(self._cards, GUIDE):
+            _, en_title, en_body, fa_title, fa_body = section
+            title.setText(fa_title if persian else en_title)
+            body.setText(_rich(fa_body if persian else en_body))
+            title.setAlignment(alignment | Qt.AlignmentFlag.AlignVCenter)
+            body.setAlignment(alignment | Qt.AlignmentFlag.AlignTop)

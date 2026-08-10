@@ -183,23 +183,40 @@ class TestRealAccountBlock(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.comment, "REAL_ACCOUNT_BLOCKED")
 
-    def test_only_the_execution_module_references_send_order(self):
-        """The single-OrderSend-boundary property, asserted mechanically."""
+    def test_only_the_execution_module_calls_send_order(self):
+        """The single-OrderSend-boundary property, asserted mechanically.
+
+        Matches a CALL — ``send_order(`` — rather than any mention of the name.
+        The in-app guide explains the boundary in prose, and a check that
+        flagged the documentation for describing the rule it documents would
+        get the rule weakened rather than the prose fixed.
+        """
         import pathlib
+        import re
 
         root = pathlib.Path(__file__).resolve().parent.parent / "alikhande"
+        call = re.compile(r"\bsend_order\s*\(")
         offenders = []
         for path in root.rglob("*.py"):
             relative = path.relative_to(root).as_posix()
             # The engine calls it; the ports declare it; the adapters implement
-            # it. Nothing else may even mention it.
+            # it. Nothing else may call it.
             if relative in ("core/execution.py", "core/ports.py"):
                 continue
             if relative.startswith("adapters/"):
                 continue
-            if "send_order" in path.read_text(encoding="utf-8"):
+            if call.search(path.read_text(encoding="utf-8")):
                 offenders.append(relative)
-        self.assertEqual(offenders, [], f"send_order referenced outside the boundary: {offenders}")
+        self.assertEqual(offenders, [], f"send_order called outside the boundary: {offenders}")
+
+    def test_the_boundary_check_would_actually_catch_a_call(self):
+        """Guard the guard: a check that matches nothing proves nothing."""
+        import re
+
+        call = re.compile(r"\bsend_order\s*\(")
+        self.assertTrue(call.search("gateway.send_order(request)"))
+        self.assertTrue(call.search("    send_order (req)"))
+        self.assertIsNone(call.search("the adapter refuses inside send_order, again"))
 
 
 # ---------------------------------------------------------------------------

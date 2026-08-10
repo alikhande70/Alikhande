@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...i18n import code as t_code
+from ...i18n import fmt_count, fmt_money, fmt_percent, fmt_price, t
 from ...core.enums import (
     REGIME_NAMES,
     SETUP_NAMES,
@@ -98,7 +100,7 @@ class SignalView(QWidget):
         root.addLayout(header)
 
         # ---- chart -----------------------------------------------------------
-        chart_card = Card("Price and structure")
+        chart_card = Card(t("signal.chart"))
         self._chart = PriceChart()
         chart_card.add(self._chart, 1)
         root.addWidget(chart_card)
@@ -107,7 +109,7 @@ class SignalView(QWidget):
         columns = QHBoxLayout()
         columns.setSpacing(SPACE.md)
 
-        score_card = Card("Why this score")
+        score_card = Card(t("signal.why"))
         score_row = QHBoxLayout()
         score_row.setSpacing(SPACE.lg)
         self._ring = ScoreRing(config.scoring.score_threshold, 92)
@@ -120,20 +122,15 @@ class SignalView(QWidget):
         score_card.add(self._score_note)
         columns.addWidget(score_card, 3)
 
-        plan_card = Card("Plan")
+        plan_card = Card(t("signal.plan"))
         self._plan = KeyValue(112)
-        for key in (
-            "Entry",
-            "Stop loss",
-            "Take profit",
-            "Risk : reward",
-            "Lot size",
-            "Risk amount",
-            "Margin",
-            "Expires in",
-            "Historical",
-        ):
-            self._plan.row(key)
+        self._plan_keys = [
+            "plan.entry", "plan.stop", "plan.target", "plan.rr",
+            "plan.lots", "plan.risk", "plan.margin", "plan.expires",
+            "plan.historical",
+        ]
+        for key in self._plan_keys:
+            self._plan.row(t(key))
         self._plan.stretch()
         plan_card.add(self._plan)
         columns.addWidget(plan_card, 2)
@@ -141,7 +138,7 @@ class SignalView(QWidget):
         root.addLayout(columns)
 
         # ---- refusals --------------------------------------------------------
-        self._refusal_card = Card("Why this is not tradeable")
+        self._refusal_card = Card(t("signal.refusals"))
         self._refusals = QVBoxLayout()
         self._refusals.setSpacing(SPACE.sm)
         self._refusal_card.add_layout(self._refusals)
@@ -149,11 +146,11 @@ class SignalView(QWidget):
         root.addWidget(self._refusal_card)
 
         # ---- execute ---------------------------------------------------------
-        execute = Card("Execute")
+        execute = Card(t("signal.execute"))
         row = QHBoxLayout()
         row.setSpacing(SPACE.md)
 
-        self._arm = QPushButton("ARM")
+        self._arm = QPushButton(t("btn.arm"))
         self._arm.setObjectName("Arm")
         self._arm.setMinimumWidth(130)
         self._arm.clicked.connect(lambda: self.arm_requested.emit(self._symbol))
@@ -167,7 +164,7 @@ class SignalView(QWidget):
             f"QProgressBar::chunk {{ background: {PALETTE.warning}; border-radius: 4px; }}"
         )
 
-        self._confirm = QPushButton("CONFIRM SEND")
+        self._confirm = QPushButton(t("btn.confirm"))
         self._confirm.setObjectName("Confirm")
         self._confirm.setMinimumWidth(180)
         self._confirm.clicked.connect(lambda: self.confirm_requested.emit(self._symbol))
@@ -227,7 +224,7 @@ class SignalView(QWidget):
 
         # ---- header ---------------------------------------------------------
         self._badge.set(int(signal.direction) if signal else 0)
-        self._setup.setText(SETUP_NAMES[signal.setup] if signal else "No setup")
+        self._setup.setText(SETUP_NAMES[signal.setup] if signal else t("signal.no_setup"))
         self._regime.setText(
             f"{REGIME_NAMES[signal.regime]} · {view.regime_reason}" if signal else ""
         )
@@ -261,17 +258,17 @@ class SignalView(QWidget):
                 direction=int(signal.direction),
             )
         self._chart.set(
-            view.bars, view.zones, levels, digits, f"{view.symbol} · M5 · last 120 bars"
+            view.bars, view.zones, levels, digits, t("signal.chart.title", symbol=view.symbol)
         )
 
         # ---- score ----------------------------------------------------------
         if signal is None:
-            self._ring.set(0.0, "no data")
+            self._ring.set(0.0, t("common.none"))
             self._breakdown.set([])
             self._score_note.setText("")
         else:
             winning = max(signal.long_score, signal.short_score)
-            self._ring.set(winning, "rule score")
+            self._ring.set(winning, t("col.score").lower())
             components = signal.components or (
                 signal.long_components
                 if signal.long_score >= signal.short_score
@@ -281,51 +278,54 @@ class SignalView(QWidget):
                 [(c.component.replace("_", " ").title(), c.contribution) for c in components]
             )
             self._score_note.setText(
-                f"Long {signal.long_score:.0f}  ·  Short {signal.short_score:.0f}  ·  "
-                f"threshold {self._config.scoring.score_threshold:.0f} with a "
-                f"{self._config.scoring.score_separation:.0f}-point lead required.  "
-                "This is a weighted sum of conditions, not a probability."
+                t(
+                    "signal.score_note",
+                    long=fmt_count(int(signal.long_score)),
+                    short=fmt_count(int(signal.short_score)),
+                    threshold=fmt_count(int(self._config.scoring.score_threshold)),
+                    separation=fmt_count(int(self._config.scoring.score_separation)),
+                )
             )
 
         # ---- plan -----------------------------------------------------------
         def price(value: float) -> str:
-            return f"{value:.{digits}f}" if value and value > 0 else "—"
+            return fmt_price(value, digits) if value and value > 0 else t("common.none")
 
         if signal is not None:
-            self._plan.set("Entry", price(signal.preferred_entry))
-            self._plan.set("Stop loss", price(signal.stop_loss), PALETTE.critical)
-            self._plan.set("Take profit", price(signal.take_profit), PALETTE.good)
+            self._plan.set(t("plan.entry"), price(signal.preferred_entry))
+            self._plan.set(t("plan.stop"), price(signal.stop_loss), PALETTE.critical)
+            self._plan.set(t("plan.target"), price(signal.take_profit), PALETTE.good)
             self._plan.set(
-                "Historical",
+                t("plan.historical"),
                 self._statistics.format_probability(signal),
                 PALETTE.ink if signal.has_historical_estimate else PALETTE.ink_muted,
             )
         else:
-            for key in ("Entry", "Stop loss", "Take profit", "Historical"):
-                self._plan.set(key, "—", PALETTE.ink_faint)
+            for key in ("plan.entry", "plan.stop", "plan.target", "plan.historical"):
+                self._plan.set(t(key), t("common.none"), PALETTE.ink_faint)
 
         if plan is not None and plan.valid:
             risk_distance = abs(plan.entry - plan.stop_loss)
             reward = abs(plan.take_profit - plan.entry)
             self._plan.set(
-                "Risk : reward",
-                f"1 : {reward / risk_distance:.2f}" if risk_distance > 0 else "—",
+                t("plan.rr"),
+                f"1 : {reward / risk_distance:.2f}" if risk_distance > 0 else t("common.none"),
             )
-            self._plan.set("Lot size", f"{plan.lot_size:.2f}")
+            self._plan.set(t("plan.lots"), f"{plan.lot_size:.2f}")
             self._plan.set(
-                "Risk amount",
-                f"{plan.actual_risk_amount:,.2f} ({plan.risk_percent:.2f}%)",
+                t("plan.risk"),
+                f"{fmt_money(plan.actual_risk_amount)} ({fmt_percent(plan.risk_percent)})",
             )
-            self._plan.set("Margin", f"{plan.margin_required:,.2f}")
+            self._plan.set(t("plan.margin"), fmt_money(plan.margin_required))
             remaining = max(0, plan.expires_at - snapshot.now)
             self._plan.set(
-                "Expires in",
-                f"{remaining}s",
+                t("plan.expires"),
+                fmt_count(remaining),
                 PALETTE.warning if remaining < 10 else None,
             )
         else:
-            for key in ("Risk : reward", "Lot size", "Risk amount", "Margin", "Expires in"):
-                self._plan.set(key, "—", PALETTE.ink_faint)
+            for key in ("plan.rr", "plan.lots", "plan.risk", "plan.margin", "plan.expires"):
+                self._plan.set(t(key), t("common.none"), PALETTE.ink_faint)
 
         # ---- refusals -------------------------------------------------------
         self._render_refusals(view, snapshot)
@@ -359,7 +359,7 @@ class SignalView(QWidget):
                 code, tone = reasons[index]
                 chip.set(
                     "✕" if tone == "critical" else "!",
-                    code.replace("_", " "),
+                    t_code(code),
                     tone,
                 )
                 chip.setVisible(True)
@@ -380,8 +380,7 @@ class SignalView(QWidget):
             self._countdown.setMaximum(ttl)
             self._countdown.setValue(snapshot.armed_seconds)
             self._set_status(
-                f"ARMED — confirm within {snapshot.armed_seconds}s or the intent expires "
-                "and must be re-armed against a fresh plan.",
+                t("exec.armed", seconds=fmt_count(snapshot.armed_seconds)),
                 PALETTE.warning,
             )
             return
@@ -389,27 +388,26 @@ class SignalView(QWidget):
         self._countdown.setValue(0)
         if not demo:
             self._set_status(
-                f"{snapshot.mode.name.replace('_', ' ').title()} — no order can leave the "
-                "application in this mode.",
+                t(
+                    "exec.mode_blocks",
+                    mode={
+                        RunMode.ALERT_ONLY: t("mode.alert"),
+                        RunMode.SHADOW: t("mode.shadow"),
+                        RunMode.DEMO_CONFIRM: t("mode.demo"),
+                    }.get(snapshot.mode, snapshot.mode.name),
+                ),
                 PALETTE.ink_muted,
             )
         elif snapshot.requires_manual_review:
-            self._set_status(
-                "An execution could not be reconciled against the broker. Submission is "
-                "blocked until it is reviewed on the Execution view.",
-                PALETTE.critical,
-            )
+            self._set_status(t("exec.review_blocks"), PALETTE.critical)
         elif view.news_blocks:
-            self._set_status("Blocked by the news gate.", PALETTE.critical)
+            self._set_status(t("exec.news_blocks"), PALETTE.critical)
         elif not snapshot.may_trade:
             self._set_status("; ".join(snapshot.guard_codes), PALETTE.critical)
         elif has_plan:
-            self._set_status(
-                "Plan ready. Arm, then confirm — two separate actions, deliberately.",
-                PALETTE.ink_secondary,
-            )
+            self._set_status(t("exec.ready"), PALETTE.ink_secondary)
         else:
-            self._set_status("No valid plan for this symbol.", PALETTE.ink_muted)
+            self._set_status(t("exec.no_plan"), PALETTE.ink_muted)
 
     def _set_status(self, text: str, colour: str) -> None:
         self._status.setText(text)

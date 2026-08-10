@@ -547,7 +547,16 @@ class NavItem(QPushButton):
         self._text = text
 
     def set_badge(self, count: int) -> None:
-        suffix = f"   ({count})" if count else ""
+        self._badge = count
+        self._render()
+
+    def relabel(self, icon: str, text: str) -> None:
+        """Change the label without losing the badge — used on a language switch."""
+        self._icon, self._text = icon, text
+        self._render()
+
+    def _render(self) -> None:
+        suffix = f"   ({self._badge})" if getattr(self, "_badge", 0) else ""
         self.setText(f"  {self._icon}   {self._text}{suffix}")
 
 

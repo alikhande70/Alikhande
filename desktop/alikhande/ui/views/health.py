@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...i18n import fmt_count, fmt_money, fmt_percent, fmt_price, t
 from ...config import assumption_registry
 from ...core.enums import RuntimeKind
 from ...version import EDITION, RULE_VERSION, SCORING_VERSION, VERSION
@@ -62,26 +63,26 @@ class HealthView(QWidget):
         top = QHBoxLayout()
         top.setSpacing(SPACE.md)
 
-        session = Card("Session")
+        session = Card(t("health.session"))
         self._session = KeyValue(150)
         for key in (
-            "Build",
-            "Rule version",
-            "Scoring version",
-            "Runtime",
-            "Counts as evidence",
-            "Database",
-            "Gateway",
-            "Passes",
-            "Pass time",
-            "News filtering",
+            t("health.field.build"),
+            t("health.field.rule"),
+            t("health.field.scoring"),
+            t("health.field.runtime"),
+            t("health.field.evidence"),
+            t("health.field.database"),
+            t("health.field.gateway"),
+            t("health.field.passes"),
+            t("health.field.passtime"),
+            t("health.field.news"),
         ):
             self._session.row(key)
         self._session.stretch()
         session.add(self._session)
         top.addWidget(session, 1)
 
-        verification = Card("Verification status")
+        verification = Card(t("health.verification"))
         for name, status, tone in VERIFICATION:
             row = QHBoxLayout()
             row.setSpacing(SPACE.md)
@@ -105,7 +106,7 @@ class HealthView(QWidget):
         middle = QHBoxLayout()
         middle.setSpacing(SPACE.md)
 
-        assumptions = Card("Assumption registry")
+        assumptions = Card(t("health.assumptions"))
         assumptions.add(
             label(
                 "[ASSUMED] is a working default that has not been validated against "
@@ -150,7 +151,7 @@ class HealthView(QWidget):
         assumptions.add(table, 1)
         middle.addWidget(assumptions, 1)
 
-        events = Card("Event journal")
+        events = Card(t("health.journal"))
         events.add(
             label(
                 "Repeated events are counted rather than repeated — a refusal logged "
@@ -168,19 +169,19 @@ class HealthView(QWidget):
         self._render_static(runtime, persistence)
 
     def _render_static(self, runtime, persistence) -> None:
-        self._session.set("Build", f"{VERSION} — {EDITION}")
-        self._session.set("Rule version", RULE_VERSION)
-        self._session.set("Scoring version", SCORING_VERSION)
-        self._session.set("Runtime", f"{runtime.kind.name} ({runtime.description})")
+        self._session.set(t("health.field.build"), f"{VERSION} — {EDITION}")
+        self._session.set(t("health.field.rule"), RULE_VERSION)
+        self._session.set(t("health.field.scoring"), SCORING_VERSION)
+        self._session.set(t("health.field.runtime"), f"{runtime.kind.name} ({runtime.description})")
 
         production = runtime.kind == RuntimeKind.LIVE
         self._session.set(
-            "Counts as evidence",
+            t("health.field.evidence"),
             "yes — production history" if production else "NO — not production data",
             PALETTE.good if production else PALETTE.warning,
         )
         self._session.set(
-            "Database",
+            t("health.field.database"),
             persistence.filename if persistence.enabled else f"disabled — {persistence.rationale}",
             PALETTE.ink_secondary if persistence.enabled else PALETTE.ink_muted,
         )
@@ -188,16 +189,16 @@ class HealthView(QWidget):
     def update_view(self, snapshot, journal) -> None:
         live = snapshot.runtime.kind == RuntimeKind.LIVE
         self._session.set(
-            "Gateway",
+            t("health.field.gateway"),
             ("connected" if snapshot.connected else "not connected")
             if live
             else "no broker — synthetic data",
             PALETTE.good if (live and snapshot.connected) else PALETTE.warning,
         )
-        self._session.set("Passes", f"{snapshot.passes:,}")
-        self._session.set("Pass time", f"{snapshot.last_pass_ms:.1f} ms")
+        self._session.set(t("health.field.passes"), f"{snapshot.passes:,}")
+        self._session.set(t("health.field.passtime"), f"{snapshot.last_pass_ms:.1f} ms")
         self._session.set(
-            "News filtering",
+            t("health.field.news"),
             "NONE — this run is news-blind" if snapshot.news_blind else "active",
             PALETTE.warning if snapshot.news_blind else PALETTE.good,
         )

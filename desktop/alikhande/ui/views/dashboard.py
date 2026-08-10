@@ -35,8 +35,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...i18n import code as t_code
+from ...i18n import fmt_count, fmt_money, fmt_percent, fmt_price, t
+from ...i18n import zone_relation_name
 from ...core.enums import (
     DIRECTION_NAMES,
+    RunMode,
     SETUP_NAMES,
     Direction,
     NewsState,
@@ -55,7 +59,11 @@ from ..components import (
 )
 from ..theme import PALETTE, SPACE, TYPE
 
-WATCH_HEADERS = ["Symbol", "Trend", "Bias", "Score", "Structure", "Spread", "State"]
+# Header keys, resolved at render time so a language switch relabels them.
+WATCH_KEYS = [
+    "col.symbol", "col.trend", "col.bias", "col.score",
+    "col.structure", "col.spread", "col.state",
+]
 
 
 class SignalCard(QFrame):
@@ -136,21 +144,23 @@ class SignalCard(QFrame):
         self._name.setText(view.symbol)
         self._badge.set(int(signal.direction))
         self._setup.setText(SETUP_NAMES[signal.setup])
-        self._ring.set(max(signal.long_score, signal.short_score), "rule score")
+        self._ring.set(max(signal.long_score, signal.short_score), t("col.score").lower())
 
         self._levels.setText(
-            f"entry {signal.preferred_entry:.{digits}f}    "
-            f"stop {signal.stop_loss:.{digits}f}    "
-            f"target {signal.take_profit:.{digits}f}"
+            f'{t("plan.entry")} {fmt_price(signal.preferred_entry, digits)}    '
+            f'{t("plan.stop")} {fmt_price(signal.stop_loss, digits)}    '
+            f'{t("plan.target")} {fmt_price(signal.take_profit, digits)}'
         )
 
         components = signal.components[:3]
-        self._why.setText(
-            "Top contributors: "
-            + ", ".join(f"{c.component.replace('_', ' ').lower()} {c.contribution:+.0f}" for c in components)
-            if components
-            else "No score breakdown available."
-        )
+        if components:
+            items = ", ".join(
+                f"{c.component.replace('_', ' ').lower()} {c.contribution:+.0f}"
+                for c in components
+            )
+            self._why.setText(t("card.top_contributors", items=items))
+        else:
+            self._why.setText(t("card.no_breakdown"))
 
         relation = (
             signal.demand_relation
@@ -160,7 +170,7 @@ class SignalCard(QFrame):
         inside = relation.name == "INSIDE"
         self._chip_zone.set(
             "◈" if inside else "◇",
-            f"ZONE {relation.name}",
+            zone_relation_name(relation.name).upper(),
             "good" if inside else "neutral",
         )
 
@@ -181,16 +191,22 @@ class SignalCard(QFrame):
         if plan is not None and plan.valid:
             risk_distance = abs(plan.entry - plan.stop_loss)
             reward = abs(plan.take_profit - plan.entry)
-            self._size.setText(f"{plan.lot_size:.2f} lots")
+            self._size.setText(t("card.lots", lots=f"{plan.lot_size:.2f}"))
             self._risk.setText(
-                f"risk {plan.actual_risk_amount:,.2f} ({plan.risk_percent:.2f}%)"
+                t(
+                    "card.risk",
+                    amount=fmt_money(plan.actual_risk_amount),
+                    percent=fmt_percent(plan.risk_percent),
+                )
             )
             self._rr.setText(
-                f"R:R 1 : {reward / risk_distance:.2f}" if risk_distance > 0 else ""
+                t("card.rr", ratio=f"{reward / risk_distance:.2f}")
+                if risk_distance > 0
+                else ""
             )
         else:
-            codes = plan.codes_text() if plan is not None else "not sized"
-            self._size.setText("not sized")
+            codes = plan.codes_text() if plan is not None else t("card.not_sized")
+            self._size.setText(t("card.not_sized"))
             self._risk.setText(codes[:44])
             self._rr.setText("")
 
@@ -228,7 +244,7 @@ class DashboardView(QWidget):
 
         headline = QVBoxLayout()
         headline.setSpacing(SPACE.xs)
-        self._verdict = label("Starting up", "H1")
+        self._verdict = label(t("status.starting"), "H1")
         self._verdict_detail = label("", "Body")
         self._verdict_detail.setWordWrap(True)
         headline.addWidget(self._verdict)
@@ -237,8 +253,8 @@ class DashboardView(QWidget):
 
         self._verdict_chips = QHBoxLayout()
         self._verdict_chips.setSpacing(SPACE.sm)
-        self._chip_mode = StatusChip("◆", "ALERT ONLY", "neutral")
-        self._chip_guards = StatusChip("✓", "GUARDS OK", "good")
+        self._chip_mode = StatusChip("◆", t("mode.alert"), "neutral")
+        self._chip_guards = StatusChip("✓", t("dash.guards.ok"), "good")
         self._verdict_chips.addWidget(self._chip_mode)
         self._verdict_chips.addWidget(self._chip_guards)
         verdict_row.addLayout(self._verdict_chips)
@@ -249,10 +265,10 @@ class DashboardView(QWidget):
         # ---- tier 1b: the four numbers that matter ---------------------------
         tiles = QHBoxLayout()
         tiles.setSpacing(SPACE.md)
-        self._tile_actionable = StatTile("Actionable", "0", "qualified with a sized plan")
-        self._tile_watching = StatTile("Watching", "0", "symbols resolved and scanning")
-        self._tile_risk = StatTile("Open risk", "0.00%", "aggregate, opened by this app")
-        self._tile_evidence = StatTile("Evidence", "0", "outcomes recorded so far")
+        self._tile_actionable = StatTile(t("dash.tile.actionable"), "0")
+        self._tile_watching = StatTile(t("dash.tile.watching"), "0")
+        self._tile_risk = StatTile(t("dash.tile.risk"), "0.00%")
+        self._tile_evidence = StatTile(t("dash.tile.evidence"), "0")
         for tile in (
             self._tile_actionable,
             self._tile_watching,
@@ -263,7 +279,7 @@ class DashboardView(QWidget):
         root.addLayout(tiles)
 
         # ---- tier 2: signal cards --------------------------------------------
-        root.addWidget(label("OPPORTUNITIES", "CardTitle"))
+        root.addWidget(label(t("dash.opportunities"), "CardTitle"))
 
         self._card_host = QWidget()
         self._card_layout = QVBoxLayout(self._card_host)
@@ -271,15 +287,15 @@ class DashboardView(QWidget):
         self._card_layout.setSpacing(SPACE.md)
         root.addWidget(self._card_host)
 
-        self._empty = EmptyState("◎", "Nothing actionable", "")
+        self._empty = EmptyState("◎", t("dash.empty.title"), t("dash.empty.detail"))
         self._empty_card = Card()
         self._empty_card.add(self._empty)
         root.addWidget(self._empty_card)
 
         # ---- tier 3: the watchlist -------------------------------------------
-        watch = Card("Watchlist")
-        self._table = QTableWidget(0, len(WATCH_HEADERS))
-        self._table.setHorizontalHeaderLabels(WATCH_HEADERS)
+        watch = Card(t("dash.watchlist"))
+        self._table = QTableWidget(0, len(WATCH_KEYS))
+        self._table.setHorizontalHeaderLabels([t(k) for k in WATCH_KEYS])
         self._table.verticalHeader().setVisible(False)
         self._table.setShowGrid(False)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -326,77 +342,92 @@ class DashboardView(QWidget):
         ]
 
         if actionable:
-            names = ", ".join(v.symbol for v in actionable[:4])
+            names = "، ".join(v.symbol for v in actionable[:4])
             self._verdict.setText(
-                f"{len(actionable)} setup{'s' if len(actionable) > 1 else ''} ready"
+                t("dash.verdict.ready", count=fmt_count(len(actionable)))
             )
             self._verdict.setStyleSheet(f"color: {PALETTE.ink};")
-            self._verdict_detail.setText(
-                f"{names} qualified and sized. Open one to see the structure it is "
-                "built on before doing anything with it."
-            )
+            self._verdict_detail.setText(t("dash.verdict.ready.detail", names=names))
         elif not resolved:
-            self._verdict.setText("No symbols resolved")
+            self._verdict.setText(t("dash.verdict.unresolved"))
             self._verdict.setStyleSheet(f"color: {PALETTE.critical};")
-            self._verdict_detail.setText(
-                "None of the configured symbols matched a name on this broker. "
-                "Check Market Watch in MetaTrader."
-            )
+            self._verdict_detail.setText(t("dash.verdict.unresolved.detail"))
         elif warming:
-            self._verdict.setText("Warming up")
+            self._verdict.setText(t("dash.verdict.warming"))
             self._verdict.setStyleSheet(f"color: {PALETTE.ink};")
             self._verdict_detail.setText(
-                f"{len(warming)} of {len(resolved)} symbols still gathering the spread "
-                "and history they need before anything can be scored. This is normal "
-                "for the first minute or two."
+                t(
+                    "dash.verdict.warming.detail",
+                    warming=fmt_count(len(warming)),
+                    total=fmt_count(len(resolved)),
+                )
             )
         else:
-            self._verdict.setText("Nothing actionable")
+            self._verdict.setText(t("dash.verdict.nothing"))
             self._verdict.setStyleSheet(f"color: {PALETTE.ink};")
             self._verdict_detail.setText(
-                f"All {len(resolved)} symbols scanned; none currently meet the "
-                f"{self._threshold:.0f}-point threshold with a confirmed setup at a "
-                "structural zone. That is the normal state most of the time."
+                t(
+                    "dash.verdict.nothing.detail",
+                    total=fmt_count(len(resolved)),
+                    threshold=fmt_count(int(self._threshold)),
+                )
             )
 
-        self._chip_mode.set("◆", snapshot.mode.name.replace("_", " "), "neutral")
+        self._chip_mode.set(
+            "◆",
+            {
+                RunMode.ALERT_ONLY: t("mode.alert"),
+                RunMode.SHADOW: t("mode.shadow"),
+                RunMode.DEMO_CONFIRM: t("mode.demo"),
+            }.get(snapshot.mode, snapshot.mode.name),
+            "neutral",
+        )
 
         if snapshot.requires_manual_review:
-            self._chip_guards.set("✕", "REVIEW REQUIRED", "critical")
+            self._chip_guards.set("✕", t("dash.guards.review"), "critical")
         elif not snapshot.may_trade:
-            self._chip_guards.set("✕", "HALTED", "critical")
+            self._chip_guards.set("✕", t("dash.guards.halted"), "critical")
         elif snapshot.news_blind:
-            self._chip_guards.set("!", "NEWS-BLIND", "warning")
+            self._chip_guards.set("!", t("dash.guards.newsblind"), "warning")
         else:
-            self._chip_guards.set("✓", "GUARDS OK", "good")
+            self._chip_guards.set("✓", t("dash.guards.ok"), "good")
 
     def _render_tiles(self, snapshot, resolved, actionable, evidence_count: int) -> None:
         self._tile_actionable.set(
-            str(len(actionable)),
-            "qualified with a sized plan",
+            fmt_count(len(actionable)),
+            t("dash.tile.actionable.caption"),
             PALETTE.accent if actionable else None,
         )
         self._tile_watching.set(
-            f"{len(resolved)}",
-            f"of {len(snapshot.symbols)} configured symbols",
+            fmt_count(len(resolved)),
+            t("dash.tile.watching.caption", total=fmt_count(len(snapshot.symbols))),
         )
 
         cap = self._config.risk.max_open_risk_pct
         self._tile_risk.set(
-            f"{snapshot.exposure_open_pct:.2f}%",
-            f"cap {cap:.2f}%",
+            fmt_percent(snapshot.exposure_open_pct),
+            t("dash.tile.risk.caption", cap=fmt_percent(cap)),
             PALETTE.critical if snapshot.exposure_open_pct > cap else None,
         )
 
         floor = self._config.statistics.min_outcome_sample
         if evidence_count == 0:
-            self._tile_evidence.set("0", "no outcomes recorded yet", PALETTE.ink_muted)
+            self._tile_evidence.set(
+                fmt_count(0), t("dash.tile.evidence.none"), PALETTE.ink_muted
+            )
         elif evidence_count < floor:
             self._tile_evidence.set(
-                str(evidence_count), f"{evidence_count}/{floor} before any win rate shows"
+                fmt_count(evidence_count),
+                t(
+                    "dash.tile.evidence.below",
+                    count=fmt_count(evidence_count),
+                    floor=fmt_count(floor),
+                ),
             )
         else:
-            self._tile_evidence.set(str(evidence_count), "outcomes recorded")
+            self._tile_evidence.set(
+                fmt_count(evidence_count), t("dash.tile.evidence.ok")
+            )
 
     def _render_cards(self, actionable) -> None:
         while len(self._cards) < len(actionable):
@@ -414,14 +445,7 @@ class DashboardView(QWidget):
 
         self._empty_card.setVisible(not actionable)
         if not actionable:
-            self._empty.set(
-                "◎",
-                "Nothing actionable right now",
-                "A setup appears here only when a confirmed structure, a clear "
-                "spread and a sized plan all line up. Refusals are shown per "
-                "symbol on the Signal view — the scanner is working when this "
-                "space is empty.",
-            )
+            self._empty.set("◎", t("dash.empty.title"), t("dash.empty.detail"))
 
     def _render_watchlist(self, views) -> None:
         self._table.setRowCount(len(views))
@@ -435,7 +459,7 @@ class DashboardView(QWidget):
                 self._cell(row, 3, "—", PALETTE.ink_faint)
                 self._cell(row, 4, "—", PALETTE.ink_faint)
                 self._cell(row, 5, "—", PALETTE.ink_faint)
-                self._cell(row, 6, "unresolved on this broker", PALETTE.critical)
+                self._cell(row, 6, t("cell.unresolved"), PALETTE.critical)
                 continue
 
             # An item left from an earlier render still paints its text beside
@@ -452,7 +476,7 @@ class DashboardView(QWidget):
                 self._cell(row, 3, "—", PALETTE.ink_faint)
                 self._cell(row, 4, "—", PALETTE.ink_faint)
                 self._cell(row, 5, view.snapshot.spread_state.name.lower(), PALETTE.ink_muted)
-                self._cell(row, 6, view.last_error or "building structure", PALETTE.ink_muted)
+                self._cell(row, 6, view.last_error or t("cell.building"), PALETTE.ink_muted)
                 continue
 
             colour = {
@@ -465,7 +489,7 @@ class DashboardView(QWidget):
             self._cell(
                 row,
                 3,
-                f"{score:.0f}",
+                fmt_count(int(score)),
                 PALETTE.ink if score >= self._threshold else PALETTE.ink_muted,
                 mono=True,
                 right=True,
@@ -479,25 +503,26 @@ class DashboardView(QWidget):
             self._cell(
                 row,
                 4,
-                relation.name.lower(),
+                zone_relation_name(relation.name),
                 PALETTE.accent if relation.name == "INSIDE" else PALETTE.ink_muted,
             )
             self._cell(
                 row,
                 5,
-                f"{view.snapshot.spread_points:.1f} pts",
+                f"{view.snapshot.spread_points:.1f}",
                 PALETTE.ink_secondary,
                 mono=True,
                 right=True,
             )
 
             if signal.hard_blocked and signal.validation_codes:
-                text = signal.validation_codes[0].split("(")[0].replace("_", " ").lower()
-                self._cell(row, 6, text, PALETTE.ink_muted)
+                self._cell(
+                    row, 6, t_code(signal.validation_codes[0]), PALETTE.ink_muted
+                )
             elif view.plan is not None and view.plan.valid:
-                self._cell(row, 6, "plan ready", PALETTE.good)
+                self._cell(row, 6, t("cell.plan_ready"), PALETTE.good)
             else:
-                self._cell(row, 6, "watching", PALETTE.ink_muted)
+                self._cell(row, 6, t("cell.watching"), PALETTE.ink_muted)
 
         # Height must cover the header, every row and the frame, or the last
         # symbol in the list is silently cut in half.

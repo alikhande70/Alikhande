@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...i18n import fmt_count, fmt_money, fmt_percent, fmt_price, t
 from ...core.statistics import wilson
 from ..components import (
     Card,
@@ -33,7 +34,7 @@ from ..components import (
 )
 from ..theme import PALETTE, SPACE, TYPE, r_colour
 
-POSITION_HEADERS = ["Symbol", "Side", "Volume", "Entry", "Stop", "Target", "P/L", "Bounded"]
+POSITION_KEYS = ["col.symbol","col.side","col.volume","col.entry","col.stop","col.target","col.pl","col.bounded"]
 
 
 class RiskView(QWidget):
@@ -58,10 +59,10 @@ class RiskView(QWidget):
 
         tiles = QHBoxLayout()
         tiles.setSpacing(SPACE.md)
-        self._tile_equity = StatTile("Equity", "—", "account currency")
-        self._tile_risk = StatTile("Open risk", "0.00%", "")
-        self._tile_positions = StatTile("Positions", "0", "opened by this app")
-        self._tile_drawdown = StatTile("Drawdown", "0.00%", "from peak equity")
+        self._tile_equity = StatTile(t("risk.tile.equity"), t("common.none"))
+        self._tile_risk = StatTile(t("risk.tile.risk"), "0.00%")
+        self._tile_positions = StatTile(t("risk.tile.positions"), "0")
+        self._tile_drawdown = StatTile(t("risk.tile.drawdown"), "0.00%")
         for tile in (
             self._tile_equity,
             self._tile_risk,
@@ -72,77 +73,74 @@ class RiskView(QWidget):
         root.addLayout(tiles)
 
         # ---- exposure against its cap ----------------------------------------
-        exposure = Card("Exposure against limits")
-        self._meter_open = self._meter_row(exposure, "Aggregate open risk")
-        self._meter_currency = self._meter_row(exposure, "Dominant currency leg")
-        self._meter_class = self._meter_row(exposure, "Asset class")
-        self._unbounded = StatusChip("✓", "ALL POSITIONS BOUNDED", "good")
+        exposure = Card(t("risk.exposure"))
+        self._meter_open = self._meter_row(exposure, t("risk.meter.open"))
+        self._meter_currency = self._meter_row(exposure, t("risk.meter.currency"))
+        self._meter_class = self._meter_row(exposure, t("risk.meter.class"))
+        self._unbounded = StatusChip("✓", t("risk.bounded"), "good")
         exposure.add(self._unbounded, 0)
         root.addWidget(exposure)
 
         columns = QHBoxLayout()
         columns.setSpacing(SPACE.md)
 
-        policy = Card("Policy")
+        policy = Card(t("risk.policy"))
         self._policy = KeyValue(140)
         for key in (
-            "Per-trade risk",
-            "Per-trade ceiling",
-            "Minimum R:R",
-            "Aggregate cap",
-            "Per-currency cap",
-            "Asset-class cap",
-            "Circuit breakers",
+            t("policy.per_trade"),
+            t("policy.ceiling"),
+            t("policy.min_rr"),
+            t("policy.aggregate"),
+            t("policy.currency"),
+            t("policy.class"),
+            t("policy.breakers"),
         ):
             self._policy.row(key)
         self._policy.stretch()
         policy.add(self._policy)
         columns.addWidget(policy, 1)
 
-        guards = Card("Guard state")
+        guards = Card(t("risk.guards"))
         self._guards = KeyValue(140)
         for key in (
-            "Trading permitted",
-            "Breached guards",
-            "Peak equity",
-            "Day-start equity",
-            "Consecutive losses",
-            "Daily risk used",
+            t("guard.permitted"),
+            t("guard.breached"),
+            t("guard.peak"),
+            t("guard.daystart"),
+            t("guard.losses"),
+            t("guard.used"),
         ):
             self._guards.row(key)
         self._guards.stretch()
         guards.add(self._guards)
         columns.addWidget(guards, 1)
 
-        self._evidence = Card("Evidence base")
+        self._evidence = Card(t("risk.evidence"))
         self._evidence_body = KeyValue(140)
         for key in (
-            "Resolved trades",
-            "Wins / losses",
-            "Win rate",
-            "95% Wilson",
-            "Total R",
-            "Expectancy",
+            t("evidence.trades"),
+            t("evidence.wins"),
+            t("evidence.winrate"),
+            t("evidence.wilson"),
+            t("evidence.total_r"),
+            t("evidence.expectancy"),
         ):
             self._evidence_body.row(key)
         self._evidence_body.stretch()
         self._evidence.add(self._evidence_body)
         self._evidence_empty = EmptyState(
             "◔",
-            "No outcomes yet",
-            "A win rate appears only after "
-            f"{config.statistics.min_outcome_sample} resolved trades on the same "
-            "symbol, setup and rule version. Until then there is nothing honest "
-            "to show.",
+            t("risk.no_outcomes"),
+            t("risk.no_outcomes.detail", floor=fmt_count(config.statistics.min_outcome_sample)),
         )
         self._evidence.add(self._evidence_empty)
         columns.addWidget(self._evidence, 1)
 
         root.addLayout(columns)
 
-        positions = Card("Open positions")
-        self._table = QTableWidget(0, len(POSITION_HEADERS))
-        self._table.setHorizontalHeaderLabels(POSITION_HEADERS)
+        positions = Card(t("risk.positions"))
+        self._table = QTableWidget(0, len(POSITION_KEYS))
+        self._table.setHorizontalHeaderLabels([t(k) for k in POSITION_KEYS])
         self._table.verticalHeader().setVisible(False)
         self._table.setShowGrid(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -150,7 +148,7 @@ class RiskView(QWidget):
         self._table.horizontalHeader().setStretchLastSection(True)
         positions.add(self._table, 1)
         self._positions_empty = EmptyState(
-            "○", "No open positions", "Nothing has been opened by this application."
+            "○", t("risk.no_positions"), t("risk.no_positions.detail")
         )
         positions.add(self._positions_empty)
         root.addWidget(positions, 1)
@@ -175,15 +173,15 @@ class RiskView(QWidget):
 
     def _render_policy(self) -> None:
         risk = self._config.risk
-        self._policy.set("Per-trade risk", f"{risk.risk_percent:.2f}%")
-        self._policy.set("Per-trade ceiling", f"{risk.maximum_risk_percent:.2f}%  [POLICY]")
-        self._policy.set("Minimum R:R", f"1 : {risk.minimum_risk_reward:.2f}  [POLICY]")
-        self._policy.set("Aggregate cap", f"{risk.max_open_risk_pct:.2f}%")
-        self._policy.set("Per-currency cap", f"{risk.max_currency_risk_pct:.2f}%")
-        self._policy.set("Asset-class cap", f"{risk.max_asset_class_risk_pct:.2f}%")
+        self._policy.set(t("policy.per_trade"), f"{risk.risk_percent:.2f}%")
+        self._policy.set(t("policy.ceiling"), f"{risk.maximum_risk_percent:.2f}%  [POLICY]")
+        self._policy.set(t("policy.min_rr"), f"1 : {risk.minimum_risk_reward:.2f}  [POLICY]")
+        self._policy.set(t("policy.aggregate"), f"{risk.max_open_risk_pct:.2f}%")
+        self._policy.set(t("policy.currency"), f"{risk.max_currency_risk_pct:.2f}%")
+        self._policy.set(t("policy.class"), f"{risk.max_asset_class_risk_pct:.2f}%")
         self._policy.set(
-            "Circuit breakers",
-            "enabled" if risk.guards_enabled else "disabled (default)",
+            t("policy.breakers"),
+            t("policy.enabled") if risk.guards_enabled else t("policy.disabled"),
             PALETTE.good if risk.guards_enabled else PALETTE.ink_muted,
         )
 
@@ -194,22 +192,22 @@ class RiskView(QWidget):
         equity = account.equity if account else 0.0
 
         self._tile_equity.set(
-            f"{equity:,.0f}" if account else "—",
-            account.currency if account else "no account attached",
+            fmt_money(equity, 0) if account else t("common.none"),
+            account.currency if account else t("chip.no_account"),
         )
         self._tile_risk.set(
-            f"{exposure.open_risk_pct:.2f}%",
-            f"cap {risk.max_open_risk_pct:.2f}%",
+            fmt_percent(exposure.open_risk_pct),
+            t("dash.tile.risk.caption", cap=fmt_percent(risk.max_open_risk_pct)),
             PALETTE.critical if exposure.open_risk_pct > risk.max_open_risk_pct else None,
         )
-        self._tile_positions.set(str(exposure.open_positions), "opened by this app")
+        self._tile_positions.set(fmt_count(exposure.open_positions), t("risk.tile.positions.caption"))
 
         drawdown = 0.0
         if guard_state.peak_equity > 0 and equity > 0:
             drawdown = (guard_state.peak_equity - equity) / guard_state.peak_equity * 100.0
         self._tile_drawdown.set(
-            f"{drawdown:.2f}%",
-            "from peak equity",
+            fmt_percent(drawdown),
+            t("risk.tile.drawdown.caption"),
             PALETTE.critical if drawdown >= risk.total_drawdown_limit_pct else None,
         )
 
@@ -226,28 +224,30 @@ class RiskView(QWidget):
         if unbounded:
             self._unbounded.set(
                 "✕",
-                f"{exposure.unbounded_positions} POSITION(S) WITHOUT A COMPUTABLE WORST "
-                f"CASE — every figure above is a LOWER BOUND and new risk is refused "
-                f"({', '.join(exposure.unbounded_symbols)})",
+                t(
+                    "risk.unbounded",
+                    count=fmt_count(exposure.unbounded_positions),
+                    symbols=", ".join(exposure.unbounded_symbols),
+                ),
                 "critical",
             )
         else:
-            self._unbounded.set("✓", "ALL POSITIONS BOUNDED", "good")
+            self._unbounded.set("✓", t("risk.bounded"), "good")
 
         self._guards.set(
-            "Trading permitted",
-            "yes" if snapshot.may_trade else "NO",
+            t("guard.permitted"),
+            t("guard.yes") if snapshot.may_trade else t("guard.no"),
             PALETTE.good if snapshot.may_trade else PALETTE.critical,
         )
         self._guards.set(
-            "Breached guards",
-            "; ".join(snapshot.guard_codes) if snapshot.guard_codes else "none",
+            t("guard.breached"),
+            "; ".join(snapshot.guard_codes) if snapshot.guard_codes else t("guard.none"),
             PALETTE.critical if snapshot.guard_codes else PALETTE.ink_secondary,
         )
-        self._guards.set("Peak equity", f"{guard_state.peak_equity:,.2f}")
-        self._guards.set("Day-start equity", f"{guard_state.day_start_equity:,.2f}")
-        self._guards.set("Consecutive losses", str(guard_state.consecutive_losses))
-        self._guards.set("Daily risk used", f"{guard_state.daily_risk_used_pct:.2f}%")
+        self._guards.set(t("guard.peak"), f"{guard_state.peak_equity:,.2f}")
+        self._guards.set(t("guard.daystart"), f"{guard_state.day_start_equity:,.2f}")
+        self._guards.set(t("guard.losses"), str(guard_state.consecutive_losses))
+        self._guards.set(t("guard.used"), f"{guard_state.daily_risk_used_pct:.2f}%")
 
         self._render_evidence()
         self._render_positions(positions)
@@ -260,8 +260,8 @@ class RiskView(QWidget):
             self._evidence_empty.setVisible(True)
             self._evidence_empty.set(
                 "○",
-                "No database",
-                "This session records nothing, so there is no evidence base to show.",
+                t("risk.no_database"),
+                t("risk.no_database.detail"),
             )
             return
 
@@ -273,10 +273,8 @@ class RiskView(QWidget):
             self._evidence_empty.setVisible(True)
             self._evidence_empty.set(
                 "◔",
-                "No outcomes yet",
-                f"A win rate appears only after {floor} resolved trades on the same "
-                "symbol, setup and rule version. Until then there is nothing honest "
-                "to show.",
+                t("risk.no_outcomes"),
+                t("risk.no_outcomes.detail", floor=fmt_count(floor)),
             )
             return
 
@@ -284,26 +282,26 @@ class RiskView(QWidget):
         self._evidence_empty.setVisible(False)
 
         wins = int(summary["wins"])
-        self._evidence_body.set("Resolved trades", str(total))
-        self._evidence_body.set("Wins / losses", f"{wins} / {total - wins}")
+        self._evidence_body.set(t("evidence.trades"), str(total))
+        self._evidence_body.set(t("evidence.wins"), f"{wins} / {total - wins}")
         self._evidence_body.set(
-            "Total R", f"{summary['sum_r']:+.2f}", r_colour(summary["sum_r"])
+            t("evidence.total_r"), f"{summary['sum_r']:+.2f}", r_colour(summary["sum_r"])
         )
         self._evidence_body.set(
-            "Expectancy", f"{summary['avg_r']:+.3f} R", r_colour(summary["avg_r"])
+            t("evidence.expectancy"), f"{summary['avg_r']:+.3f} R", r_colour(summary["avg_r"])
         )
 
         if total < floor:
             self._evidence_body.set(
-                "Win rate", f"withheld — {total}/{floor}", PALETTE.ink_muted
+                t("evidence.winrate"), t("evidence.withheld", count=fmt_count(total), floor=fmt_count(floor)), PALETTE.ink_muted
             )
-            self._evidence_body.set("95% Wilson", "—", PALETTE.ink_muted)
+            self._evidence_body.set(t("evidence.wilson"), "—", PALETTE.ink_muted)
             return
 
         interval = wilson(wins, total)
-        self._evidence_body.set("Win rate", f"{wins / total * 100:.1f}%")
+        self._evidence_body.set(t("evidence.winrate"), f"{wins / total * 100:.1f}%")
         self._evidence_body.set(
-            "95% Wilson",
+            t("evidence.wilson"),
             f"[{interval[0] * 100:.1f}%, {interval[1] * 100:.1f}%]" if interval else "—",
         )
 
@@ -334,7 +332,7 @@ class RiskView(QWidget):
                 ),
                 (f"{position.profit:+.2f}", r_colour(position.profit), True, True),
                 (
-                    "bounded" if bounded else "UNBOUNDED — new risk refused",
+                    t("cell.bounded") if bounded else t("cell.unbounded"),
                     PALETTE.ink_muted if bounded else PALETTE.critical,
                     False,
                     False,

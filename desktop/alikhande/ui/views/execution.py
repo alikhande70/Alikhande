@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...i18n import fmt_count, fmt_money, fmt_percent, fmt_price, t
 from ...core.enums import ExecState, RunMode
 from ..components import Card, EmptyState, KeyValue, StatusChip, label, rule
 from ..theme import PALETTE, SPACE, TYPE
@@ -35,15 +36,15 @@ from ..theme import PALETTE, SPACE, TYPE
 # stage of progress, it is the absence of progress, and drawing it as a step
 # would suggest the order is further along than anybody knows.
 PIPELINE = [
-    (ExecState.SUBMITTING, "Submitting"),
-    (ExecState.ACCEPTED, "Accepted"),
-    (ExecState.PARTIALLY_FILLED, "Partial"),
-    (ExecState.FILLED, "Filled"),
-    (ExecState.POSITION_ACTIVE, "Position"),
-    (ExecState.COMPLETED, "Completed"),
+    (ExecState.SUBMITTING, "step.submitting"),
+    (ExecState.ACCEPTED, "step.accepted"),
+    (ExecState.PARTIALLY_FILLED, "step.partial"),
+    (ExecState.FILLED, "step.filled"),
+    (ExecState.POSITION_ACTIVE, "step.position"),
+    (ExecState.COMPLETED, "step.completed"),
 ]
 
-ORDER_HEADERS = ["Ticket", "Symbol", "State", "Initial", "Current", "Price"]
+ORDER_KEYS = ["col.symbol", "col.symbol", "col.state", "col.volume", "col.volume", "col.entry"]
 
 
 class ExecutionView(QWidget):
@@ -68,7 +69,7 @@ class ExecutionView(QWidget):
         scroll.setWidget(page)
 
         # ---- manual review ---------------------------------------------------
-        self._review = Card("Manual review required")
+        self._review = Card(t("exec.review_title"))
         self._review.setStyleSheet(
             f"QFrame#Card {{ background: {PALETTE.critical_wash};"
             f" border: 1px solid {PALETTE.critical}; border-radius: 10px; }}"
@@ -81,11 +82,8 @@ class ExecutionView(QWidget):
         review_row = QHBoxLayout()
         review_row.setSpacing(SPACE.md)
         self._note = QLineEdit()
-        self._note.setPlaceholderText(
-            "State what you verified in MetaTrader — e.g. 'checked Trade and History "
-            "tabs, no order or position under magic 20260806'"
-        )
-        self._acknowledge = QPushButton("Acknowledge and clear")
+        self._note.setPlaceholderText(t("exec.note_placeholder"))
+        self._acknowledge = QPushButton(t("exec.acknowledge"))
         self._acknowledge.setObjectName("Confirm")
         self._acknowledge.setEnabled(False)
         self._acknowledge.clicked.connect(
@@ -101,12 +99,12 @@ class ExecutionView(QWidget):
         self._review.setVisible(False)
 
         # ---- pipeline --------------------------------------------------------
-        self._pipeline_card = Card("Current execution")
+        self._pipeline_card = Card(t("exec.current"))
         self._pipeline_row = QHBoxLayout()
         self._pipeline_row.setSpacing(SPACE.sm)
         self._steps: list[StatusChip] = []
-        for _, name in PIPELINE:
-            chip = StatusChip("○", name.upper(), "neutral")
+        for _, key in PIPELINE:
+            chip = StatusChip("○", t(key).upper(), "neutral")
             self._steps.append(chip)
             self._pipeline_row.addWidget(chip)
         self._pipeline_row.addStretch(1)
@@ -115,43 +113,37 @@ class ExecutionView(QWidget):
 
         self._detail = KeyValue(150)
         for key in (
-            "Execution id",
-            "Symbol",
-            "State",
-            "Resolved",
-            "Order ticket",
-            "Deal ticket",
-            "Position id",
-            "Requested / filled",
-            "Retcode",
-            "Message",
+            t("exec.field.id"),
+            t("exec.field.symbol"),
+            t("exec.field.state"),
+            t("exec.field.resolved"),
+            t("exec.field.order"),
+            t("exec.field.deal"),
+            t("exec.field.position"),
+            t("exec.field.volume"),
+            t("exec.field.retcode"),
+            t("exec.field.message"),
         ):
             self._detail.row(key)
         self._pipeline_card.add(self._detail)
 
-        self._idle = EmptyState(
-            "○",
-            "No execution in flight",
-            "Nothing has been submitted in this session. When an order is sent its "
-            "progress appears here, and if the broker cannot account for it the "
-            "submit gate closes until you clear it.",
-        )
+        self._idle = EmptyState("○", t("exec.idle"), t("exec.idle.detail"))
         self._pipeline_card.add(self._idle)
         root.addWidget(self._pipeline_card)
 
         # ---- policy ----------------------------------------------------------
-        policy = Card("Execution policy")
+        policy = Card(t("exec.policy"))
         grid = QHBoxLayout()
         grid.setSpacing(SPACE.xl)
 
         left = KeyValue(150)
-        for key in ("Run mode", "Account type", "Real accounts", "Order boundary"):
+        for key in (t("exec.field.mode"), t("exec.field.account"), t("exec.field.real"), t("exec.field.boundary")):
             left.row(key)
         left.stretch()
         grid.addWidget(left, 1)
 
         right = KeyValue(150)
-        for key in ("Arming", "Arm TTL", "Reconcile grace", "Magic number"):
+        for key in (t("exec.field.arming"), t("exec.field.ttl"), t("exec.field.grace"), t("exec.field.magic")):
             right.row(key)
         right.stretch()
         grid.addWidget(right, 1)
@@ -161,16 +153,16 @@ class ExecutionView(QWidget):
         root.addWidget(policy)
 
         # ---- working orders --------------------------------------------------
-        orders = Card("Working orders")
-        self._table = QTableWidget(0, len(ORDER_HEADERS))
-        self._table.setHorizontalHeaderLabels(ORDER_HEADERS)
+        orders = Card(t("exec.orders"))
+        self._table = QTableWidget(0, len(ORDER_KEYS))
+        self._table.setHorizontalHeaderLabels([t(k) for k in ORDER_KEYS])
         self._table.verticalHeader().setVisible(False)
         self._table.setShowGrid(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.verticalHeader().setDefaultSectionSize(38)
         self._table.horizontalHeader().setStretchLastSection(True)
         orders.add(self._table, 1)
-        self._orders_empty = EmptyState("○", "No working orders", "")
+        self._orders_empty = EmptyState("○", t("exec.no_orders"), "")
         orders.add(self._orders_empty)
         root.addWidget(orders, 1)
         root.addStretch(1)
@@ -183,12 +175,12 @@ class ExecutionView(QWidget):
         self._review.setVisible(snapshot.requires_manual_review)
         if snapshot.requires_manual_review:
             self._review_text.setText(
-                f"Execution {execution.execution_id} on {execution.symbol} could not be "
-                "resolved against open positions, working orders, order history or deal "
-                f"history after {config.execution.reconcile_grace_seconds}s.\n\n"
-                "An order may be live that this application cannot see, so submission is "
-                "blocked — and stays blocked across a restart. Verify the account in "
-                "MetaTrader before clearing this."
+                t(
+                    "exec.review_body",
+                    id=execution.execution_id,
+                    symbol=execution.symbol,
+                    grace=fmt_count(config.execution.reconcile_grace_seconds),
+                )
             )
 
         self._idle.setVisible(not in_flight)
@@ -238,18 +230,19 @@ class ExecutionView(QWidget):
             if execution.state == ExecState.RECONCILING:
                 reached = 0
 
-        for index, (chip, (_, name)) in enumerate(zip(self._steps, PIPELINE)):
+        for index, (chip, (_, key)) in enumerate(zip(self._steps, PIPELINE)):
+            name = t(key).upper()
             if unknown:
-                chip.set("?", name.upper(), "unknown")
+                chip.set("?", name, "unknown")
             elif index < reached:
-                chip.set("✓", name.upper(), "good")
+                chip.set("✓", name, "good")
             elif index == reached:
-                chip.set("●", name.upper(), "warning" if not execution.terminal else "good")
+                chip.set("●", name, "warning" if not execution.terminal else "good")
             else:
-                chip.set("○", name.upper(), "neutral")
+                chip.set("○", name, "neutral")
 
     def _render_detail(self, execution) -> None:
-        self._detail.set("Execution id", execution.execution_id or "—")
+        self._detail.set(t("exec.field.id"), execution.execution_id or "—")
         self._detail.set("Symbol", execution.symbol or "—")
         self._detail.set(
             "State",
@@ -259,44 +252,51 @@ class ExecutionView(QWidget):
             else (PALETTE.good if execution.terminal else PALETTE.warning),
         )
         self._detail.set(
-            "Resolved",
-            "yes" if execution.terminal else "NO — gate held shut",
+            t("exec.field.resolved"),
+            t("exec.resolved.yes") if execution.terminal else t("exec.resolved.no"),
             PALETTE.good if execution.terminal else PALETTE.warning,
         )
-        self._detail.set("Order ticket", str(execution.order_ticket or "—"))
-        self._detail.set("Deal ticket", str(execution.deal_ticket or "—"))
-        self._detail.set("Position id", str(execution.position_id or "—"))
+        self._detail.set(t("exec.field.order"), str(execution.order_ticket or "—"))
+        self._detail.set(t("exec.field.deal"), str(execution.deal_ticket or "—"))
+        self._detail.set(t("exec.field.position"), str(execution.position_id or "—"))
         self._detail.set(
-            "Requested / filled",
+            t("exec.field.volume"),
             f"{execution.requested_volume:.2f} / {execution.filled_volume:.2f}",
         )
-        self._detail.set("Retcode", str(execution.retcode or "—"))
-        self._detail.set("Message", execution.message or "—")
+        self._detail.set(t("exec.field.retcode"), str(execution.retcode or "—"))
+        self._detail.set(t("exec.field.message"), execution.message or "—")
 
     def _render_policy(self, snapshot) -> None:
         config = self._config
         account = snapshot.account
 
-        self._policy_left.set("Run mode", snapshot.mode.name.replace("_", " "))
+        self._policy_left.set(
+            t("exec.field.mode"),
+            {
+                RunMode.ALERT_ONLY: t("mode.alert"),
+                RunMode.SHADOW: t("mode.shadow"),
+                RunMode.DEMO_CONFIRM: t("mode.demo"),
+            }.get(snapshot.mode, snapshot.mode.name),
+        )
         if account is None:
-            self._policy_left.set("Account type", "no account", PALETTE.ink_muted)
+            self._policy_left.set(t("exec.field.account"), t("chip.no_account"), PALETTE.ink_muted)
         else:
             self._policy_left.set(
-                "Account type",
-                "DEMO" if account.is_demo else "NOT DEMO",
+                t("exec.field.account"),
+                t("chip.demo") if account.is_demo else t("chip.real_blocked"),
                 PALETTE.good if account.is_demo else PALETTE.critical,
             )
-        self._policy_left.set("Real accounts", "blocked unconditionally", PALETTE.good)
-        self._policy_left.set("Order boundary", "core.execution only", PALETTE.ink_secondary)
+        self._policy_left.set(t("exec.field.real"), t("exec.real_blocked"), PALETTE.good)
+        self._policy_left.set(t("exec.field.boundary"), t("exec.boundary"), PALETTE.ink_secondary)
 
         self._policy_right.set(
-            "Arming",
-            "arm + confirm required"
+            t("exec.field.arming"),
+            t("exec.arming.required")
             if snapshot.mode == RunMode.DEMO_CONFIRM
-            else "not applicable in this mode",
+            else t("exec.arming.na"),
         )
-        self._policy_right.set("Arm TTL", f"{config.execution.arm_ttl_seconds}s")
+        self._policy_right.set(t("exec.field.ttl"), f"{config.execution.arm_ttl_seconds}s")
         self._policy_right.set(
-            "Reconcile grace", f"{config.execution.reconcile_grace_seconds}s"
+            t("exec.field.grace"), f"{config.execution.reconcile_grace_seconds}s"
         )
-        self._policy_right.set("Magic number", str(config.execution.magic))
+        self._policy_right.set(t("exec.field.magic"), str(config.execution.magic))

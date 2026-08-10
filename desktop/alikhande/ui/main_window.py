@@ -40,6 +40,17 @@ from PySide6.QtWidgets import (
 
 from ..app.engine import ScanEngine
 from ..config import AppConfig
+from ..i18n import (
+    LANGUAGES,
+    current,
+    fmt_count,
+    fmt_percent,
+    is_rtl,
+    load_preferences,
+    save_preferences,
+    set_language,
+    t,
+)
 from ..core.calendar_gate import CalendarGate
 from ..core.enums import RunMode, RuntimeKind
 from ..core.journal import Journal
@@ -50,17 +61,21 @@ from .components import NavItem, StatusChip, label
 from .theme import PALETTE, SPACE, stylesheet
 from .views.dashboard import DashboardView
 from .views.execution import ExecutionView
+from .views.guide import GuideView
 from .views.health import HealthView
 from .views.risk import RiskView
 from .views.signal import SignalView
 from .worker import Action, ScanWorker
 
+# Icon, translation key, tooltip key. The labels are looked up at render time
+# rather than stored, so switching language relabels the rail without a restart.
 NAV = [
-    ("◈", "Dashboard", "What is happening right now"),
-    ("◎", "Signal", "One symbol, with the structure it is built on"),
-    ("◔", "Risk", "Exposure against its limits, and the evidence base"),
-    ("◆", "Execution", "The in-flight order and its reconciliation"),
-    ("◇", "Health", "What this build has and has not proven"),
+    ("◈", "nav.dashboard", "nav.dashboard.tip"),
+    ("◎", "nav.signal", "nav.signal.tip"),
+    ("◔", "nav.risk", "nav.risk.tip"),
+    ("◆", "nav.execution", "nav.execution.tip"),
+    ("◇", "nav.health", "nav.health.tip"),
+    ("◈", "nav.guide", "nav.guide.tip"),
 ]
 
 
@@ -112,14 +127,10 @@ class MainWindow(QMainWindow):
         right.addWidget(self._banner)
         self._banner.setVisible(False)
 
+        self._runtime = runtime
+        self._persistence = persistence
         self._stack = QStackedWidget()
-        self._dashboard = DashboardView(config, self._statistics)
-        self._signal = SignalView(config, self._statistics)
-        self._risk = RiskView(config, repositories)
-        self._execution = ExecutionView(config)
-        self._health = HealthView(config, runtime, persistence)
-        for view in (self._dashboard, self._signal, self._risk, self._execution, self._health):
-            self._stack.addWidget(view)
+        self._build_views()
         right.addWidget(self._stack, 1)
 
         container = QWidget()
@@ -131,7 +142,45 @@ class MainWindow(QMainWindow):
             f"QStatusBar {{ background: {PALETTE.surface}; border-top: 1px solid "
             f"{PALETTE.border}; color: {PALETTE.ink_muted}; }}"
         )
-        self.statusBar().showMessage("starting…")
+        self.statusBar().showMessage(t("status.starting"))
+
+        self._install_shortcuts()
+        self._start_worker()
+
+    # ------------------------------------------------------------------ views
+    def _build_views(self) -> None:
+        """Construct the five views and the guide, and wire their signals.
+
+        Separated from ``__init__`` so a language change can throw them away and
+        build them again. Rebuilding is the honest way to retranslate: threading
+        a ``retranslate()`` through every card title, table header and key-value
+        row means one forgotten label sits in the wrong language forever, and
+        the forgotten one is always the rarely-seen warning that matters most.
+
+        The views are pure renderers over a snapshot, so nothing is lost — the
+        next scan pass repopulates them within one interval.
+        """
+        while self._stack.count():
+            widget = self._stack.widget(0)
+            self._stack.removeWidget(widget)
+            widget.deleteLater()
+
+        self._dashboard = DashboardView(self._config, self._statistics)
+        self._signal = SignalView(self._config, self._statistics)
+        self._risk = RiskView(self._config, self._repo)
+        self._execution = ExecutionView(self._config)
+        self._health = HealthView(self._config, self._runtime, self._persistence)
+        self._guide = GuideView()
+
+        for view in (
+            self._dashboard,
+            self._signal,
+            self._risk,
+            self._execution,
+            self._health,
+            self._guide,
+        ):
+            self._stack.addWidget(view)
 
         self._dashboard.symbol_activated.connect(self._focus_symbol)
         self._signal.arm_requested.connect(lambda s: self._post(Action("arm", s)))
@@ -139,8 +188,6 @@ class MainWindow(QMainWindow):
         self._execution.acknowledge_requested.connect(
             lambda note: self._post(Action("acknowledge", note))
         )
-
-        self._start_worker()
 
     # ------------------------------------------------------------------ shell
     def _build_sidebar(self) -> QWidget:
@@ -154,17 +201,19 @@ class MainWindow(QMainWindow):
 
         brand = QVBoxLayout()
         brand.setSpacing(0)
-        brand.addWidget(label("ALIKHANDE", "Brand"))
-        brand.addWidget(label(f"SCANNER  ·  {VERSION}", "BrandSub"))
+        self._brand = label(t("app.brand"), "Brand")
+        self._brandsub = label(f'{t("app.brandsub")}  ·  {VERSION}', "BrandSub")
+        brand.addWidget(self._brand)
+        brand.addWidget(self._brandsub)
         column.addLayout(brand)
         column.addSpacing(SPACE.xl)
 
         self._nav_group = QButtonGroup(self)
         self._nav_group.setExclusive(True)
         self._nav_items: list[NavItem] = []
-        for index, (icon, name, tip) in enumerate(NAV):
-            item = NavItem(icon, name)
-            item.setToolTip(tip)
+        for index, (icon, key, tip) in enumerate(NAV):
+            item = NavItem(icon, t(key))
+            item.setToolTip(t(tip))
             item.clicked.connect(lambda _=False, i=index: self._stack.setCurrentIndex(i))
             self._nav_group.addButton(item, index)
             self._nav_items.append(item)
@@ -173,17 +222,28 @@ class MainWindow(QMainWindow):
 
         column.addStretch(1)
 
-        column.addWidget(label("MODE", "CardTitle"))
+        self._mode_label = label(t("shell.mode"), "CardTitle")
+        column.addWidget(self._mode_label)
         self._mode = QComboBox()
-        self._mode.addItem("Alert only", RunMode.ALERT_ONLY)
-        self._mode.addItem("Shadow", RunMode.SHADOW)
-        self._mode.addItem("Demo · arm + confirm", RunMode.DEMO_CONFIRM)
+        self._mode.addItem(t("mode.alert"), RunMode.ALERT_ONLY)
+        self._mode.addItem(t("mode.shadow"), RunMode.SHADOW)
+        self._mode.addItem(t("mode.demo"), RunMode.DEMO_CONFIRM)
         self._mode.currentIndexChanged.connect(self._on_mode_change)
         column.addWidget(self._mode)
 
         column.addSpacing(SPACE.md)
-        self._chip_runtime = StatusChip("◆", "STARTING", "unknown")
-        self._chip_account = StatusChip("○", "NO ACCOUNT", "unknown")
+        self._language_label = label(t("shell.language"), "CardTitle")
+        column.addWidget(self._language_label)
+        self._language = QComboBox()
+        for code, language in LANGUAGES.items():
+            self._language.addItem(language.name, code)
+        self._language.setCurrentIndex(self._language.findData(current().code))
+        self._language.currentIndexChanged.connect(self._on_language_change)
+        column.addWidget(self._language)
+
+        column.addSpacing(SPACE.md)
+        self._chip_runtime = StatusChip("◆", t("chip.starting"), "unknown")
+        self._chip_account = StatusChip("○", t("chip.no_account"), "unknown")
         for chip in (self._chip_runtime, self._chip_account):
             column.addWidget(chip)
         return rail
@@ -199,8 +259,8 @@ class MainWindow(QMainWindow):
 
         titles = QVBoxLayout()
         titles.setSpacing(0)
-        self._title = label(NAV[0][1], "ViewTitle")
-        self._subtitle = label(NAV[0][2], "ViewSubtitle")
+        self._title = label(t(NAV[0][1]), "ViewTitle")
+        self._subtitle = label(t(NAV[0][2]), "ViewSubtitle")
         titles.addWidget(self._title)
         titles.addWidget(self._subtitle)
         row.addLayout(titles)
@@ -247,7 +307,92 @@ class MainWindow(QMainWindow):
     def _post(self, action: Action) -> None:
         self._worker.enqueue(action)
 
+    def _on_language_change(self, index: int) -> None:
+        """Switch language and lay the whole window out again.
+
+        Qt applies ``setLayoutDirection`` down the widget tree, so the mirroring
+        is free for standard widgets. Custom-painted ones decide for themselves:
+        the bar breakdown mirrors, and the price chart deliberately does not —
+        right-to-left flips reading order, not time, and a mirrored candle chart
+        would show an uptrend as a downtrend to anybody who has seen one before.
+        """
+        code = self._language.itemData(index)
+        set_language(code)
+        application = QApplication.instance()
+        if application is not None:
+            application.setLayoutDirection(
+                Qt.LayoutDirection.RightToLeft if is_rtl() else Qt.LayoutDirection.LeftToRight
+            )
+        self._retranslate()
+        self._save_preferences()
+
+    def _retranslate(self) -> None:
+        """Relabel everything the shell owns; views relabel their own chrome on
+        the next snapshot, which arrives within one scan interval."""
+        self.setWindowTitle(f'{t("app.title")} {VERSION}')
+        self._brand.setText(t("app.brand"))
+        self._brandsub.setText(f'{t("app.brandsub")}  ·  {VERSION}')
+        self._mode_label.setText(t("shell.mode"))
+        self._language_label.setText(t("shell.language"))
+
+        for index, (icon, key, tip) in enumerate(NAV):
+            self._nav_items[index].relabel(icon, t(key))
+            self._nav_items[index].setToolTip(t(tip))
+
+        self._mode.blockSignals(True)
+        for index, key in enumerate(("mode.alert", "mode.shadow", "mode.demo")):
+            self._mode.setItemText(index, t(key))
+        self._mode.blockSignals(False)
+
+        selected = self._stack.currentIndex()
+        selected_symbol = getattr(self._signal, "_symbol", "")
+        self._build_views()
+        if 0 <= selected < self._stack.count():
+            self._stack.setCurrentIndex(selected)
+        if selected_symbol:
+            self._signal.select(selected_symbol)
+        self._on_view_changed(self._stack.currentIndex())
+
+    def _install_shortcuts(self) -> None:
+        """Keyboard access to every view, plus language and quit.
+
+        A trading panel that can only be driven by mouse is slower than the
+        market at exactly the wrong moments.
+        """
+        from PySide6.QtGui import QKeySequence, QShortcut
+
+        for index in range(len(NAV)):
+            QShortcut(
+                QKeySequence(f"Ctrl+{index + 1}"),
+                self,
+                lambda i=index: self._stack.setCurrentIndex(i),
+            )
+        QShortcut(QKeySequence("Ctrl+L"), self, self._cycle_language)
+        QShortcut(QKeySequence("F1"), self, lambda: self._stack.setCurrentIndex(len(NAV) - 1))
+        QShortcut(QKeySequence("Ctrl+F"), self, self._focus_picker)
+        QShortcut(QKeySequence("Ctrl+Q"), self, self.close)
+
+    def _cycle_language(self) -> None:
+        nxt = (self._language.currentIndex() + 1) % self._language.count()
+        self._language.setCurrentIndex(nxt)
+
+    def _focus_picker(self) -> None:
+        self._stack.setCurrentIndex(1)
+        self._signal._picker.setFocus()
+
+    def _save_preferences(self) -> None:
+        save_preferences(
+            data_directory(),
+            {
+                "language": current().code,
+                "view": self._stack.currentIndex(),
+                "width": self.width(),
+                "height": self.height(),
+            },
+        )
+
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        self._save_preferences()
         self._worker.stop()
         self._thread.quit()
         self._thread.wait(3000)
@@ -255,9 +400,9 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- signals
     def _on_view_changed(self, index: int) -> None:
-        icon, name, tip = NAV[index]
-        self._title.setText(name)
-        self._subtitle.setText(tip)
+        icon, key, tip = NAV[index]
+        self._title.setText(t(key))
+        self._subtitle.setText(t(tip))
         if index < len(self._nav_items):
             self._nav_items[index].setChecked(True)
 
@@ -336,24 +481,23 @@ class MainWindow(QMainWindow):
         # "connected / DEMO 0" is exactly the kind of plausible-looking
         # falsehood this project exists to refuse.
         if not live:
-            self._chip_runtime.set("!", f"{snapshot.runtime.kind.name} · NO BROKER", "warning")
-            self._chip_runtime.setToolTip(
-                "No MetaTrader terminal is attached. Prices are synthetic and nothing "
-                "here describes a real market."
+            self._chip_runtime.set(
+                "!", f'{snapshot.runtime.kind.name} · {t("chip.no_broker")}', "warning"
             )
-            self._chip_account.set("!", "SIMULATED", "warning")
+            self._chip_runtime.setToolTip(t("chip.no_broker.tip"))
+            self._chip_account.set("!", t("chip.simulated"), "warning")
         else:
             self._chip_runtime.set(
                 "✓" if snapshot.connected else "✕",
-                "CONNECTED" if snapshot.connected else "DISCONNECTED",
+                t("chip.connected") if snapshot.connected else t("chip.disconnected"),
                 "good" if snapshot.connected else "critical",
             )
             if account is None:
-                self._chip_account.set("?", "NO ACCOUNT", "unknown")
+                self._chip_account.set("?", t("chip.no_account"), "unknown")
             elif account.is_demo:
-                self._chip_account.set("✓", f"DEMO {account.login}", "good")
+                self._chip_account.set("✓", f'{t("chip.demo")} {account.login}', "good")
             else:
-                self._chip_account.set("✕", "REAL — BLOCKED", "critical")
+                self._chip_account.set("✕", t("chip.real_blocked"), "critical")
 
         self._chip_execution.set(
             "✕" if snapshot.requires_manual_review else "○",
@@ -367,18 +511,13 @@ class MainWindow(QMainWindow):
         # ---- banner ----------------------------------------------------------
         if account is not None and not account.is_demo and live:
             self._banner_text.setText(
-                f"REAL ACCOUNT DETECTED ({account.login} @ {account.server}). Execution is "
-                "blocked unconditionally and the mode selector is locked to Alert-only. "
-                "This build never trades a live account."
+                t("banner.real", login=account.login, server=account.server)
             )
             self._banner.setVisible(True)
             self._mode.setEnabled(False)
             self._sync_mode(RunMode.ALERT_ONLY)
         elif snapshot.requires_manual_review:
-            self._banner_text.setText(
-                "An execution could not be reconciled against the broker. Submission is "
-                "blocked until it is reviewed and acknowledged on the Execution view."
-            )
+            self._banner_text.setText(t("banner.review"))
             self._banner.setVisible(True)
             self._mode.setEnabled(True)
         else:
@@ -411,8 +550,13 @@ class MainWindow(QMainWindow):
         self._health.update_view(snapshot, self._engine.journal)
 
         self.statusBar().showMessage(
-            f"pass {snapshot.passes:,}  ·  {snapshot.last_pass_ms:.1f} ms  ·  "
-            f"{snapshot.runtime.description}  ·  open risk {snapshot.exposure_open_pct:.2f}%"
+            t(
+                "status.pass",
+                passes=fmt_count(snapshot.passes),
+                ms=fmt_count(int(snapshot.last_pass_ms)),
+                runtime=snapshot.runtime.description,
+                risk=fmt_percent(snapshot.exposure_open_pct),
+            )
         )
 
 
@@ -481,7 +625,21 @@ def build_application(offline: bool = False):
     application.setStyleSheet(stylesheet())
     application.setWindowIcon(_icon())
 
+    # Restore the operator's language BEFORE the window is built, so nothing is
+    # ever constructed with labels it immediately has to replace.
+    preferences = load_preferences(data_directory())
+    set_language(preferences.get("language", "en"))
+    application.setLayoutDirection(
+        Qt.LayoutDirection.RightToLeft if is_rtl() else Qt.LayoutDirection.LeftToRight
+    )
+
     window = MainWindow(engine, config, runtime, persistence, repositories)
+    width = int(preferences.get("width", 1560))
+    height = int(preferences.get("height", 960))
+    window.resize(max(1180, width), max(720, height))
+    view = int(preferences.get("view", 0))
+    if 0 <= view < window._stack.count():
+        window._stack.setCurrentIndex(view)
     return application, window
 
 
