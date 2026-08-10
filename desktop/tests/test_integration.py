@@ -8,6 +8,7 @@ table. These assert that the loop actually closes.
 
 from __future__ import annotations
 
+import pathlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -419,32 +420,13 @@ if __name__ == "__main__":
 
 
 class TestUiContracts(unittest.TestCase):
-    """Rules the UI must keep, asserted rather than trusted to review.
+    """UI rules that can be checked WITHOUT importing Qt.
 
-    These need no display: they check structure and colour policy, which is
-    where the visual defects that actually matter live.
+    These live here, in the dependency-free suite, precisely because they need
+    nothing installed. Anything that has to import PySide6 belongs in
+    ``test_ui.py``, which is skipped when Qt is absent — mixing the two is what
+    broke CI: a test written to protect one design rule violated another.
     """
-
-    def test_status_chip_requires_an_icon_and_a_label(self):
-        """Colour must never carry meaning alone.
-
-        Warning and serious sit in the same warm family by design, so hue cannot
-        separate them, and a bare coloured dot tells a colour-blind reader
-        nothing. Requiring both arguments makes the omission impossible.
-        """
-        import inspect
-
-        from alikhande.ui.components import StatusChip
-
-        parameters = list(inspect.signature(StatusChip.__init__).parameters)
-        self.assertEqual(parameters[1], "icon")
-        self.assertEqual(parameters[2], "text")
-        for name in ("icon", "text"):
-            self.assertIs(
-                inspect.signature(StatusChip.__init__).parameters[name].default,
-                inspect.Parameter.empty,
-                f"{name} must be required so a bare coloured dot cannot ship",
-            )
 
     def test_unknown_never_borrows_a_status_colour(self):
         """UNKNOWN is the absence of a status, not a mild one."""
@@ -472,6 +454,15 @@ class TestUiContracts(unittest.TestCase):
         # than turning red.
         self.assertEqual(score_ramp(20.0, 75.0), PALETTE.ink_muted)
 
+    def test_the_theme_module_needs_no_qt(self):
+        """Design tokens are data. Keeping them importable without Qt is what
+        lets the colour rules above run in the dependency-free job."""
+        source = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "alikhande" / "ui" / "theme.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("PySide6", source)
+
     def test_the_symbol_view_carries_what_the_chart_needs(self):
         """The detail chart must be able to draw the structure, not just be
         told about it."""
@@ -483,7 +474,6 @@ class TestUiContracts(unittest.TestCase):
 
     def test_the_ui_never_reaches_into_engine_privates(self):
         """The UI reads only what the engine offers publicly."""
-        import pathlib
         import re
 
         root = pathlib.Path(__file__).resolve().parent.parent / "alikhande" / "ui"
@@ -492,3 +482,7 @@ class TestUiContracts(unittest.TestCase):
             for match in re.finditer(r"_engine\.(_\w+)", path.read_text(encoding="utf-8")):
                 offenders.append(f"{path.name}: _engine.{match.group(1)}")
         self.assertEqual(offenders, [], f"UI reached into engine privates: {offenders}")
+
+
+if __name__ == "__main__":
+    unittest.main()
