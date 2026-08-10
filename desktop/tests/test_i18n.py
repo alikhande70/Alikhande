@@ -212,3 +212,69 @@ class TestGuide(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHardeningLoop(unittest.TestCase):
+    """The loop guards the codebase, so it needs its own guard.
+
+    A check that cannot fail proves nothing. Each of these injects the defect
+    the check exists to catch and asserts it is found — the same discipline the
+    MQL5 static gate's self-tests apply.
+    """
+
+    def _harden(self):
+        """Load tools/harden.py as a module.
+
+        It must be registered in ``sys.modules`` BEFORE ``exec_module``:
+        ``@dataclass`` resolves annotations through
+        ``sys.modules[cls.__module__].__dict__``, so a spec-loaded module that
+        is not registered makes every dataclass in it fail to build.
+        """
+        import importlib.util
+        import pathlib
+        import sys
+
+        if "harden" in sys.modules:
+            return sys.modules["harden"]
+
+        path = pathlib.Path(__file__).resolve().parent.parent / "tools" / "harden.py"
+        spec = importlib.util.spec_from_file_location("harden", path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["harden"] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def test_the_audit_stage_passes_on_the_current_tree(self):
+        harden = self._harden()
+        result = harden.stage_audit()
+        blocking = [f for f in result.findings if f.severity in ("P0", "P1")]
+        self.assertEqual(
+            blocking, [], f"audit found blocking issues: {[f.detail for f in blocking]}"
+        )
+
+    def test_the_order_boundary_check_can_fail(self):
+        harden = self._harden()
+        call = re.compile(r"\bsend_order\s*\(")
+        self.assertTrue(call.search("gateway.send_order(request)"))
+        self.assertIsNone(call.search("described send_order in prose"))
+
+    def test_the_forbidden_strategy_check_can_fail(self):
+        harden = self._harden()
+        self.assertTrue(re.search(r"\bmartingale\b", "use martingale sizing"))
+        self.assertTrue(re.search(r"\brecovery_(?:lot|multiplier|factor)\b", "recovery_lot = 2"))
+
+    def test_the_paint_guard_check_only_targets_collections(self):
+        """Its first run flagged two scalar-painting widgets. The narrowed check
+        must still catch a real unguarded iteration."""
+        iterates = re.compile(r"for\s+\w+(?:,\s*\w+)*\s+in\s+(?:enumerate\()?self\.(_\w+)")
+        self.assertTrue(iterates.search("for bar in self._bars:"))
+        self.assertTrue(iterates.search("for i, item in enumerate(self._items):"))
+        self.assertIsNone(iterates.search("painter.drawText(self.rect(), flags, text)"))
+
+    def test_every_audit_check_is_callable_and_returns_findings(self):
+        harden = self._harden()
+        for name, check in harden.AUDIT_CHECKS:
+            found = check()
+            self.assertIsInstance(found, list, f"{name} did not return a list")
+            for finding in found:
+                self.assertIn(finding.severity, ("P0", "P1", "P2"))
