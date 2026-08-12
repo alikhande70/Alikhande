@@ -1,5 +1,47 @@
 # Changelog
 
+## Desktop 2.2.0 — Backtest inside the application
+
+The backtest was reachable only from a terminal, which meant the one feature
+that turns this from a scanner into something you can *check* was invisible to
+anybody who opened the window. It is now a view.
+
+### Added
+
+- **A Backtest view.** Data source, parameters, run, progress, stop, and the
+  full report — all in the window. The replay runs on its own thread, so the
+  interface stays usable through a run that takes minutes on the GUI thread
+  would look identical to a crash.
+
+- **The data source is the first control on the screen, not a footnote.**
+  *Sample data* (the seeded generator) and *Broker files* (MetaTrader CSV
+  exports) are chosen explicitly and shown as a chip that never disappears —
+  amber for sample, green for real files. The single most damaging mistake
+  available on that screen is reading a synthetic result as a real one, so the
+  paragraph under the chip says what the choice means in the same words every
+  time.
+
+- **Progress and cancellation** in `Backtester.run`, via one optional
+  callback that reports about a hundred times over a run and stops when it
+  returns False. A cancelled run still returns its partial result and the
+  report is stamped `CANCELLED`, because a truncated backtest quoted as a
+  finished one is a silently smaller sample.
+
+- **Writing results into the evidence base from the GUI**, with the same
+  replace-not-append rule the CLI calibration uses, and the checkbox disabled
+  outright when the session has no database — a control that silently writes
+  nowhere is worse than one that is visibly unavailable.
+
+- A Guide section, EN and FA, on running a backtest and what the answer is
+  worth.
+
+### Not claimed
+
+Still never run on Windows and never against a live terminal: this is built
+and tested on Linux, and PyInstaller does not cross-compile. There is no
+`.exe` in this repository and there cannot be one until the build script is
+run on a Windows machine.
+
 ## Desktop 2.1.0 — The Scanner screen
 
 The application now opens on an answer rather than a dashboard. Ranked

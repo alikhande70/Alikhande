@@ -25,7 +25,7 @@ without it, re-run the installer and choose *Modify*.
 2. Open the `desktop\packaging` folder.
 3. Double-click **`INSTALL_WINDOWS.bat`**.
 
-That script installs the dependencies, runs the 222-test suite, checks the
+That script installs the dependencies, runs the full test suite, checks the
 environment, and only then builds the executable. It refuses to package a build
 whose tests fail — an `.exe` is the thing you actually run, and shipping one
 from a red suite is how an untested build reaches a live terminal.
@@ -75,6 +75,24 @@ acting on, export real history from MetaTrader (Ctrl+S on a chart) and run:
 ```powershell
 python -m alikhande backtest --data <folder> --database <file>
 ```
+
+### Running a backtest without leaving the window
+
+The **Backtest** view (Ctrl+6) replays history through the same pipeline the
+live scanner uses. Pick the data source first — it decides what the answer
+means:
+
+| Source | What a good result means |
+|---|---|
+| **Sample data** | The software works end to end. Nothing more. The generator's trend is a sum of sine waves, so it is predictable by construction. |
+| **Broker files** | Real prices, so it is worth reading — subject to the caveats the report prints. |
+
+For broker files: open a chart in MetaTrader, press **Ctrl+S**, save as
+`SYMBOL_TIMEFRAME.csv` (e.g. `EURUSD_H1.csv`) into one folder, then point the
+view at that folder.
+
+The run happens on its own thread, so the window stays usable, and **Stop**
+actually stops it.
 
 ### Connecting to a broker
 
@@ -135,7 +153,7 @@ python -m alikhande backtest --symbols EURUSD XAUUSD --steps 2000
 ۲. پوشه‌ی `desktop\packaging` را باز کنید.
 ۳. روی **`INSTALL_WINDOWS.bat`** دوبار کلیک کنید.
 
-این اسکریپت وابستگی‌ها را نصب می‌کند، هر ۲۲۲ تست را اجرا می‌کند، محیط را
+این اسکریپت وابستگی‌ها را نصب می‌کند، همهٔ تست‌ها را اجرا می‌کند، محیط را
 بررسی می‌کند و تنها پس از آن فایل اجرایی را می‌سازد. اگر تست‌ها رد شوند،
 از ساختن خروجی خودداری می‌کند — چون فایل اجرایی همان چیزی است که واقعاً
 اجرا می‌شود و ساختن آن از یک بیلد قرمز، دقیقاً همان راهی است که یک نسخه‌ی
@@ -188,6 +206,24 @@ python -m alikhande calibrate
 ```powershell
 python -m alikhande backtest --data <folder> --database <file>
 ```
+
+### اجرای بک‌تست بدون خروج از برنامه
+
+نمای **بک‌تست** (‏Ctrl+6) تاریخچه را از همان مسیری بازپخش می‌کند که اسکنر زنده
+استفاده می‌کند. اول منبع داده را انتخاب کنید — همان تعیین می‌کند جواب چه معنایی
+دارد:
+
+| منبع | نتیجهٔ خوب یعنی چه |
+|---|---|
+| **دادهٔ نمونه** | نرم‌افزار سرتاسر کار می‌کند. همین و بس. روند تولیدکننده جمع چند موج سینوسی است، پس ذاتاً قابل‌پیش‌بینی است. |
+| **فایل‌های بروکر** | قیمت واقعی است، پس ارزش خواندن دارد — با همان هشدارهایی که گزارش چاپ می‌کند. |
+
+برای فایل‌های بروکر: در متاتریدر یک چارت باز کنید، **Ctrl+S** بزنید، با نام
+`SYMBOL_TIMEFRAME.csv` (مثلاً `EURUSD_H1.csv`) در یک پوشه ذخیره کنید، و بعد
+همان پوشه را در برنامه انتخاب کنید.
+
+اجرا روی نخ جداگانه‌ای انجام می‌شود، پس پنجره قابل‌استفاده می‌ماند و دکمهٔ
+**توقف** واقعاً متوقفش می‌کند.
 
 ### اتصال به بروکر
 

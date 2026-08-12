@@ -15,7 +15,7 @@ by rule version, keeps them apart automatically.
 from __future__ import annotations
 
 APP_NAME = "Alikhande Scanner Desktop"
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 EDITION = "Standalone"
 
 # Bump RULE_VERSION when setup qualification changes, SCORING_VERSION when the

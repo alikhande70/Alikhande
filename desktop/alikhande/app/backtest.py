@@ -71,6 +71,11 @@ class BacktestResult:
     sum_r: float = 0.0
     max_drawdown_r: float = 0.0
     outcomes: list[Outcome] = field(default_factory=list)
+    # Set when a caller's progress callback asked to stop. The partial result
+    # is still returned and still reconciles — it is a shorter run, not a
+    # broken one — but the report says so, because a truncated backtest quoted
+    # as a finished one is a silently smaller sample.
+    cancelled: bool = False
     rejection_reasons: dict[str, int] = field(default_factory=dict)
     setups: dict[str, int] = field(default_factory=dict)
 
@@ -136,6 +141,11 @@ class BacktestResult:
         else:
             add("    no trade resolved")
         add("")
+        if self.cancelled:
+            add("  ** CANCELLED — this run was stopped early. Everything above")
+            add("     describes the bars that were replayed before it stopped,")
+            add("     which is a SMALLER SAMPLE than was asked for. **")
+            add("")
         add("  WHAT THIS DOES AND DOES NOT ESTABLISH")
 
         if self.trades == 0:
@@ -189,6 +199,7 @@ class Backtester:
         data_source: str = "synthetic",
         repositories=None,
         run_id: str = "",
+        progress=None,
     ) -> BacktestResult:
         """Replay ``gateway``'s M5 series through the live pipeline.
 
@@ -237,7 +248,22 @@ class Backtester:
         equity_r = 0.0
         peak_r = 0.0
 
+        # Reported roughly a hundred times over the whole run rather than every
+        # bar: the callback crosses a thread boundary in the UI, and signalling
+        # 60,000 times to move a progress bar 60,000 pixels it does not have
+        # costs more than the run itself.
+        span = max(1, end - warmup_bars)
+        heartbeat = max(1, span // 100)
+
         for cursor in range(warmup_bars, end, max(1, step)):
+            if progress is not None and (cursor - warmup_bars) % heartbeat == 0:
+                # Returning False is how a caller cancels. A backtest that
+                # cannot be stopped is one the operator has to kill the whole
+                # application to escape.
+                if progress(cursor - warmup_bars, span) is False:
+                    result.cancelled = True
+                    break
+
             gateway.set_cursor(cursor)
             now = gateway.server_time()
 

@@ -327,15 +327,63 @@ GUIDE: list[tuple[str, str, str, str, str]] = [
         "آن‌ها عبور نمی‌کند.",
     ),
     (
+        "▤",
+        "Running a backtest, and what the answer is worth",
+        "The Backtest view replays history through the SAME pipeline the live "
+        "scanner uses — the same signal engine, the same risk planner, the same "
+        "outcome tracker. A backtest with its own copy of the strategy tests "
+        "the copy, so this one does not have one.\n\n"
+        "The first control is the data source, and it decides what the result "
+        "means:\n\n"
+        "SAMPLE DATA is a seeded generator. Its trend is a sum of sine waves, "
+        "so the series is predictable by construction and a trend-pullback "
+        "strategy scores far better on it than on any market. A good result "
+        "here means the software runs end to end. It means nothing else.\n\n"
+        "BROKER FILES are MetaTrader CSV exports — press Ctrl+S on a chart and "
+        "save as SYMBOL_TIMEFRAME.csv into one folder. Real prices, so the "
+        "result is worth reading.\n\n"
+        "Either way the report tells you what it does and does not establish: "
+        "whether the sample cleared the 30-trade floor, whether the data was "
+        "real, that a bar spanning both stop and target was scored as a STOP, "
+        "and that nothing beyond the configured spread was modelled. Read that "
+        "section before the win rate, not after.\n\n"
+        "The run happens on its own thread, so the window stays usable, and "
+        "Stop actually stops it — a cancelled run is labelled CANCELLED in the "
+        "report, because a truncated backtest quoted as a finished one is a "
+        "silently smaller sample.",
+        "اجرای بک‌تست، و اینکه جوابش چقدر می‌ارزد",
+        "نمای بک‌تست تاریخچه را از **همان** مسیری بازپخش می‌کند که اسکنر زنده "
+        "استفاده می‌کند — همان موتور سیگنال، همان محاسبهٔ ریسک، همان ردیاب "
+        "نتیجه. بک‌تستی که نسخهٔ جداگانه‌ای از استراتژی داشته باشد، آن نسخه را "
+        "تست می‌کند؛ این یکی ندارد.\n\n"
+        "اولین کنترل، منبع داده است و همان تعیین می‌کند نتیجه چه معنایی دارد:\n\n"
+        "دادهٔ نمونه یک تولیدکنندهٔ داده است. روندش جمع چند موج سینوسی است، پس "
+        "سری قیمت ذاتاً قابل‌پیش‌بینی است و استراتژی پولبک روی آن خیلی بهتر از "
+        "هر بازاری نتیجه می‌گیرد. نتیجهٔ خوب اینجا یعنی نرم‌افزار سرتاسر کار "
+        "می‌کند. هیچ معنای دیگری ندارد.\n\n"
+        "فایل‌های بروکر خروجی CSV متاتریدرند — روی چارت Ctrl+S بزنید و با نام "
+        "SYMBOL_TIMEFRAME.csv در یک پوشه ذخیره کنید. قیمت واقعی است، پس نتیجه "
+        "ارزش خواندن دارد.\n\n"
+        "در هر دو حالت گزارش می‌گوید چه چیزی را اثبات می‌کند و چه چیزی را نه: "
+        "اینکه نمونه از کف ۳۰ معامله عبور کرده یا نه، اینکه داده واقعی بوده یا "
+        "نه، اینکه کندلی که هم حد ضرر و هم حد سود را لمس کرده به‌عنوان حد ضرر "
+        "حساب شده، و اینکه هیچ هزینه‌ای فراتر از اسپرد تنظیم‌شده مدل نشده. آن "
+        "بخش را **قبل** از نرخ برد بخوانید، نه بعد از آن.\n\n"
+        "اجرا روی نخ جداگانه‌ای انجام می‌شود تا پنجره قابل‌استفاده بماند، و "
+        "دکمهٔ توقف واقعاً متوقفش می‌کند — اجرای متوقف‌شده در گزارش با برچسب "
+        "CANCELLED مشخص می‌شود، چون بک‌تست ناتمامی که به‌عنوان تمام‌شده نقل شود "
+        "یعنی یک نمونهٔ کوچک‌ترِ اعلام‌نشده.",
+    ),
+    (
         "◈",
         "Keyboard",
-        "Ctrl+1 … Ctrl+8 — jump to a view\n"
+        "Ctrl+1 … Ctrl+9 — jump to a view\n"
         "Ctrl+L — switch language\n"
         "Ctrl+F — focus the symbol picker on the Signal view\n"
         "F1 — open this guide\n"
         "Ctrl+Q — quit",
         "میان‌برهای صفحه‌کلید",
-        "‏Ctrl+1 تا Ctrl+8 — پرش به یک نما\n"
+        "‏Ctrl+1 تا Ctrl+9 — پرش به یک نما\n"
         "‏Ctrl+L — تعویض زبان\n"
         "‏Ctrl+F — فوکوس روی انتخابگر نماد در نمای سیگنال\n"
         "‏F1 — باز کردن همین راهنما\n"

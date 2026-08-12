@@ -363,5 +363,88 @@ class TestSettingsView(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(HAS_QT, "PySide6 is not installed")
+class TestBacktestView(unittest.TestCase):
+    """The in-app backtest runner."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _request(self, **overrides):
+        request = {
+            "symbols": ["EURUSD"],
+            "folder": "",
+            "h4_bars": 260,
+            "warmup": 9_000,
+            "seed": 20260806,
+            "equity": 10_000.0,
+            "persist": False,
+            "database": "",
+        }
+        request.update(overrides)
+        return request
+
+    def test_a_real_replay_runs_and_produces_a_report(self):
+        """Not a mock. The worker drives the actual Backtester."""
+        from alikhande.ui.views.backtest import BacktestWorker
+
+        report, ok = BacktestWorker(self._request())._run()
+        self.assertTrue(ok)
+        self.assertIn("backtest report", report)
+        self.assertIn("bars replayed", report)
+        self.assertIn("DATA IS SYNTHETIC", report)
+
+    def test_stopping_the_worker_cancels_the_run_and_the_report_says_so(self):
+        """A long computation with no cancel button is one the operator has to
+        kill the application to escape."""
+        from alikhande.ui.views.backtest import BacktestWorker
+
+        worker = BacktestWorker(self._request(h4_bars=2000, warmup=9_000))
+        worker.progress.connect(lambda *_: worker.stop())
+        report, _ok = worker._run()
+        self.assertIn("CANCELLED", report)
+
+    def test_sample_data_is_labelled_differently_from_broker_files(self):
+        """The most damaging mistake available on this screen is reading a
+        synthetic result as a real one."""
+        from alikhande.config import AppConfig
+        from alikhande.ui.views.backtest import BacktestView
+
+        view = BacktestView(AppConfig())
+        sample_chip = view._source_chip._text.text()
+        sample_note = view._source_note.text()
+
+        view._folder = "/some/export/folder"
+        view._refresh_source()
+        self.assertNotEqual(view._source_chip._text.text(), sample_chip)
+        self.assertNotEqual(view._source_note.text(), sample_note)
+        self.assertIn("/some/export/folder", view._source_note.text())
+        view.shutdown()
+
+    def test_the_persist_control_is_off_without_a_database(self):
+        """Offline sessions have no database; a checkbox that silently writes
+        nowhere is worse than one that is visibly unavailable."""
+        from alikhande.config import AppConfig
+        from alikhande.ui.views.backtest import BacktestView
+
+        without = BacktestView(AppConfig(), database_path="")
+        self.assertFalse(without._persist.isEnabled())
+        without.shutdown()
+
+        with_db = BacktestView(AppConfig(), database_path="/tmp/x.sqlite")
+        self.assertTrue(with_db._persist.isEnabled())
+        with_db.shutdown()
+
+    def test_the_view_renders_and_shuts_down_cleanly(self):
+        from alikhande.config import AppConfig
+        from alikhande.ui.views.backtest import BacktestView
+
+        view = BacktestView(AppConfig())
+        view.resize(1100, 760)
+        self.assertFalse(view.grab().isNull())
+        view.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

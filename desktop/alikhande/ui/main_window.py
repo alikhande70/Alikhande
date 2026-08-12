@@ -63,6 +63,7 @@ from ..version import VERSION
 from ..profiles import Overrides, Profile, configure
 from .components import NavItem, StatusChip, label
 from .theme import PALETTE, SPACE, active_theme, set_theme, stylesheet
+from .views.backtest import BacktestView
 from .views.dashboard import DashboardView
 from .views.execution import ExecutionView
 from .views.guide import GuideView
@@ -85,6 +86,7 @@ NAV = [
     ("◉", "nav.signal", "nav.signal.tip"),
     ("◔", "nav.risk", "nav.risk.tip"),
     ("◆", "nav.execution", "nav.execution.tip"),
+    ("▤", "nav.backtest", "nav.backtest.tip"),
     ("◇", "nav.health", "nav.health.tip"),
     ("⚙", "nav.settings", "nav.settings.tip"),
     ("?", "nav.guide", "nav.guide.tip"),
@@ -188,6 +190,13 @@ class MainWindow(QMainWindow):
         """
         while self._stack.count():
             widget = self._stack.widget(0)
+            # The backtest view owns a worker thread. Dropping the widget while
+            # that thread runs leaves Qt destroying a live QThread, so give it a
+            # chance to stop first — a language or theme switch can land here at
+            # any moment, including mid-replay.
+            shutdown = getattr(widget, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
             self._stack.removeWidget(widget)
             widget.deleteLater()
 
@@ -196,6 +205,10 @@ class MainWindow(QMainWindow):
         self._signal = SignalView(self._config, self._statistics)
         self._risk = RiskView(self._config, self._repo)
         self._execution = ExecutionView(self._config)
+        self._backtest = BacktestView(
+            self._config,
+            self._persistence.filename if self._persistence.enabled else "",
+        )
         self._health = HealthView(self._config, self._runtime, self._persistence)
         self._settings = SettingsView(
             self._config,
@@ -212,6 +225,7 @@ class MainWindow(QMainWindow):
             self._signal,
             self._risk,
             self._execution,
+            self._backtest,
             self._health,
             self._settings,
             self._guide,
@@ -446,6 +460,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         self._save_preferences()
+        self._backtest.shutdown()
         self._worker.stop()
         self._thread.quit()
         self._thread.wait(3000)
