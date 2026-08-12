@@ -87,8 +87,8 @@ class OpportunityRow(QFrame):
         self._selected = False
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(SPACE.lg, SPACE.md, SPACE.lg, SPACE.md)
-        row.setSpacing(SPACE.lg)
+        row.setContentsMargins(SPACE.lg, SPACE.md, SPACE.md, SPACE.md)
+        row.setSpacing(SPACE.md)
 
         # ---- identity
         identity = QVBoxLayout()
@@ -105,22 +105,27 @@ class OpportunityRow(QFrame):
         row.addStretch(1)
 
         # ---- the three numbers, each with its own caption
-        self._rate_value, self._rate_caption, rate_block = self._number_block()
-        self._rr_value, self._rr_caption, rr_block = self._number_block(width=64)
-        self._edge_value, self._edge_caption, edge_block = self._number_block(width=78)
+        #
+        # Widths are sized to the longest CAPTION, not the value: the captions
+        # are the long strings ("95% interval 71%-79%", "break-even 25%") and a
+        # column sized to its headline clips them to "nterval 71%-79%" and
+        # "k-even 25%", which read as data rather than as truncation.
+        self._rate_value, self._rate_caption, rate_block = self._number_block(width=132)
+        self._rr_value, self._rr_caption, rr_block = self._number_block(width=96)
+        self._edge_value, self._edge_caption, edge_block = self._number_block(width=96)
         for block in (rate_block, rr_block, edge_block):
             row.addLayout(block)
-            row.addSpacing(SPACE.md)
+            row.addSpacing(SPACE.sm)
 
         self._status = label("", "Caption")
-        self._status.setFixedWidth(150)
+        self._status.setFixedWidth(124)
         self._status.setWordWrap(True)
         self._status.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         row.addWidget(self._status)
 
-    def _number_block(self, width: int = 96):
+    def _number_block(self, width: int = 132):
         """A figure with a caption under it, right-aligned as a column.
 
         Right-aligned because these are quantities read down a column, and a
@@ -328,6 +333,12 @@ class ScannerView(QWidget):
     def _build_list(self) -> QWidget:
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
+        # Never sideways. The rows are a fixed-width layout, and a horizontal
+        # scrollbar under the whole list to reveal the last 20 pixels of a
+        # provenance caption is a worse trade than eliding the caption.
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         holder = QWidget()
         # The scroll area is transparent, but its *viewport child* is not — Qt
         # paints that one from the default palette, which shows up as a pale
@@ -391,11 +402,23 @@ class ScannerView(QWidget):
         it testable without a display server.
         """
         ranked = scanner_app.build(snapshot, self._config, repositories)
-        self._opportunities = {o.symbol: o for o in ranked}
         self._views = {view.symbol or view.requested: view for view in snapshot.symbols}
-        self._order = [o.symbol for o in ranked]
 
+        # One row per symbol, and the first occurrence wins. The engine holds a
+        # single view per configured symbol so a repeat should be impossible —
+        # but the rows are keyed by symbol, and a duplicate would silently
+        # overwrite the higher-ranked entry with the lower one. Since the list
+        # arrives sorted, keeping the first preserves the ranking rather than
+        # letting arrival order decide.
+        self._opportunities = {}
+        self._order = []
         for opportunity in ranked:
+            if opportunity.symbol in self._opportunities:
+                continue
+            self._opportunities[opportunity.symbol] = opportunity
+            self._order.append(opportunity.symbol)
+
+        for opportunity in self._opportunities.values():
             row = self._rows.get(opportunity.symbol)
             if row is None:
                 row = OpportunityRow(opportunity.symbol)

@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..i18n import t
 from .theme import PALETTE, RADIUS, RADIUS_PILL, SPACE, TYPE, score_ramp
 
 
@@ -161,11 +162,13 @@ class StatusChip(QFrame):
 
 
 class DirectionBadge(QLabel):
-    """LONG / SHORT. Identity, so it uses categorical slots 1 and 2.
+    """BUY / SELL. Identity, so it takes the two direction tints.
 
-    Always spells the word out. Blue and orange are far apart under every CVD
-    simulation, but the text is what makes it unambiguous under a photocopier,
-    a screenshot, or a colleague's odd monitor.
+    Always spells the word out, and in the operator's own language. Blue and
+    amber are far apart under every CVD simulation, but the text is what makes
+    it unambiguous under a photocopier, a screenshot, or a colleague's odd
+    monitor — and a Persian reader should not have to translate the one word on
+    screen that says which way the trade goes.
     """
 
     def __init__(self, parent=None):
@@ -176,9 +179,9 @@ class DirectionBadge(QLabel):
 
     def set(self, direction: int) -> None:
         if direction > 0:
-            text, colour, wash = "LONG", PALETTE.long, PALETTE.long_wash
+            text, colour, wash = t("dir.long"), PALETTE.long, PALETTE.long_wash
         elif direction < 0:
-            text, colour, wash = "SHORT", PALETTE.short, PALETTE.short_wash
+            text, colour, wash = t("dir.short"), PALETTE.short, PALETTE.short_wash
         else:
             text, colour, wash = "—", PALETTE.ink_faint, "transparent"
         self.setText(text)

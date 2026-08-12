@@ -265,6 +265,49 @@ class TestScannerView(unittest.TestCase):
         self.assertFalse(view.grab().isNull())
         self.assertEqual(set(view._rows), {"EURUSD", "XAUUSD"})
 
+    def test_a_repeated_symbol_keeps_the_higher_ranked_entry(self):
+        """Rows are keyed by symbol. A duplicate must not overwrite the better
+        one with whichever happened to arrive last."""
+        from alikhande.app.engine import EngineSnapshot, SymbolView
+        from alikhande.config import AppConfig
+        from alikhande.core.enums import Direction, SetupType
+        from alikhande.core.models import SignalCandidate, SymbolSnapshot, TradePlan
+        from alikhande.ui.views.scanner import ScannerView
+
+        def make(score: float, valid: bool) -> SymbolView:
+            return SymbolView(
+                requested="EURUSD",
+                symbol="EURUSD",
+                resolved=True,
+                snapshot=SymbolSnapshot(symbol="EURUSD", digits=5),
+                signal=SignalCandidate(
+                    symbol="EURUSD",
+                    direction=Direction.LONG,
+                    setup=SetupType.TREND_PULLBACK,
+                    preferred_entry=1.10,
+                    stop_loss=1.095,
+                    take_profit=1.11,
+                    long_score=score,
+                    rule_version="test",
+                ),
+                plan=TradePlan(
+                    symbol="EURUSD",
+                    direction=Direction.LONG,
+                    entry=1.10,
+                    stop_loss=1.095,
+                    take_profit=1.11,
+                    valid=valid,
+                    validation_codes=[] if valid else ["RR_BELOW_MINIMUM"],
+                ),
+            )
+
+        view = ScannerView(AppConfig())
+        view.update_snapshot(
+            EngineSnapshot(symbols=[make(20.0, valid=False), make(95.0, valid=True)])
+        )
+        self.assertEqual(view._order, ["EURUSD"])
+        self.assertTrue(view._opportunities["EURUSD"].tradable)
+
     def test_an_empty_snapshot_shows_the_empty_state_not_a_blank_panel(self):
         from alikhande.app.engine import EngineSnapshot
         from alikhande.config import AppConfig

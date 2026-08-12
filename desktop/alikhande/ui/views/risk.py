@@ -315,7 +315,12 @@ class RiskView(QWidget):
             bounded = position.stop_loss > 0
             cells = [
                 (position.symbol, None, True, False),
-                ("LONG" if long else "SHORT", PALETTE.long if long else PALETTE.short, False, False),
+                (
+                    t("dir.long") if long else t("dir.short"),
+                    PALETTE.long if long else PALETTE.short,
+                    False,
+                    False,
+                ),
                 (f"{position.volume:.2f}", None, True, True),
                 (f"{position.price_open:.5f}", None, True, True),
                 (
