@@ -1,5 +1,85 @@
 # Changelog
 
+## Desktop 2.1.0 — The Scanner screen
+
+The application now opens on an answer rather than a dashboard. Ranked
+opportunities on the left, the chart and the reasoning beside them, and a
+percentage against each symbol — with the discipline that makes a percentage
+safe to show.
+
+### Added
+
+- **An evidence layer with three tiers** (`core/evidence.py`). A displayed
+  number is `MEASURED` (≥30 resolved trades — a real rate, with its 95%
+  interval), `PROVISIONAL` (8–29 — the interval only, headline withheld), or
+  `UNMEASURED` (the rule score, in grey, labelled *not a probability*). The
+  request was "show me the percentage"; the constraint has been "a rule score
+  is not a probability" since v1.1.0. Both are satisfiable, but only by saying
+  out loud which one is on screen.
+
+- **Expectancy in R as the ranking key, not win rate.** 70% at 0.5R loses
+  money; 40% at 3R makes money. Rows sort on `p · RR − (1 − p)` computed from
+  the **Wilson lower bound**, so a 60% rate over n=200 outranks 65% over n=31 —
+  ranking on the point estimate systematically promotes the smallest sample.
+  The break-even rate `1 / (1 + RR)` is shown beside RR, because "needs 29%,
+  measuring 62%" is checkable and "62%" is not.
+
+- **Provenance on every rate.** Outcomes carry the run kind they came from and
+  the row says *from backtest* / *from live-demo* / *mixed*. A win rate whose
+  source is hidden is how a backtest ends up quoted as live performance.
+
+- **`alikhande calibrate`.** Seeds the evidence base by replaying history into
+  the database the application reads, under a `REPLAY` run. Solves a real
+  chicken-and-egg problem: the 30-sample floor is correct, and it means a fresh
+  install shows NO DATA everywhere for weeks. Re-running *replaces* the previous
+  calibration — appending would double the sample behind every rate while
+  describing the same trades twice.
+
+- **Presets: Default, Auto, Manual** (`profiles.py`). Auto tightens where the
+  measured record justifies it and **has no mechanism for loosening** — an
+  adaptive system that can relax its own thresholds will relax them all the way
+  down after a good run. All three clamp to the same policy floors, enforced
+  where the config is built, so a hand-edited preferences file does not get past
+  them either.
+
+- **`ScanEngine.reconfigure`** applies a preset between passes, through the same
+  worker queue as every other operator intent. Refused outright while an
+  execution is unresolved or an intent is armed: rebuilding the execution engine
+  mid-flight would orphan a real order while the application forgot it existed.
+
+- **`tools/render_ui.py`** renders every view, in both themes and both
+  languages, offscreen. A design decision that survives a commit message and
+  dies on contact with a screenshot is one nobody checked.
+
+### Changed
+
+- **The theme is monochrome, in light and dark.** Surfaces, borders, text and
+  chrome are pure neutrals; the primary action is the inverse of the plane
+  (white on near-black, black on white). This is functional rather than
+  tasteful: the few coloured things left are the only things carrying meaning.
+  Candles are neutral too — an up bar is terrain, not a signal, and tinting
+  several hundred of them drowns out the zone, entry, stop and target. The rule
+  score's ramp went from saturated blue to grey, because a calibrated-looking
+  ramp makes a rule score look like a probability.
+- `PALETTE` is now a proxy onto the active palette, so a theme switch takes
+  effect without a restart and without touching the ~100 `PALETTE.x` reads in
+  the widget layer.
+- The nav badge moved from Signal to Scanner, and counts only setups **backed
+  by evidence** — inflating it with unmeasured ones is how a badge becomes
+  background noise.
+- The backtester now registers its run in the `runs` table. Without that row
+  every outcome it wrote reported unknown provenance.
+- The in-app Guide gained four sections, EN and FA: reading the percentage,
+  why EDGE matters more than win rate, where the numbers come from, and how the
+  presets clamp.
+
+### Not claimed
+
+Nothing here has been run on Windows or against a live terminal — this was
+built and tested on Linux, and PyInstaller does not cross-compile. The
+calibration ships synthetic bars: it proves the machinery end to end and says
+nothing whatever about this strategy's edge on real prices.
+
 ## Desktop 2.0.0 — Standalone
 
 The scanner as a Windows application running outside MetaTrader: its own

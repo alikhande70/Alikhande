@@ -26,9 +26,14 @@ from ..core.enums import RunMode
 
 @dataclass
 class Action:
-    kind: str  # arm | confirm | acknowledge | mode
+    kind: str  # arm | confirm | acknowledge | mode | configure
     payload: str = ""
     mode: RunMode = RunMode.ALERT_ONLY
+    # Carried only by ``configure``. Typed loosely so a settings change follows
+    # the same one-way queue as every other operator intent rather than
+    # reaching into the engine from the GUI thread — which is the rule this
+    # whole module exists to hold.
+    config: object = None
 
 
 class ScanWorker(QObject):
@@ -96,6 +101,11 @@ class ScanWorker(QObject):
                 reason = "" if ok else "NOT_AWAITING_REVIEW"
             elif action.kind == "mode":
                 ok, reason = self._engine.set_mode(action.mode, now)
+            elif action.kind == "configure":
+                if action.config is None:
+                    ok, reason = False, "NO_CONFIG"
+                else:
+                    ok, reason = self._engine.reconfigure(action.config, now)
             else:
                 ok, reason = False, f"UNKNOWN_ACTION({action.kind})"
 

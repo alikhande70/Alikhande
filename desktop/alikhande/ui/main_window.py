@@ -1,14 +1,17 @@
 """The application window.
 
-Composition only: it wires a gateway to an engine to a worker to five views, and
+Composition only: it wires a gateway to an engine to a worker to the views, and
 owns no scanner logic of its own. Everything it displays came from a snapshot
-the worker produced.
+the worker produced, and the ranking on the landing screen comes from
+``app.scanner`` rather than from a widget.
 
 The shell is a **left navigation rail** rather than a tab strip. Tabs imply peers
-of equal weight; these are not peers. The Dashboard is where the operator lives,
-Signal is where they go to check a claim, and Risk / Execution / Health are
-consulted. A rail gives the primary destination room to say so, and leaves space
-for a live count beside "Signals" so an opportunity is visible from any view.
+of equal weight; these are not peers. The Scanner is where the operator lives —
+it is the first thing on screen and answers the only question worth asking on
+launch — Signal is where they go to check a claim it made, and Risk / Execution
+/ Health are consulted. A rail gives the primary destination room to say so, and
+leaves space for a live count beside it so an opportunity is visible from any
+view.
 
 The one piece of judgement that lives here is the **real-account banner**. When
 the attached account is not a demo, a red bar takes the top of the window and
@@ -57,26 +60,42 @@ from ..core.journal import Journal
 from ..core.runtime import detect_runtime, persistence_plan
 from ..core.statistics import Statistics
 from ..version import VERSION
+from ..profiles import Overrides, Profile, configure
 from .components import NavItem, StatusChip, label
-from .theme import PALETTE, SPACE, stylesheet
+from .theme import PALETTE, SPACE, active_theme, set_theme, stylesheet
 from .views.dashboard import DashboardView
 from .views.execution import ExecutionView
 from .views.guide import GuideView
 from .views.health import HealthView
 from .views.risk import RiskView
+from .views.scanner import ScannerView
+from .views.settings import SettingsView
 from .views.signal import SignalView
 from .worker import Action, ScanWorker
 
 # Icon, translation key, tooltip key. The labels are looked up at render time
 # rather than stored, so switching language relabels the rail without a restart.
+#
+# Scanner leads because it is what the window opens on, and this order is the
+# order of the stack: index 0 is the landing screen. Everything after it is
+# somewhere you go to check a claim the scanner made.
 NAV = [
+    ("◎", "nav.scanner", "nav.scanner.tip"),
     ("◈", "nav.dashboard", "nav.dashboard.tip"),
-    ("◎", "nav.signal", "nav.signal.tip"),
+    ("◉", "nav.signal", "nav.signal.tip"),
     ("◔", "nav.risk", "nav.risk.tip"),
     ("◆", "nav.execution", "nav.execution.tip"),
     ("◇", "nav.health", "nav.health.tip"),
-    ("◈", "nav.guide", "nav.guide.tip"),
+    ("⚙", "nav.settings", "nav.settings.tip"),
+    ("?", "nav.guide", "nav.guide.tip"),
 ]
+
+# Referenced by name rather than as literals, because the two indices other
+# code jumps to both moved when Scanner was inserted, and a stale number opens
+# the wrong view without erroring.
+VIEW_SCANNER = 0
+VIEW_SIGNAL = 2
+VIEW_GUIDE = len(NAV) - 1
 
 
 def data_directory() -> Path:
@@ -102,9 +121,19 @@ class MainWindow(QMainWindow):
     def __init__(self, engine: ScanEngine, config: AppConfig, runtime, persistence, repositories):
         super().__init__()
         self._engine = engine
-        self._config = config
         self._repo = repositories
-        self._statistics = Statistics(repositories, config.statistics)
+
+        # The preset is restored before anything is built, because it decides
+        # the thresholds every view then renders against. Loading it afterwards
+        # would show one pass of the wrong numbers, which on a screen whose job
+        # is to be believed is worse than a slower start.
+        preferences = load_preferences(data_directory())
+        self._profile = Profile.parse(preferences.get("profile"))
+        self._overrides = Overrides.from_dict(preferences.get("overrides"))
+        self._config = configure(
+            config, self._profile, self._overrides, self._outcome_summary()
+        )
+        self._statistics = Statistics(repositories, self._config.statistics)
 
         self.setWindowTitle(f"Alikhande Scanner {VERSION}")
         self.resize(1560, 960)
@@ -138,10 +167,6 @@ class MainWindow(QMainWindow):
         shell.addWidget(container, 1)
         self.setCentralWidget(plane)
 
-        self.statusBar().setStyleSheet(
-            f"QStatusBar {{ background: {PALETTE.surface}; border-top: 1px solid "
-            f"{PALETTE.border}; color: {PALETTE.ink_muted}; }}"
-        )
         self.statusBar().showMessage(t("status.starting"))
 
         self._install_shortcuts()
@@ -149,13 +174,14 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ views
     def _build_views(self) -> None:
-        """Construct the five views and the guide, and wire their signals.
+        """Construct every view and wire its signals.
 
-        Separated from ``__init__`` so a language change can throw them away and
-        build them again. Rebuilding is the honest way to retranslate: threading
-        a ``retranslate()`` through every card title, table header and key-value
-        row means one forgotten label sits in the wrong language forever, and
-        the forgotten one is always the rarely-seen warning that matters most.
+        Separated from ``__init__`` so a language or theme change can throw
+        them away and build them again. Rebuilding is the honest way to
+        retranslate and re-skin: threading a ``retranslate()`` through every
+        card title, table header and key-value row means one forgotten label
+        sits in the wrong language forever, and the forgotten one is always the
+        rarely-seen warning that matters most.
 
         The views are pure renderers over a snapshot, so nothing is lost — the
         next scan pass repopulates them within one interval.
@@ -165,23 +191,36 @@ class MainWindow(QMainWindow):
             self._stack.removeWidget(widget)
             widget.deleteLater()
 
+        self._scanner = ScannerView(self._config)
         self._dashboard = DashboardView(self._config, self._statistics)
         self._signal = SignalView(self._config, self._statistics)
         self._risk = RiskView(self._config, self._repo)
         self._execution = ExecutionView(self._config)
         self._health = HealthView(self._config, self._runtime, self._persistence)
+        self._settings = SettingsView(
+            self._config,
+            self._profile,
+            self._overrides,
+            active_theme().name,
+            self._outcome_summary(),
+        )
         self._guide = GuideView()
 
         for view in (
+            self._scanner,
             self._dashboard,
             self._signal,
             self._risk,
             self._execution,
             self._health,
+            self._settings,
             self._guide,
         ):
             self._stack.addWidget(view)
 
+        self._scanner.symbol_activated.connect(self._focus_symbol)
+        self._settings.changed.connect(self._on_settings_changed)
+        self._settings.theme_changed.connect(self._on_theme_change)
         self._dashboard.symbol_activated.connect(self._focus_symbol)
         self._signal.arm_requested.connect(lambda s: self._post(Action("arm", s)))
         self._signal.confirm_requested.connect(lambda s: self._post(Action("confirm", s)))
@@ -344,6 +383,17 @@ class MainWindow(QMainWindow):
             self._mode.setItemText(index, t(key))
         self._mode.blockSignals(False)
 
+        # The picker has to agree with the language actually in force. It
+        # normally does, because it is what caused the change — but it is also
+        # the one control that can be out of step after the language is set
+        # from somewhere else, and a picker showing the wrong language is a
+        # small thing that makes the whole window look untrustworthy.
+        self._language.blockSignals(True)
+        index = self._language.findData(current().code)
+        if index >= 0:
+            self._language.setCurrentIndex(index)
+        self._language.blockSignals(False)
+
         selected = self._stack.currentIndex()
         selected_symbol = getattr(self._signal, "_symbol", "")
         self._build_views()
@@ -368,7 +418,7 @@ class MainWindow(QMainWindow):
                 lambda i=index: self._stack.setCurrentIndex(i),
             )
         QShortcut(QKeySequence("Ctrl+L"), self, self._cycle_language)
-        QShortcut(QKeySequence("F1"), self, lambda: self._stack.setCurrentIndex(len(NAV) - 1))
+        QShortcut(QKeySequence("F1"), self, lambda: self._stack.setCurrentIndex(VIEW_GUIDE))
         QShortcut(QKeySequence("Ctrl+F"), self, self._focus_picker)
         QShortcut(QKeySequence("Ctrl+Q"), self, self.close)
 
@@ -377,7 +427,7 @@ class MainWindow(QMainWindow):
         self._language.setCurrentIndex(nxt)
 
     def _focus_picker(self) -> None:
-        self._stack.setCurrentIndex(1)
+        self._stack.setCurrentIndex(VIEW_SIGNAL)
         self._signal._picker.setFocus()
 
     def _save_preferences(self) -> None:
@@ -385,6 +435,9 @@ class MainWindow(QMainWindow):
             data_directory(),
             {
                 "language": current().code,
+                "theme": active_theme().name,
+                "profile": self._profile.value,
+                "overrides": self._overrides.to_dict(),
                 "view": self._stack.currentIndex(),
                 "width": self.width(),
                 "height": self.height(),
@@ -408,7 +461,58 @@ class MainWindow(QMainWindow):
 
     def _focus_symbol(self, symbol: str) -> None:
         self._signal.select(symbol)
-        self._stack.setCurrentIndex(1)
+        self._stack.setCurrentIndex(VIEW_SIGNAL)
+
+    # -------------------------------------------------------------- preferences
+    def _outcome_summary(self) -> dict:
+        """The aggregate outcome record, or an empty dict with no database.
+
+        Auto reads this to decide whether to tighten. An empty dict is the
+        honest input on a fresh install, and ``profiles.auto_overrides``
+        answers it with the defaults — Auto's opinion on no evidence is the
+        same as Default's, which is the only defensible opinion to hold.
+        """
+        if self._repo is None or not getattr(self._repo, "ready", False):
+            return {}
+        return self._repo.outcome_summary()
+
+    def _on_settings_changed(self) -> None:
+        """Apply a preset change and push it to the engine.
+
+        The engine is reconfigured through the worker queue like every other
+        operator intent, so the swap happens between passes on the scan thread
+        rather than underneath one from the GUI thread. A refusal comes back
+        through ``_on_action_result`` and is shown; the views keep rendering
+        the values they were built with until the engine confirms.
+        """
+        self._profile = self._settings.profile()
+        self._overrides = self._settings.overrides()
+        self._config = configure(
+            self._config, self._profile, self._overrides, self._outcome_summary()
+        )
+        self._statistics = Statistics(self._repo, self._config.statistics)
+        self._post(Action("configure", config=self._config))
+        self._save_preferences()
+
+    def _on_theme_change(self, name: str) -> None:
+        """Switch palette, re-apply the stylesheet, rebuild the views.
+
+        The rebuild is not laziness. Qt stylesheets are strings evaluated when
+        applied, and every widget that painted itself with an inline
+        ``setStyleSheet`` — chips, badges, the banner — captured colours from
+        the old palette at construction. Re-applying the global sheet fixes the
+        first group and leaves the second untouched, which is a worse result
+        than either extreme.
+        """
+        set_theme(name)
+        application = QApplication.instance()
+        if application is not None:
+            application.setStyleSheet(stylesheet())
+        selected = self._stack.currentIndex()
+        self._build_views()
+        if 0 <= selected < self._stack.count():
+            self._stack.setCurrentIndex(selected)
+        self._save_preferences()
 
     def _on_mode_change(self, index: int) -> None:
         self._post(Action("mode", mode=self._mode.itemData(index)))
@@ -421,6 +525,7 @@ class MainWindow(QMainWindow):
                     "confirm": "Order submitted.",
                     "acknowledge": "Unresolved execution cleared.",
                     "mode": "Run mode changed.",
+                    "configure": t("set.applied"),
                 }.get(kind, "done"),
                 6000,
             )
@@ -472,6 +577,9 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- render
     def _on_snapshot(self, snapshot) -> None:
+        # Recorded so an offscreen render can wait for real data rather than
+        # screenshotting the loading state.
+        self._passes_seen = snapshot.passes
         account = snapshot.account
         live = snapshot.runtime.kind == RuntimeKind.LIVE
 
@@ -525,18 +633,21 @@ class MainWindow(QMainWindow):
             self._mode.setEnabled(True)
 
         # ---- nav badge -------------------------------------------------------
+        # On Scanner, not Signal: the badge answers "is there anything to look
+        # at", and the screen that answers it is the one it should point to.
         actionable = [
             v
             for v in snapshot.symbols
             if v.resolved and v.plan is not None and v.plan.valid and not v.news_blocks
         ]
-        self._nav_items[1].set_badge(len(actionable))
+        self._nav_items[VIEW_SCANNER].set_badge(len(actionable))
 
         # ---- views -----------------------------------------------------------
         evidence = 0
         if self._repo is not None and self._repo.ready:
             evidence = int(self._repo.outcome_summary()["total"])
 
+        self._scanner.update_snapshot(snapshot, self._repo)
         self._dashboard.update_view(snapshot, evidence)
         self._signal.update_view(snapshot)
 
@@ -622,13 +733,16 @@ def build_application(offline: bool = False):
 
     application = QApplication.instance() or QApplication(sys.argv)
     application.setApplicationName("Alikhande Scanner")
-    application.setStyleSheet(stylesheet())
-    application.setWindowIcon(_icon())
 
-    # Restore the operator's language BEFORE the window is built, so nothing is
-    # ever constructed with labels it immediately has to replace.
+    # Restore the operator's language and theme BEFORE the window is built, so
+    # nothing is ever constructed with labels or colours it immediately has to
+    # replace — and before the stylesheet, which reads the active palette.
     preferences = load_preferences(data_directory())
     set_language(preferences.get("language", "en"))
+    set_theme(preferences.get("theme", "dark"))
+
+    application.setStyleSheet(stylesheet())
+    application.setWindowIcon(_icon())
     application.setLayoutDirection(
         Qt.LayoutDirection.RightToLeft if is_rtl() else Qt.LayoutDirection.LeftToRight
     )

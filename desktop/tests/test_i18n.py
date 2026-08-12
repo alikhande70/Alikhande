@@ -62,7 +62,16 @@ class TestCatalogues(unittest.TestCase):
         Skips the ones that are legitimately identical in both — symbols,
         version-style values and the em-dash placeholder.
         """
-        allowed_identical = {"common.none", "common.probability"}
+        allowed_identical = {
+            "common.none",
+            "common.probability",
+            # Notation, not prose. "R:R", "n=48" and "+0.74R" are written the
+            # same way on a Persian trading desk as an English one, and
+            # translating them would make the column harder to read.
+            "scan.col.rr",
+            "scan.edge",
+            "scan.sample",
+        }
         persian = re.compile(r"[؀-ۿ]")
         for key, value in FA.items():
             if key in allowed_identical:

@@ -225,6 +225,48 @@ class ScanEngine:
         self._journal.info("MODE_CHANGED", "", f"run mode is now {mode.name}", now)
         return True, ""
 
+    def reconfigure(self, config: AppConfig, now: int) -> tuple[bool, str]:
+        """Swap in a new configuration between passes.
+
+        What gets rebuilt is deliberately narrow: scoring, risk planning, the
+        statistics gate and the account guard. The execution engine and the
+        arming state machine are **not** rebuilt, because they hold the
+        identity of an in-flight order and a live arming window — replacing
+        either mid-flight would orphan a real order in the terminal while the
+        application forgot it existed.
+
+        For the same reason a change is refused outright while an execution is
+        unresolved or an intent is armed. A refusal the operator can see and
+        retry is far better than a reconfiguration that lands halfway.
+
+        Symbols are not applied here: the resolved-symbol map, the structural
+        contexts and the spread trackers are all keyed on the set
+        ``initialize`` established. Changing that takes a restart, and the
+        settings view says so.
+        """
+        if self._execution.requires_manual_review():
+            return False, "EXECUTION_UNRESOLVED"
+        if self._arming.is_armed(now):
+            return False, "INTENT_ARMED"
+
+        # Symbols come from the running config rather than the incoming one, so
+        # a preset change cannot drop a symbol the engine already holds state
+        # for.
+        self._config = config.with_symbols(self._config.symbols)
+        self._signals = SignalEngine(self._config)
+        self._risk = RiskPlanner(self._config)
+        self._statistics = Statistics(self._repo, self._config.statistics)
+        self._account_guard = AccountRiskGuard(self._config.risk)
+        self._journal.info(
+            "CONFIG_CHANGED",
+            "",
+            f"threshold={self._config.scoring.score_threshold:.0f} "
+            f"rr={self._config.risk.minimum_risk_reward:.2f} "
+            f"risk={self._config.risk.risk_percent:.2f}",
+            now,
+        )
+        return True, ""
+
     # ---------------------------------------------------------------- startup
     def initialize(self, now: int) -> None:
         """Resolve symbols, load specs, restore state."""

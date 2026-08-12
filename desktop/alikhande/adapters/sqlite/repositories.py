@@ -375,6 +375,76 @@ class Repositories:
             return 0, 0
         return int(row["wins"] or 0), int(row["total"] or 0)
 
+    def purge_runs_of_kind(self, kind: str) -> int:
+        """Delete every run of ``kind`` and everything hanging off it.
+
+        Exists so calibration is *replaceable* rather than cumulative. Without
+        it, running the calibration twice would double the sample behind every
+        win rate — the numbers would keep improving in the operator's eyes
+        while describing the same trades counted repeatedly, which is the most
+        insidious way an evidence base can go wrong.
+
+        Deliberately scoped by run kind and never by "everything": a call that
+        could reach a LIVE run would be one typo away from erasing the only
+        records in this application that came from a real account.
+        """
+        if not self.ready:
+            return 0
+
+        signals = [
+            row["signal_id"]
+            for row in self._db.execute(
+                "SELECT s.signal_id AS signal_id FROM signals s"
+                " JOIN runs r ON r.run_id = s.run_id WHERE r.kind = ?",
+                (kind,),
+            ).fetchall()
+        ]
+        if signals:
+            marks = ",".join("?" * len(signals))
+            for table in ("outcomes", "signal_features", "trade_plans"):
+                self._db.connection.execute(
+                    f"DELETE FROM {table} WHERE signal_id IN ({marks})", signals
+                )
+            self._db.connection.execute(
+                f"DELETE FROM signals WHERE signal_id IN ({marks})", signals
+            )
+        self._db.execute("DELETE FROM runs WHERE kind = ?", (kind,))
+        self._db.commit()
+        return len(signals)
+
+    def outcome_provenance(
+        self, symbol: str, setup: int, rule_version: str
+    ) -> tuple[int, int, set[str]]:
+        """``(wins, total, run kinds)`` for this symbol, setup and rule version.
+
+        The same query as :meth:`outcome_counts` plus the set of run kinds the
+        counted outcomes came from. Kept separate rather than widening
+        ``outcome_counts``, because that method is the ``OutcomeCounter``
+        protocol the pure statistics layer depends on, and that protocol is
+        deliberately as narrow as it is.
+
+        The join to ``runs`` is a LEFT JOIN: a signal written with no run
+        attached has a null ``run_id``, and dropping those rows would silently
+        shrink a sample rather than label it. They come back as an unrecognised
+        kind, which :func:`core.evidence.provenance_of` maps to ``NONE`` —
+        unknown provenance, stated as such.
+        """
+        if not self.ready:
+            return 0, 0, set()
+        rows = self._db.execute(
+            "SELECT o.result AS result, r.kind AS kind"
+            " FROM outcomes o"
+            " JOIN signals s ON s.signal_id = o.signal_id"
+            " LEFT JOIN runs r ON r.run_id = s.run_id"
+            " WHERE s.symbol = ? AND s.setup = ? AND s.rule_version = ?"
+            "   AND o.result IN ('TP','SL')",
+            (symbol, setup, rule_version),
+        ).fetchall()
+
+        wins = sum(1 for row in rows if row["result"] == "TP")
+        kinds = {row["kind"] for row in rows if row["kind"]}
+        return wins, len(rows), kinds
+
     def outcome_summary(self, rule_version: str | None = None) -> dict[str, float]:
         """Aggregate statistics across every scorable outcome.
 

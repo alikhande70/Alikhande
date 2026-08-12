@@ -1,9 +1,11 @@
 """Command-line entry point.
 
-``python -m alikhande ui``        launch the desktop application
-``python -m alikhande backtest``  replay bars through the pipeline
-``python -m alikhande selftest``  run the test suite
-``python -m alikhande doctor``    report what this machine can and cannot do
+``python -m alikhande ui``         launch the desktop application
+``python -m alikhande calibrate``  seed the evidence base so the scanner can
+                                   show measured rates on first launch
+``python -m alikhande backtest``   replay bars through the pipeline
+``python -m alikhande selftest``   run the test suite
+``python -m alikhande doctor``     report what this machine can and cannot do
 
 ``doctor`` exists because the single most confusing failure mode of this
 application is environmental: MetaTrader not running, Algo Trading off, or the
@@ -104,6 +106,98 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
     if database is not None:
         database.close()
         print(f"\n  database written to {args.database}")
+    return 0
+
+
+def _cmd_calibrate(args: argparse.Namespace) -> int:
+    """Seed the application's evidence base from a replay.
+
+    Solves a real chicken-and-egg problem. The scanner refuses to display a win
+    rate below thirty resolved trades, which is correct — but it means a fresh
+    install shows "NO DATA" against every symbol until the operator has run a
+    demo account for weeks. That is a long time to spend looking at a screen
+    that cannot tell you anything.
+
+    This fills the gap without lying about where the numbers came from. The
+    outcomes land in the database the application actually reads, under a run
+    whose kind is ``REPLAY``, and every rate derived from them is labelled
+    "from backtest" in the UI. The separation that used to be enforced by
+    writing to a different file is now enforced by the query and stated on
+    screen — which is strictly more use, because a file the operator never
+    opens cannot tell them anything either.
+
+    Re-running replaces the previous calibration rather than adding to it.
+    Appending would double the sample behind every rate while describing the
+    same trades twice, and the numbers would appear to be improving.
+    """
+    from .adapters.offline.gateway import OfflineGateway
+    from .adapters.sqlite.database import Database
+    from .adapters.sqlite.repositories import Repositories
+    from .app.backtest import BACKTEST_TIMEFRAMES, Backtester
+    from .config import AppConfig
+    from .core.enums import RuntimeKind
+    from .core.models import RuntimeContext
+    from .core.runtime import persistence_plan
+    from .ui.main_window import data_directory
+    from .version import RULE_VERSION
+
+    symbols = tuple(s.strip() for s in args.symbols.split(",") if s.strip())
+    config = AppConfig().with_symbols(symbols)
+
+    target = args.database
+    if not target:
+        # The live database, because that is the one the application opens.
+        # Writing anywhere else would produce a calibration nothing reads.
+        target = persistence_plan(
+            RuntimeContext(kind=RuntimeKind.LIVE, is_production=True), data_directory()
+        ).filename
+
+    print(f"  database    {target}")
+    print(f"  symbols     {', '.join(symbols)}")
+
+    database = Database()
+    database.open(target)
+    repositories = Repositories(database)
+
+    removed = repositories.purge_runs_of_kind(RuntimeKind.REPLAY.name)
+    if removed:
+        print(f"  replaced    {removed:,} signals from the previous calibration")
+
+    gateway = OfflineGateway(equity=args.equity)
+    gateway.load_synthetic(symbols, BACKTEST_TIMEFRAMES, args.h4_bars, seed=args.seed)
+
+    result = Backtester(config).run(
+        gateway,
+        symbols,
+        warmup_bars=args.warmup,
+        max_steps=args.steps,
+        data_source="synthetic",
+        repositories=repositories,
+    )
+    print(result.report(min_sample=config.statistics.min_outcome_sample))
+
+    print("  per symbol and setup, as the scanner will read it:")
+    floor = config.statistics.min_outcome_sample
+    for symbol in symbols:
+        for setup in range(1, 5):
+            wins, total, kinds = repositories.outcome_provenance(
+                symbol, setup, RULE_VERSION
+            )
+            if not total:
+                continue
+            tier = "MEASURED" if total >= floor else "too few"
+            print(
+                f"    {symbol:<8} setup {setup}   {wins:>4}/{total:<5}"
+                f" {tier:<9} {', '.join(sorted(kinds)) or 'unknown'}"
+            )
+
+    database.close()
+    print(
+        "\n  These are SYNTHETIC bars. They prove the machinery end to end and\n"
+        "  say nothing whatever about this strategy's edge on real prices.\n"
+        "  For evidence worth acting on, export real history from MetaTrader\n"
+        "  and run:  alikhande backtest --data <folder> --database <file>"
+    )
     return 0
 
 
@@ -220,6 +314,24 @@ def main(argv: list[str] | None = None) -> int:
     back.add_argument("--equity", type=float, default=10_000.0)
     back.add_argument("--database", default="", help="write results to this SQLite file")
     back.set_defaults(func=_cmd_backtest)
+
+    calibrate = sub.add_parser(
+        "calibrate",
+        help="seed the application's evidence base from a replay, so the "
+        "scanner has measured (backtest-sourced) rates on first launch",
+    )
+    calibrate.add_argument("--symbols", default="XAUUSD,EURUSD,GBPUSD,USDJPY")
+    calibrate.add_argument("--h4-bars", type=int, default=4000, dest="h4_bars")
+    calibrate.add_argument("--warmup", type=int, default=10_000)
+    calibrate.add_argument("--steps", type=int, default=None)
+    calibrate.add_argument("--seed", type=int, default=20260806)
+    calibrate.add_argument("--equity", type=float, default=10_000.0)
+    calibrate.add_argument(
+        "--database",
+        default="",
+        help="write here instead of the application's own database",
+    )
+    calibrate.set_defaults(func=_cmd_calibrate)
 
     doctor = sub.add_parser("doctor", help="report what this machine can do")
     doctor.set_defaults(func=_cmd_doctor)

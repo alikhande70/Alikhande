@@ -99,17 +99,27 @@ class StatusChip(QFrame):
     separate them, and a bare coloured dot tells a colour-blind reader nothing.
     """
 
-    TONES = {
-        "good": (PALETTE.good, PALETTE.good_wash),
-        "warning": (PALETTE.warning, PALETTE.warning_wash),
-        "serious": (PALETTE.serious, PALETTE.serious_wash),
-        "critical": (PALETTE.critical, PALETTE.critical_wash),
-        # Unknown is the absence of a status, not a mild one. It gets neutral
-        # grey so it can never read as "slightly concerning" when the truth is
-        # "nobody looked".
-        "unknown": (PALETTE.unknown, PALETTE.unknown_wash),
-        "neutral": (PALETTE.ink_secondary, "transparent"),
-    }
+    @staticmethod
+    def tones() -> dict[str, tuple[str, str]]:
+        """Built per call, not held as a class constant.
+
+        ``PALETTE`` is a proxy onto whichever theme is active, so a dict built
+        once at class-definition time would freeze the colours of whichever
+        theme happened to be loaded when this module was first imported — and
+        every chip would keep the old palette across a light/dark switch while
+        the rest of the window changed.
+        """
+        return {
+            "good": (PALETTE.good, PALETTE.good_wash),
+            "warning": (PALETTE.warning, PALETTE.warning_wash),
+            "serious": (PALETTE.serious, PALETTE.serious_wash),
+            "critical": (PALETTE.critical, PALETTE.critical_wash),
+            # Unknown is the absence of a status, not a mild one. It gets
+            # neutral grey so it can never read as "slightly concerning" when
+            # the truth is "nobody looked".
+            "unknown": (PALETTE.unknown, PALETTE.unknown_wash),
+            "neutral": (PALETTE.ink_secondary, "transparent"),
+        }
 
     def __init__(self, icon: str, text: str, tone: str = "neutral", parent=None):
         super().__init__(parent)
@@ -131,7 +141,8 @@ class StatusChip(QFrame):
         self.set(icon, text, tone)
 
     def set(self, icon: str, text: str, tone: str = "neutral") -> None:
-        colour, wash = self.TONES.get(tone, self.TONES["neutral"])
+        tones = self.tones()
+        colour, wash = tones.get(tone, tones["neutral"])
         self._icon.setText(icon)
         self._text.setText(text)
         self._icon.setStyleSheet(

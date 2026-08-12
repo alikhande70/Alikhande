@@ -202,15 +202,140 @@ GUIDE: list[tuple[str, str, str, str, str]] = [
         "فرض‌شده با برچسب [ASSUMED] مشخص است تا بتوانید بررسی‌اش کنید.",
     ),
     (
+        "◎",
+        "Reading the Scanner — what the percentage means",
+        "The Scanner is the first screen, and its WIN RATE column shows one of "
+        "three different things. The chip under each symbol says which.\n\n"
+        "MEASURED — at least 30 resolved trades for this symbol and setup. A "
+        "real percentage, shown with its 95% interval. This is the only case in "
+        "which a headline percentage appears anywhere in the application.\n\n"
+        "PROVISIONAL — between 8 and 29 resolved trades. The interval is shown "
+        "and the headline percentage is withheld, because \"67%\" over nine "
+        "trades reads as precision it does not have.\n\n"
+        "NO DATA — fewer than 8. The rule score is shown instead, in grey, "
+        "labelled \"not a probability\". A score of 98 means the setup matched "
+        "the rules strongly. It does not mean it wins 98% of the time, and "
+        "nothing in this application will ever imply that it does.\n\n"
+        "Rows are ordered by what is KNOWN, not by what scores highest: a "
+        "measured 58% ranks above an unmeasured 95.",
+        "خواندن اسکنر — این درصد یعنی چه",
+        "اسکنر اولین صفحه است و ستون «نرخ برد» آن یکی از سه چیز متفاوت را نشان "
+        "می‌دهد. برچسب زیر هر نماد می‌گوید کدام‌یک.\n\n"
+        "اندازه‌گیری‌شده — دست‌کم ۳۰ معاملهٔ بسته‌شده برای این نماد و این ستاپ. "
+        "یک درصد واقعی، همراه با بازهٔ اطمینان ۹۵٪. این تنها حالتی است که در کل "
+        "برنامه یک درصد به‌عنوان عدد اصلی نمایش داده می‌شود.\n\n"
+        "موقت — بین ۸ تا ۲۹ معاملهٔ بسته‌شده. فقط بازه نشان داده می‌شود و عدد "
+        "اصلی نمایش داده نمی‌شود، چون «۶۷٪» روی ۹ معامله دقتی را القا می‌کند که "
+        "وجود ندارد.\n\n"
+        "بدون داده — کمتر از ۸. به‌جایش امتیاز قانون با رنگ خاکستری و برچسب "
+        "«یک احتمال نیست» نشان داده می‌شود. امتیاز ۹۸ یعنی ستاپ قوی با قوانین "
+        "منطبق شده. یعنی ۹۸٪ مواقع برنده نیست، و هیچ‌جای این برنامه چنین چیزی "
+        "را القا نخواهد کرد.\n\n"
+        "ردیف‌ها بر اساس آنچه **دانسته** است مرتب می‌شوند، نه بالاترین امتیاز: "
+        "یک ۵۸٪ اندازه‌گیری‌شده بالاتر از یک ۹۵ اندازه‌گیری‌نشده می‌نشیند.",
+    ),
+    (
+        "◔",
+        "Why the EDGE column matters more than the win rate",
+        "A 70% win rate at 0.5 reward-to-risk loses money. A 40% win rate at 3.0 "
+        "makes money. Win rate alone cannot tell you whether to take a trade; "
+        "the quantity that decides it is expectancy per trade, in R:\n\n"
+        "    expectancy = win rate × RR − (1 − win rate)\n\n"
+        "which is positive exactly when the win rate beats 1 ÷ (1 + RR). That "
+        "break-even figure sits under the RR column, so you can check the claim "
+        "yourself: \"needs 29%, measuring 62%\" is something you can verify, and "
+        "\"62%\" on its own is not.\n\n"
+        "EDGE is computed from the CONSERVATIVE end of the interval, not the "
+        "middle. A setup only counts as backed by evidence when even the "
+        "pessimistic reading of its sample still pays.",
+        "چرا ستون «برتری» از نرخ برد مهم‌تر است",
+        "نرخ برد ۷۰٪ با نسبت ریسک به ریوارد ۰٫۵ ضرر می‌دهد. نرخ برد ۴۰٪ با نسبت "
+        "۳٫۰ سود می‌دهد. نرخ برد به‌تنهایی نمی‌تواند بگوید وارد معامله بشوید یا "
+        "نه؛ کمیتی که تصمیم می‌گیرد، امید ریاضی هر معامله بر حسب R است:\n\n"
+        "    امید ریاضی = نرخ برد × RR − (۱ − نرخ برد)\n\n"
+        "که دقیقاً وقتی مثبت است که نرخ برد از ۱ ÷ (۱ + RR) بیشتر باشد. آن عدد "
+        "سربه‌سر زیر ستون RR نوشته شده تا خودتان ادعا را بسنجید: «۲۹٪ لازم است و "
+        "۶۲٪ اندازه‌گیری شده» چیزی است که می‌شود راستی‌آزمایی کرد؛ «۶۲٪» به‌تنهایی نه.\n\n"
+        "«برتری» از سرِ **محافظه‌کارانهٔ** بازه محاسبه می‌شود، نه از وسط آن. یک "
+        "ستاپ فقط وقتی «متکی بر شواهد» شمرده می‌شود که حتی خوانش بدبینانهٔ "
+        "نمونه‌اش هم سودده باشد.",
+    ),
+    (
+        "◇",
+        "Where the numbers come from",
+        "Every rate carries its source, on the right of its row: from backtest, "
+        "from live/demo, or mixed. This matters more than it looks. A result "
+        "replayed over synthetic bars and a result from a demo account are both "
+        "real records of something, but they are not evidence about the same "
+        "thing, and a win rate whose source is hidden is how a backtest ends up "
+        "quoted as live performance.\n\n"
+        "On a fresh install everything reads NO DATA, because nothing has been "
+        "traded yet. To start with measured numbers, run:\n\n"
+        "    python -m alikhande calibrate\n\n"
+        "which replays history into the same database the application reads and "
+        "labels everything it writes \"from backtest\". Running it again "
+        "REPLACES the previous calibration rather than adding to it — appending "
+        "would double the sample behind every rate while describing the same "
+        "trades twice.",
+        "این اعداد از کجا می‌آیند",
+        "هر نرخ، منبعش را در سمت خودش حمل می‌کند: از بک‌تست، از زنده/دمو، یا "
+        "ترکیبی. این مهم‌تر از آن است که به نظر می‌رسد. نتیجه‌ای که روی داده‌های "
+        "مصنوعی بازپخش شده و نتیجه‌ای که از حساب دمو آمده، هر دو سابقهٔ واقعیِ "
+        "چیزی هستند — ولی شواهدی دربارهٔ یک چیز نیستند، و نرخ بردی که منبعش "
+        "پنهان باشد دقیقاً همان‌جایی است که یک بک‌تست به‌عنوان عملکرد زنده نقل "
+        "می‌شود.\n\n"
+        "روی نصب تازه همه‌چیز «بدون داده» است، چون هنوز چیزی معامله نشده. برای "
+        "شروع با اعداد اندازه‌گیری‌شده این را اجرا کنید:\n\n"
+        "    python -m alikhande calibrate\n\n"
+        "که تاریخچه را در همان پایگاه‌دادهٔ برنامه بازپخش می‌کند و هر چه می‌نویسد "
+        "را «از بک‌تست» برچسب می‌زند. اجرای دوباره‌اش کالیبراسیون قبلی را "
+        "**جایگزین** می‌کند نه اینکه به آن اضافه کند — افزودن، نمونهٔ پشت هر نرخ "
+        "را دو برابر می‌کرد در حالی که همان معاملات را دو بار توصیف می‌کند.",
+    ),
+    (
+        "⚙",
+        "Presets — Default, Auto and Manual",
+        "Default is the shipped values. None of them has been validated against "
+        "your broker; the Health tab lists every one as [ASSUMED] or [POLICY]. "
+        "Default is not \"the right settings\", it is the honest starting point.\n\n"
+        "Auto starts from Default and tightens where the measured record "
+        "justifies it — if recorded expectancy over a meaningful sample is "
+        "negative, the scanner becomes more selective. It has no mechanism for "
+        "becoming LESS selective. That is deliberate: an adaptive system that "
+        "can relax its own thresholds will eventually relax them all the way "
+        "down after a good run.\n\n"
+        "Manual is your values, kept across restarts.\n\n"
+        "All three are clamped to the same floors. Risk per trade cannot exceed "
+        "its ceiling, reward-to-risk cannot go below 2.0, and the 30-sample "
+        "minimum before a rate is displayed can be raised but never lowered. "
+        "Those floors are enforced where the configuration is built, so editing "
+        "the preferences file by hand does not get past them either.",
+        "پیش‌تنظیم‌ها — پیش‌فرض، خودکار و دستی",
+        "«پیش‌فرض» مقادیر ارسالی است. هیچ‌کدام روی بروکر شما اعتبارسنجی نشده؛ تب "
+        "سلامت همه را با برچسب [ASSUMED] یا [POLICY] فهرست می‌کند. پیش‌فرض یعنی "
+        "«تنظیمات درست» نیست، بلکه نقطهٔ شروعِ صادقانه است.\n\n"
+        "«خودکار» از پیش‌فرض شروع می‌کند و هرجا سابقهٔ اندازه‌گیری‌شده اجازه بدهد "
+        "سخت‌گیرتر می‌شود — اگر امید ریاضی ثبت‌شده روی نمونه‌ای معنادار منفی باشد، "
+        "اسکنر انتخابی‌تر می‌شود. هیچ سازوکاری برای **کم‌سخت‌گیرتر** شدن ندارد. "
+        "این عمدی است: سیستمی که بتواند آستانه‌های خودش را شل کند، بعد از یک دورهٔ "
+        "خوب سرانجام آن‌ها را تا ته شل می‌کند.\n\n"
+        "«دستی» مقادیر خودتان است که بین اجراها حفظ می‌شود.\n\n"
+        "هر سه به یک کف مشترک محدود می‌شوند. ریسک هر معامله از سقفش بالاتر "
+        "نمی‌رود، نسبت ریسک به ریوارد زیر ۲٫۰ نمی‌آید، و حداقل ۳۰ نمونه پیش از "
+        "نمایش نرخ را می‌شود بالا برد ولی هرگز پایین نه. این کف‌ها همان‌جایی که "
+        "پیکربندی ساخته می‌شود اعمال می‌شوند، پس ویرایش دستی فایل تنظیمات هم از "
+        "آن‌ها عبور نمی‌کند.",
+    ),
+    (
         "◈",
         "Keyboard",
-        "Ctrl+1 … Ctrl+6 — jump to a view\n"
+        "Ctrl+1 … Ctrl+8 — jump to a view\n"
         "Ctrl+L — switch language\n"
         "Ctrl+F — focus the symbol picker on the Signal view\n"
         "F1 — open this guide\n"
         "Ctrl+Q — quit",
         "میان‌برهای صفحه‌کلید",
-        "‏Ctrl+1 تا Ctrl+6 — پرش به یک نما\n"
+        "‏Ctrl+1 تا Ctrl+8 — پرش به یک نما\n"
         "‏Ctrl+L — تعویض زبان\n"
         "‏Ctrl+F — فوکوس روی انتخابگر نماد در نمای سیگنال\n"
         "‏F1 — باز کردن همین راهنما\n"

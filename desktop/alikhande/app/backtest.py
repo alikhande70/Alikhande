@@ -209,6 +209,25 @@ class Backtester:
             symbols=symbols,
         )
 
+        # Register the run before any signal references it. Without this row
+        # the signals persist with a ``run_id`` that joins to nothing, and
+        # every outcome derived from them reports unknown provenance — which
+        # is precisely the "is this number from a backtest or from a demo
+        # account?" question the runs table exists to answer.
+        if repositories is not None:
+            repositories.start_run(
+                run_id=result.run_id,
+                kind=RuntimeKind.REPLAY.name,
+                is_production=False,
+                app_version=VERSION,
+                rule_version=RULE_VERSION,
+                scoring_version=SCORING_VERSION,
+                parameter_hash=fnv1a(self._config.parameter_fingerprint_source()),
+                symbols=",".join(symbols),
+                started_at=int(time.time()),
+                note=f"backtest over {data_source}",
+            )
+
         base_tf = Timeframe.M5
         total = min(gateway.series_length(s, base_tf) for s in symbols)
         end = total if max_steps is None else min(total, warmup_bars + max_steps)
@@ -338,6 +357,8 @@ class Backtester:
             result.bars_replayed += 1
 
         result.elapsed_seconds = time.perf_counter() - started
+        if repositories is not None:
+            repositories.finish_run(result.run_id, int(time.time()))
         return result
 
     def _required(self, timeframe: Timeframe) -> int:

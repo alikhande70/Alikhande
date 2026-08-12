@@ -30,6 +30,7 @@ from PySide6.QtWidgets import QWidget
 
 from ..core.enums import Direction, ZoneType
 from ..core.models import Bar, Zone
+from ..i18n import fmt_count, t
 from .theme import PALETTE, TYPE
 
 
@@ -191,10 +192,11 @@ class PriceChart(QWidget):
         for index, bar in enumerate(self._bars):
             x = plot.left() + slot * (index + 0.5)
             rising = bar.close >= bar.open
-            # Direction here is "up or down bar", not long/short. It reuses the
-            # same two hues because it is the same kind of question, and nothing
-            # else on this chart claims those colours.
-            colour = QColor(PALETTE.long if rising else PALETTE.short)
+            # Candles are neutral. An up bar and a down bar are not a signal —
+            # they are the terrain the signal sits on — and tinting several
+            # hundred of them drowns out the four things on this chart that do
+            # carry meaning: the zone, the entry, the stop and the target.
+            colour = QColor(PALETTE.candle_up if rising else PALETTE.candle_down)
 
             painter.setPen(QPen(colour, 1))
             painter.drawLine(
@@ -240,12 +242,12 @@ class PriceChart(QWidget):
         painter.drawText(
             QRectF(plot.left(), plot.bottom() + 3, plot.width(), 14),
             int(Qt.AlignmentFlag.AlignLeft),
-            self._title or f"last {count} bars",
+            self._title or t("chart.bars", count=fmt_count(count)),
         )
         painter.drawText(
             QRectF(plot.left(), plot.bottom() + 3, plot.width(), 14),
             int(Qt.AlignmentFlag.AlignRight),
-            "supply / demand zones shaded",
+            t("chart.zones"),
         )
         painter.end()
 
@@ -306,7 +308,7 @@ class Sparkline(QWidget):
 
         rising = self._values[-1] >= self._values[0]
         painter.setPen(
-            QPen(QColor(PALETTE.long if rising else PALETTE.short), 1.6)
+            QPen(QColor(PALETTE.ink_secondary if rising else PALETTE.ink_faint), 1.6)
         )
         painter.drawPath(path)
         painter.end()

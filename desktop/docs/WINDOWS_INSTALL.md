@@ -51,6 +51,31 @@ powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
 Running from source is worth knowing about: you do not have to build an `.exe`
 at all. `python -m alikhande` gives you the same application.
 
+### First launch — why everything says NO DATA
+
+The Scanner refuses to show a win rate until it has at least 30 resolved trades
+for that symbol and setup. That floor is deliberate, and on a fresh install it
+means every row reads **NO DATA** with a rule score in grey beside it.
+
+To start with measured numbers:
+
+```powershell
+cd desktop
+python -m alikhande calibrate
+```
+
+That replays history into the same database the application reads and labels
+everything it writes **from backtest**, which is what every row will then say.
+Running it again *replaces* the previous calibration rather than adding to it.
+
+The bars it ships are synthetic. They prove the whole pipeline end to end and
+say nothing about this strategy's edge on real prices. For evidence worth
+acting on, export real history from MetaTrader (Ctrl+S on a chart) and run:
+
+```powershell
+python -m alikhande backtest --data <folder> --database <file>
+```
+
 ### Connecting to a broker
 
 The app runs fully offline out of the box — the UI, the analysis engines and
@@ -136,6 +161,33 @@ powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
 
 این نکته ارزش دانستن دارد: لازم نیست حتماً فایل اجرایی بسازید. دستور
 `python -m alikhande` دقیقاً همان برنامه را اجرا می‌کند.
+
+### اولین اجرا — چرا همه‌جا نوشته «بدون داده»
+
+اسکنر تا وقتی دست‌کم ۳۰ معاملهٔ بسته‌شده برای آن نماد و آن ستاپ نداشته باشد،
+نرخ برد نشان نمی‌دهد. این کف عمدی است، و روی نصب تازه یعنی همهٔ ردیف‌ها
+**بدون داده** می‌خوانند و کنارشان امتیاز قانون به رنگ خاکستری می‌آید.
+
+برای شروع با اعداد اندازه‌گیری‌شده:
+
+```powershell
+cd desktop
+python -m alikhande calibrate
+```
+
+این دستور تاریخچه را در همان پایگاه‌داده‌ای که برنامه می‌خواند بازپخش می‌کند و
+هر چه می‌نویسد را **از بک‌تست** برچسب می‌زند — همان چیزی که بعداً در هر ردیف
+خواهید دید. اجرای دوباره‌اش کالیبراسیون قبلی را جایگزین می‌کند، نه اینکه به آن
+اضافه کند.
+
+داده‌هایی که همراه دارد مصنوعی هستند. کل مسیر را سرتاسر اثبات می‌کنند و
+هیچ چیزی دربارهٔ برتری این استراتژی روی قیمت‌های واقعی نمی‌گویند. برای شواهدی
+که ارزش عمل‌کردن داشته باشد، تاریخچهٔ واقعی را از متاتریدر خروجی بگیرید
+(‏Ctrl+S روی چارت) و این را اجرا کنید:
+
+```powershell
+python -m alikhande backtest --data <folder> --database <file>
+```
 
 ### اتصال به بروکر
 
