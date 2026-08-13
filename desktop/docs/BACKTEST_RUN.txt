@@ -1,0 +1,53 @@
+========================================================================
+  Alikhande Scanner Desktop 2.0.0 — backtest report
+========================================================================
+  run id           CC690423
+  data source      synthetic
+  symbols          EURUSD, XAUUSD
+  bars replayed    95,600
+  wall clock       810.48s
+  rule version     RULE-2.0.0-PY
+  scoring version  SCORE-2.0.0-PY
+
+  PIPELINE
+    evaluations            191,200
+    candidates             172,752
+    confirmed signals      6,931
+    plans built            1,247
+    refused by risk/sizing 0
+    setups: RESISTANCE_REJECTION=5, SUPPORT_REJECTION=7, TREND_PULLBACK=6919
+    top refusals:
+      164,130  NO_CONFIRMED_SETUP
+      11,459  OPPOSING_ZONE_BEFORE_2R
+         852  H4_H1_CONFLICT_SHORT
+         744  H4_H1_CONFLICT_LONG
+          58  SPREAD_OR_QUOTE_BLOCK
+
+  OUTCOMES
+    resolved trades  1,247
+    wins / losses    924 / 323
+    win rate         74.1%
+    95% Wilson       [71.6%, 76.5%]
+    total R          +1525.00
+    expectancy       +1.223 R / trade
+    max drawdown     7.00 R
+
+  WHAT THIS DOES AND DOES NOT ESTABLISH
+    * 1247 resolved trades clears the 30-sample floor,
+      but sample size alone does not make a result out-of-sample.
+    * DATA IS SYNTHETIC. These bars came from a seeded generator, not
+      from a broker. Every number above describes whether the software
+      works. NONE of it is evidence about any real market, and no
+      profitability claim may be drawn from it.
+    * The generator's trend component is a SUM OF SINE WAVES, so its
+      price series is autocorrelated by construction — the next move is
+      genuinely predictable from the last one in a way no market is.
+      A trend-pullback strategy will therefore score far better here
+      than on real data. TREAT A HIGH WIN RATE ON THIS DATA AS A SIGN
+      THE PIPELINE RUNS, NOT AS A SIGN THE STRATEGY WORKS.
+    * Fills are resolved at bar resolution. A bar touching both the stop
+      and the target is scored as a STOP, since tick order is unknowable.
+    * No commission, swap or slippage model beyond the configured spread.
+========================================================================
+
+  database written to /tmp/claude-0/-home-user-Alikhande/297bf0b4-9bee-5b8e-b5ca-0204092e98a5/scratchpad/bt2.sqlite
