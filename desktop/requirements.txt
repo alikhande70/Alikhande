@@ -1,0 +1,14 @@
+# Runtime dependencies for Alikhande Scanner Desktop.
+#
+# The pure core (analysis, risk, execution logic, backtest) needs NOTHING from
+# this file — it runs on the standard library alone, which is what lets the
+# whole test suite execute anywhere.
+
+# The desktop UI.
+PySide6>=6.6,<7
+
+# Live broker access. Windows-only: the package talks to a running MetaTrader 5
+# terminal over local IPC, and MetaQuotes publishes no other supported path.
+# The marker keeps `pip install -r` working on Linux/macOS, where the app still
+# runs offline and backtests normally.
+MetaTrader5>=5.0.45 ; sys_platform == "win32"
