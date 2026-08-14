@@ -31,6 +31,7 @@ from dataclasses import dataclass
 
 from ..config import AppConfig
 from .enums import Direction, ExecState, RunMode
+from .environment import Environment, capabilities
 from .hashing import fnv1a64
 from .journal import Journal
 from .models import (
@@ -119,6 +120,7 @@ class ExecutionEngine:
         config: AppConfig | None = None,
         journal: Journal | None = None,
         ledger: DealLedger | None = None,
+        environment: str = Environment.DEMO,
     ) -> None:
         self._config = config or AppConfig()
         self._journal = journal or Journal()
@@ -127,6 +129,25 @@ class ExecutionEngine:
         self._magic = self._config.execution.magic
         self._current = ExecutionRecord(state=ExecState.IDLE)
         self._save = None
+        # Defaults to DEMO because that is what this build has always been: the
+        # one environment where a send is reachable at all. Declaring it makes
+        # the other two express their refusal structurally rather than by
+        # happening not to be configured for trading.
+        self._environment = Environment.parse(environment)
+
+    @property
+    def environment(self) -> str:
+        return self._environment
+
+    def set_environment(self, environment: str) -> str:
+        """Re-declare the environment. Returns the value actually adopted.
+
+        There is no path here that can make a locked environment sendable —
+        :func:`send_refusal` recomputes the lock from the name on every submit,
+        so this setter cannot leave a stale permission behind.
+        """
+        self._environment = Environment.parse(environment)
+        return self._environment
 
     def set_persistence(self, save_callable) -> None:
         """Attach the repository writer. Optional: an offline session persists
@@ -201,6 +222,16 @@ class ExecutionEngine:
         * ``DEMO_CONFIRM`` — sends, demo accounts only, and only after the
           caller has already consumed an armed intent.
         """
+        # The declared environment is consulted before anything else, because
+        # it is the one refusal that does not depend on the broker telling the
+        # truth. Every other check below reads something the terminal reported
+        # — the account's demo flag, the symbol's specification — and a session
+        # whose terminal was switched underneath it can be lied to. This one
+        # reads only what the operator declared.
+        caps = capabilities(self._environment)
+        if not caps.may_use(mode):
+            return False, f"MODE_NOT_AVAILABLE_IN_{caps.environment}"
+
         if mode == RunMode.ALERT_ONLY:
             return False, "ALERT_ONLY_MODE"
 
@@ -252,6 +283,26 @@ class ExecutionEngine:
                 now,
             )
             return True, "SHADOW_MODE"
+
+        # The last gate before the only line in this application that can move
+        # money. Recomputed from the environment name here rather than reusing
+        # the `caps` read at the top of the method: between the two the plan
+        # went through preflight, which touches the gateway, and a check whose
+        # answer was cached before that is a check of a stale world. It costs a
+        # dataclass construction and it is the cheapest thing on this path.
+        lock = capabilities(self._environment).send_lock
+        if lock:
+            self._current.state = ExecState.CANCELLED
+            self._current.terminal = True
+            self._current.message = lock
+            self._persist(now)
+            self._journal.error(
+                lock,
+                plan.symbol,
+                f"execution refused: environment {self._environment} cannot send orders",
+                now,
+            )
+            return False, lock
 
         # Persist the intent BEFORE sending. If the app dies between here and
         # the reply, restart recovery still finds the record.

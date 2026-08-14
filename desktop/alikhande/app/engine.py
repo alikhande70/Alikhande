@@ -31,6 +31,7 @@ from ..core.enums import (
     SpreadState,
     Timeframe,
 )
+from ..core.environment import Environment, account_verdict, capabilities, send_refusal
 from ..core.execution import ExecutionEngine
 from ..core.features import extract as extract_features
 from ..core.guards import AccountRiskGuard, TradeGuards
@@ -107,6 +108,20 @@ class EngineSnapshot:
     passes: int = 0
     last_pass_ms: float = 0.0
 
+    # ---- environment -------------------------------------------------------
+    # Carried on the snapshot rather than read from the engine by the UI, so
+    # what is drawn on screen is the environment the pass actually ran under.
+    # Reading it live would let a switch mid-pass paint a production banner
+    # over demo results.
+    environment: str = Environment.DEMO
+    #: ``good`` / ``warning`` / ``critical`` / ``unknown`` — does the attached
+    #: account match the declared environment?
+    account_severity: str = "unknown"
+    account_code: str = "ACCOUNT_UNKNOWN"
+    #: Empty when an order could be sent; a reason code otherwise. The UI shows
+    #: this verbatim rather than deciding for itself whether sending is possible.
+    send_lock: str = ""
+
 
 class ScanEngine:
     def __init__(
@@ -119,6 +134,7 @@ class ScanEngine:
         repositories=None,
         calendar: CalendarGate | None = None,
         run_id: str = "",
+        environment: str = Environment.DEMO,
     ) -> None:
         self._gateway = gateway
         self._config = config or AppConfig()
@@ -126,6 +142,7 @@ class ScanEngine:
         self._journal = journal or Journal()
         self._repo = repositories
         self._run_id = run_id
+        self._environment = Environment.parse(environment)
 
         self._signals = SignalEngine(self._config)
         self._risk = RiskPlanner(self._config)
@@ -133,7 +150,9 @@ class ScanEngine:
         self._guards = TradeGuards()
         self._account_guard = AccountRiskGuard(self._config.risk)
         self._arming = IntentArming(self._config.execution, self._journal)
-        self._execution = ExecutionEngine(self._config, self._journal)
+        self._execution = ExecutionEngine(
+            self._config, self._journal, environment=self._environment
+        )
         self._calendar = calendar or CalendarGate(None, self._config.news, self._journal)
         self._outcomes = OutcomeTracker()
 
@@ -207,7 +226,17 @@ class ScanEngine:
         A mode that can send is refused unless the account is demo and
         persistence exists. Refusing here rather than at submit time means the
         UI can never present an armed control that would fail on the click.
+
+        The environment is consulted first and separately. It refuses on what
+        was *declared* rather than on what the terminal reported, so a
+        production session cannot select a sending mode even in the case the
+        account checks below cannot see — a broker misreporting the demo flag,
+        or a terminal relogged into a different account mid-session.
         """
+        caps = capabilities(self._environment)
+        if not caps.may_use(mode):
+            return False, f"MODE_NOT_AVAILABLE_IN_{caps.environment}"
+
         if mode != RunMode.ALERT_ONLY:
             account = self._safe_account()
             if account is None:
@@ -365,6 +394,12 @@ class ScanEngine:
 
         intent = self._arming.current
         current = self._execution.current
+        # ``None`` rather than a default of False: an account nobody could read
+        # must render as "unknown", never as "not demo", which would paint a
+        # critical mismatch banner over a merely unreachable terminal.
+        severity, account_code = account_verdict(
+            self._environment, account.is_demo if account is not None else None
+        )
         return EngineSnapshot(
             now=now,
             connected=self._safe_connected(),
@@ -383,6 +418,10 @@ class ScanEngine:
             news_blind=self._calendar.is_news_blind,
             passes=self._passes,
             last_pass_ms=(_time.perf_counter() - started) * 1000.0,
+            environment=self._environment,
+            account_severity=severity,
+            account_code=account_code,
+            send_lock=send_refusal(self._environment, self._mode),
         )
 
     def _safe_connected(self) -> bool:

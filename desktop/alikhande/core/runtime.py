@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .enums import RuntimeKind
+from .environment import Environment, capabilities
 from .hashing import fnv1a
 from .models import RuntimeContext
 
@@ -105,4 +106,53 @@ def persistence_plan(context: RuntimeContext, data_dir: Path) -> PersistencePlan
         required=False,
         filename="",
         rationale="an offline session observes nothing and has no evidence to store",
+    )
+
+
+def environment_plan(
+    environment: str, data_dir: Path, *, session_identity: str = "", connected: bool = True
+) -> PersistencePlan:
+    """Where a **declared environment's** evidence lives.
+
+    :func:`persistence_plan` routes by what the plumbing turned out to be.
+    This routes by what the operator declared, and the two must not be merged:
+    a production session and a demo session are both ``RuntimeKind.LIVE`` and
+    would land in the same file, which is precisely the contamination the
+    original routing exists to prevent — one file holding a demo account's
+    outcomes and a real account's rehearsal, with no way to separate them
+    afterwards.
+
+    Backtest keeps the per-session suffix, because replays are run repeatedly
+    and each is evidence about its own parameters. Demo and production do not:
+    their whole value is accumulating across sessions, and a new file per
+    launch would reset the sample every morning.
+    """
+    caps = capabilities(environment)
+
+    if caps.environment == Environment.BACKTEST:
+        suffix = session_identity or fnv1a("replay")
+        return PersistencePlan(
+            enabled=True,
+            required=False,
+            filename=str(data_dir / f"{caps.database_stem}_{suffix}.sqlite"),
+            rationale="isolated replay history",
+        )
+
+    if not connected:
+        # A demo or production environment with no terminal has observed
+        # nothing. Writing an empty session into the accumulating history adds
+        # a run record that says only "the app was open", which later reads as
+        # a gap in the evidence rather than as an absence of it.
+        return PersistencePlan(
+            enabled=False,
+            required=False,
+            filename="",
+            rationale="no terminal attached; this session observed nothing",
+        )
+
+    return PersistencePlan(
+        enabled=True,
+        required=caps.persistence_required,
+        filename=str(data_dir / f"{caps.database_stem}.sqlite"),
+        rationale=f"{caps.environment.lower()} history",
     )
