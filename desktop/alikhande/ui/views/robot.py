@@ -41,7 +41,7 @@ from ...core.robot import AUTO_EXECUTE_LOCK, HoldReason, RobotPolicy, RobotState
 from ...i18n import code as code_text
 from ...i18n import fmt_count, t
 from ..components import Card, EmptyState, KeyValue, StatusChip, label
-from ..theme import PALETTE, SPACE, TYPE, severity_colour
+from ..theme import PALETTE, SPACE, severity_colour
 
 #: Robot state to (chip icon, translation key, severity). Every state has an
 #: icon and a word, so the colour is never the only channel.

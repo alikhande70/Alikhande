@@ -72,10 +72,9 @@ from ..core.journal import Journal
 from ..core.dataquality import DataQualityMonitor
 from ..core.environment import Environment
 from ..core.notifications import NotificationRouter, Urgency
-from ..core.order_errors import ErrorTally
 from ..core.recovery import SessionLedger, SessionRecord
 from ..core.robot import Robot, RobotPolicy, minute_of_day
-from ..core.runtime import detect_runtime, environment_plan, persistence_plan
+from ..core.runtime import detect_runtime, environment_plan
 from ..core.supervision import ConnectionSupervisor, Probe
 from ..core.statistics import Statistics
 from ..version import VERSION
@@ -168,7 +167,6 @@ class MainWindow(QMainWindow):
         self._quality = DataQualityMonitor()
         self._notifications = NotificationRouter(minimum_urgency=Urgency.NOTABLE)
         self._robot = Robot(RobotPolicy(**(preferences.get("robot") or {})))
-        self._errors = ErrorTally()
 
         # The session ledger is opened here rather than at first pass, so a
         # crash during startup is still recorded as one.
@@ -226,6 +224,7 @@ class MainWindow(QMainWindow):
 
         self._install_shortcuts()
         self._start_worker()
+        self._report_recovery()
 
     # ------------------------------------------------------------------ views
     def _build_views(self) -> None:
@@ -359,9 +358,7 @@ class MainWindow(QMainWindow):
                 "STALLED": "link.stalled",
                 "DISCONNECTED": "link.disconnected",
             }[state.name]
-            self._notifications.notify(
-                subject, self._supervisor.health.detail, now=snapshot.now
-            )
+            self._notify(subject, self._supervisor.health.detail, snapshot.now)
 
     def _record_quality(self, snapshot) -> None:
         """Grade each symbol's series from what the pass already carried.
@@ -417,14 +414,91 @@ class MainWindow(QMainWindow):
         )
 
         for subject, detail in decision.notify:
-            self._notifications.notify(subject, detail, now=snapshot.now)
+            self._notify(subject, detail, snapshot.now)
 
-        # The robot asked for a backup; it does not take one itself, because
-        # deciding and acting are kept apart so the decision stays testable.
+        # The robot decides; the app acts. That split is what keeps the robot
+        # testable — but it only means anything if something on this side
+        # actually carries the decisions out. For a while nothing did, so
+        # `auto_reconnect` and `auto_disarm` were two checkboxes that changed
+        # nothing at all.
         if decision.backup and self._persistence.enabled:
             self._run_backup(quiet=True)
 
+        if decision.reconnect and self._supervisor.should_reconnect(snapshot.now):
+            # Routed through the action queue because re-attaching must happen
+            # on the worker thread, and gated by the supervisor's backoff so a
+            # terminal that is down stays asked politely rather than every pass.
+            self._supervisor.record_attempt(snapshot.now, succeeded=False)
+            self._post(Action("reconnect"))
+
+        if decision.disarm:
+            self._post(Action("disarm", "ROBOT_STALE_INTENT"))
+
         self._robot_view.update_view(decision.status)
+
+    def _now(self) -> int:
+        """Broker server time when there is one, local time otherwise.
+
+        Only used for events raised outside a scan pass — a backup taken from a
+        button, the recovery verdict at launch. Anything inside a pass uses the
+        snapshot's clock, which is the broker's.
+        """
+        import time as _time
+
+        return self._engine.server_time(int(_time.time()))
+
+    def _report_recovery(self) -> None:
+        """Say what happened to the previous session.
+
+        This was computed at startup and then thrown away, which meant the
+        entire recovery subsystem — crash detection, the in-flight flag, the
+        distinction between "the app died" and "the app died holding an order"
+        — produced a value nobody ever saw.
+
+        A crash holding an unresolved execution is the one case that interrupts
+        with a dialog rather than a status line. The submit gate is already
+        shut and will stay shut across restarts; the operator needs to know why
+        nothing will send before they go looking for a broken scanner.
+        """
+        verdict = self._recovery
+        if verdict.quiet:
+            return
+
+        detail = t(f"recovery.{verdict.code.lower()}")
+        if verdict.detail:
+            detail = f"{detail} ({verdict.detail})"
+
+        self._notify("session.crash_recovered", detail, self._now())
+
+        if verdict.severity == "critical":
+            QMessageBox.warning(self, t("recovery.title"), detail)
+
+    def _notify(self, subject: str, detail: str, now: int) -> None:
+        """Raise a notification and put it somewhere a human will find it.
+
+        The router applies the policy — urgency, per-subject throttling — and
+        used to be the end of the line: nothing consumed what survived it, so
+        every notification in the application was a value assigned to a deque
+        and forgotten.
+
+        Two destinations now, and both are deliberate. The **journal** because
+        it is persisted, searchable and already on screen, so a notification
+        raised at three in the morning is still readable at nine. The **status
+        bar** for anything at WARNING or above, because a row in a list nobody
+        has opened is not an alert.
+        """
+        notification = self._notifications.notify(subject, detail, now=now)
+        if notification is None:
+            return
+
+        message = f'{t(notification.title_key)}{f" — {detail}" if detail else ""}'
+        if notification.urgency >= Urgency.WARNING:
+            self._engine.journal.warn(subject.upper(), "", message, now)
+            # 8 seconds: long enough to read, short enough that it does not sit
+            # over the pass counter for the rest of the session.
+            self.statusBar().showMessage(message, 8000)
+        else:
+            self._engine.journal.info(subject.upper(), "", message, now)
 
     # -------------------------------------------------------- operator actions
     def _on_robot_policy(self, policy) -> None:
@@ -447,14 +521,14 @@ class MainWindow(QMainWindow):
                 t("ops.backup.ok", path=result.path), "good"
             )
             if not quiet:
-                self._notifications.notify("backup.written", result.path, now=0)
+                self._notify("backup.written", result.path, self._now())
         else:
             self._operations.set_recovery_status(
                 t("ops.backup.failed", error=result.error), "critical"
             )
             # Always notified, quiet or not. A scheduled backup that silently
             # failed for three weeks is the exact situation backups exist for.
-            self._notifications.notify("backup.failed", result.error, now=0)
+            self._notify("backup.failed", result.error, self._now())
         self._operations.set_backups(list_backups(folder))
 
     def _run_restore(self, path: str) -> None:
@@ -482,7 +556,7 @@ class MainWindow(QMainWindow):
             link=self._supervisor.health,
             quality=self._quality.symbols(),
             sessions=self._sessions.history(),
-            errors=self._errors,
+            errors=self._engine.execution.errors,
             account=self._engine.account_snapshot(),
             journal_entries=self._engine.journal.recent(200),
         )
@@ -558,8 +632,10 @@ class MainWindow(QMainWindow):
         self._language_label = label(t("shell.language"), "CardTitle")
         column.addWidget(self._language_label)
         self._language = QComboBox()
-        for code, language in LANGUAGES.items():
-            self._language.addItem(language.name, code)
+        # Not `code`: that name is the translator imported at module scope, and
+        # shadowing it here would silently break any later call in this method.
+        for language_code, language in LANGUAGES.items():
+            self._language.addItem(language.name, language_code)
         self._language.setCurrentIndex(self._language.findData(current().code))
         self._language.currentIndexChanged.connect(self._on_language_change)
         column.addWidget(self._language)

@@ -30,9 +30,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..config import AppConfig
-from .enums import Direction, ExecState, RunMode
+from .enums import ExecState, RunMode
 from .environment import Environment, capabilities
 from .hashing import fnv1a64
+from .order_errors import ErrorTally
 from .journal import Journal
 from .models import (
     DEAL_ENTRY_OUT,
@@ -129,6 +130,11 @@ class ExecutionEngine:
         self._magic = self._config.execution.magic
         self._current = ExecutionRecord(state=ExecState.IDLE)
         self._save = None
+        # The retcode tally lives here because this is where retcodes arrive.
+        # It used to live on the window, fed by nothing, so the whole taxonomy
+        # was dead code and every diagnostics bundle reported zero order errors
+        # no matter how many the broker had refused.
+        self._errors = ErrorTally()
         # Defaults to DEMO because that is what this build has always been: the
         # one environment where a send is reachable at all. Declaring it makes
         # the other two express their refusal structurally rather than by
@@ -138,6 +144,16 @@ class ExecutionEngine:
     @property
     def environment(self) -> str:
         return self._environment
+
+    @property
+    def errors(self) -> ErrorTally:
+        """Order rejections this session, grouped by what they were.
+
+        A single rejection is noise; a pattern is a diagnosis. Forty
+        INVALID_STOPS against one symbol says its stops level changed, and no
+        per-order message ever says that.
+        """
+        return self._errors
 
     def set_environment(self, environment: str) -> str:
         """Re-declare the environment. Returns the value actually adopted.
@@ -317,9 +333,25 @@ class ExecutionEngine:
         self._current.message = outcome.comment
 
         if not outcome.ok:
+            # Classify before deciding what to say. The retcode alone is not a
+            # diagnosis, and the three categories want three different
+            # responses: a REQUEST error is this application's own defect, a
+            # MARKET error is the market, an ACCOUNT error is the operator's.
+            error = self._errors.record(outcome.retcode, plan.symbol, now)
             self._current.state = ExecState.REJECTED
             self._current.terminal = True
-            reason = f"ORDER_SEND_FAILED({outcome.retcode}:{outcome.comment})"
+            if error.is_defect:
+                # Never presented as something to retry. Sending the identical
+                # malformed request again fails identically forever, and saying
+                # so converts an infinite loop into one clear failure.
+                self._journal.error(
+                    "ORDER_REQUEST_DEFECT",
+                    plan.symbol,
+                    f"{error.code}: this build constructed an order the broker "
+                    f"rejected as invalid — not retryable",
+                    now,
+                )
+            reason = f"ORDER_SEND_FAILED({error.code}:{outcome.comment})"
         elif outcome.retcode == RETCODE_DONE:
             self._current.state = ExecState.FILLED
             reason = ""

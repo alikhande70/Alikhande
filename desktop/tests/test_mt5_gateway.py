@@ -20,11 +20,9 @@ from alikhande.core.models import OrderRequest
 from alikhande.core.ports import GatewayError
 
 try:  # pragma: no cover - depends on how the suite was launched
-    from .fake_mt5 import ORDER_FILLING_FOK, ORDER_FILLING_IOC, ORDER_FILLING_RETURN
-    from .fake_mt5 import FakeAccount, FakeMT5, install, uninstall
+    from .fake_mt5 import ORDER_FILLING_IOC, FakeAccount, FakeMT5, install, uninstall
 except ImportError:  # pragma: no cover
-    from fake_mt5 import ORDER_FILLING_FOK, ORDER_FILLING_IOC, ORDER_FILLING_RETURN
-    from fake_mt5 import FakeAccount, FakeMT5, install, uninstall
+    from fake_mt5 import ORDER_FILLING_IOC, FakeAccount, FakeMT5, install, uninstall
 
 
 class MT5TestCase(unittest.TestCase):

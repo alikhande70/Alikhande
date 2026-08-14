@@ -26,7 +26,7 @@ from ..core.enums import RunMode
 
 @dataclass
 class Action:
-    kind: str  # arm | confirm | acknowledge | mode | configure
+    kind: str  # arm | confirm | acknowledge | reconnect | disarm | mode | configure
     payload: str = ""
     mode: RunMode = RunMode.ALERT_ONLY
     # Carried only by ``configure``. Typed loosely so a settings change follows
@@ -136,6 +136,15 @@ class ScanWorker(QObject):
             elif action.kind == "acknowledge":
                 ok = self._engine.acknowledge_unresolved(action.payload, now)
                 reason = "" if ok else "NOT_AWAITING_REVIEW"
+            elif action.kind == "reconnect":
+                # Must happen on this thread: the gateway stamps an owner on
+                # attach. That is why it arrives through the queue rather than
+                # being called from wherever noticed the link was down.
+                ok = self.reconnect()
+                reason = "" if ok else "RECONNECT_FAILED"
+            elif action.kind == "disarm":
+                self._engine.arming.disarm(action.payload or "ROBOT", now)
+                ok, reason = True, ""
             elif action.kind == "mode":
                 ok, reason = self._engine.set_mode(action.mode, now)
             elif action.kind == "configure":

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import sys
 import types
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # ---- the constants the adapter reads -------------------------------------
 TRADE_ACTION_DEAL = 1

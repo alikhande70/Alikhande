@@ -289,7 +289,10 @@ class MT5Gateway:
         equally plausible candidates mean the operator must say which, because
         sizing a trade against the wrong contract is not a recoverable mistake.
         """
-        mt5 = self._require_owner_thread()
+        # Called for the guard, not the handle: resolution goes through
+        # `symbols()` below, which re-checks anyway. Dropping the call would
+        # remove the thread assertion from this entry point.
+        self._require_owner_thread()
         available = self.symbols()
         if requested in available:
             self._select(requested)

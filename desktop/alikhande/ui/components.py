@@ -20,7 +20,7 @@ Two components carry rules from the visualization method rather than taste:
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QFrame,
@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (
 from ..i18n import fmt_count, t
 from .icons import paint_dot, paint_icon
 from .motion import Pulse, Tween
-from .theme import PALETTE, RADIUS, RADIUS_PILL, SPACE, TYPE, score_ramp
+from .theme import PALETTE, RADIUS_PILL, SPACE, TYPE, score_ramp
 
 
 # --------------------------------------------------------------------- text
