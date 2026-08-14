@@ -49,7 +49,7 @@ from ...config import AppConfig
 from ...core.evidence import EvidenceTier, Opportunity, Provenance
 from ...i18n import code as code_text
 from ...i18n import fmt_count, fmt_percent, fmt_price, t
-from ..charts import PriceChart, TradeLevels
+from ..charts import PriceChart, Sparkline, TradeLevels
 from ..components import Card, DirectionBadge, EmptyState, KeyValue, label
 from ..theme import PALETTE, RADIUS, RADIUS_PILL, SPACE, TYPE, score_ramp
 
@@ -68,6 +68,34 @@ PROVENANCE_KEY = {
     Provenance.MIXED: "scan.prov.mixed",
     Provenance.NONE: "scan.prov.none",
 }
+
+
+#: Column widths, shared by ``OpportunityRow`` and the header above it so the
+#: two cannot drift apart. Sized to fit the list pane without a horizontal
+#: scrollbar: the previous set totalled ~800px inside a 620px pane, which
+#: silently clipped the status column off the right-hand edge.
+COL_SYMBOL = 84
+COL_SIDE = 62
+SPARKLINE_WIDTH = 76
+COL_RATE = 92
+COL_RR = 54
+COL_EDGE = 62
+COL_STATUS = 84
+
+#: What the columns above add up to, plus margins and inter-column spacing.
+#: Set as the list pane's minimum so the splitter refuses to squeeze the row
+#: narrower than its contents — previously the pane could shrink freely and the
+#: status column was simply cut off the right-hand edge with no scrollbar to
+#: reveal it, which reads as a missing column rather than a clipped one.
+ROW_MIN_WIDTH = (
+    SPACE.lg + SPACE.md
+    + COL_SYMBOL + COL_SIDE + SPARKLINE_WIDTH + 3 * SPACE.md
+    + COL_RATE + COL_RR + COL_EDGE + 3 * SPACE.sm
+    + COL_STATUS
+)
+
+#: The column header's position in the list layout. Rows are inserted after it.
+HEADER_INDEX = 0
 
 
 def _rate(value: float) -> str:
@@ -97,11 +125,20 @@ class OpportunityRow(QFrame):
         self._tier = label("", "Micro")
         identity.addWidget(self._symbol)
         identity.addWidget(self._tier)
+        self._symbol.setFixedWidth(COL_SYMBOL)
         row.addLayout(identity)
-        row.addSpacing(SPACE.sm)
 
         self._side = DirectionBadge()
+        self._side.setFixedWidth(COL_SIDE)
         row.addWidget(self._side)
+
+        # A trace of where this symbol has actually been. The three number
+        # columns are frequently empty — a rate needs thirty resolved outcomes
+        # before it says anything — and a row of em-dashes tells the operator
+        # nothing at all. The sparkline is never empty, so every row carries at
+        # least one fact, and it is the fact a trader looks at first anyway.
+        self._spark = Sparkline(width=SPARKLINE_WIDTH)
+        row.addWidget(self._spark)
         row.addStretch(1)
 
         # ---- the three numbers, each with its own caption
@@ -110,20 +147,23 @@ class OpportunityRow(QFrame):
         # are the long strings ("95% interval 71%-79%", "break-even 25%") and a
         # column sized to its headline clips them to "nterval 71%-79%" and
         # "k-even 25%", which read as data rather than as truncation.
-        self._rate_value, self._rate_caption, rate_block = self._number_block(width=132)
-        self._rr_value, self._rr_caption, rr_block = self._number_block(width=96)
-        self._edge_value, self._edge_caption, edge_block = self._number_block(width=96)
+        self._rate_value, self._rate_caption, rate_block = self._number_block(width=COL_RATE)
+        self._rr_value, self._rr_caption, rr_block = self._number_block(width=COL_RR)
+        self._edge_value, self._edge_caption, edge_block = self._number_block(width=COL_EDGE)
         for block in (rate_block, rr_block, edge_block):
             row.addLayout(block)
             row.addSpacing(SPACE.sm)
 
         self._status = label("", "Caption")
-        self._status.setFixedWidth(124)
+        self._status.setFixedWidth(COL_STATUS)
         self._status.setWordWrap(True)
         self._status.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         row.addWidget(self._status)
+
+    def set_trend(self, closes: list[float]) -> None:
+        self._spark.set(closes)
 
     def _number_block(self, width: int = 132):
         """A figure with a caption under it, right-aligned as a column.
@@ -280,9 +320,13 @@ class ScannerView(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_list())
         splitter.addWidget(self._build_detail())
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        splitter.setSizes([760, 560])
+        # The chart side takes the larger share. The list answers "which
+        # symbol"; the chart is where the claim the list just made gets
+        # checked, and a claim you cannot inspect is one you have to take on
+        # faith — which is the opposite of what this screen is for.
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([640, 644])
         outer.addWidget(splitter, 1)
 
     # --------------------------------------------------------------- toolbar
@@ -349,12 +393,63 @@ class ScannerView(QWidget):
         self._list.setContentsMargins(0, 0, SPACE.sm, 0)
         self._list.setSpacing(SPACE.sm)
 
+        self._list.addWidget(self._build_column_headers())
+
         self._empty = EmptyState("◎", t("scan.empty.title"), t("scan.empty.body"))
         self._list.addWidget(self._empty)
         self._list.addStretch(1)
 
         self._scroll.setWidget(holder)
+        self._scroll.setMinimumWidth(ROW_MIN_WIDTH + SPACE.xl)
         return self._scroll
+
+    def _build_column_headers(self) -> QWidget:
+        """Name the columns.
+
+        Their absence was the single worst thing about this screen. Eight rows
+        of right-aligned em-dashes under no heading do not read as "there is no
+        measured rate for this symbol yet" — they read as a rendering fault,
+        and the operator has no way to tell which of those it is. A header line
+        turns the same empty cells into an answer.
+
+        Built from the same widths as ``OpportunityRow`` so the two stay
+        aligned; a header that drifts from its columns is worse than none.
+        """
+        header = QWidget()
+        header.setObjectName("Content")
+        row = QHBoxLayout(header)
+        row.setContentsMargins(SPACE.lg, 0, SPACE.md, SPACE.xs)
+        row.setSpacing(SPACE.md)
+
+        symbol = label(t("scan.col.symbol"), "CardTitle")
+        symbol.setFixedWidth(COL_SYMBOL)
+        row.addWidget(symbol)
+
+        side = label(t("scan.col.side"), "CardTitle")
+        side.setFixedWidth(COL_SIDE)
+        row.addWidget(side)
+
+        trend = label(t("scan.col.trend"), "CardTitle")
+        trend.setFixedWidth(SPARKLINE_WIDTH)
+        row.addWidget(trend)
+        row.addStretch(1)
+
+        for key, width in (
+            ("scan.col.rate", COL_RATE),
+            ("scan.col.rr", COL_RR),
+            ("scan.col.edge", COL_EDGE),
+        ):
+            column = label(t(key), "CardTitle")
+            column.setFixedWidth(width)
+            column.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            row.addWidget(column)
+            row.addSpacing(SPACE.sm)
+
+        status = label(t("scan.col.status"), "CardTitle")
+        status.setFixedWidth(COL_STATUS)
+        status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(status)
+        return header
 
     # ---------------------------------------------------------------- detail
     def _build_detail(self) -> QWidget:
@@ -426,6 +521,9 @@ class ScannerView(QWidget):
                 self._rows[opportunity.symbol] = row
                 self._list.insertWidget(self._list.count() - 1, row)
             row.update_from(opportunity, self._config)
+            view = self._views.get(opportunity.symbol)
+            bars = getattr(view, "bars", None) if view is not None else None
+            row.set_trend([bar.close for bar in bars] if bars else [])
 
         self._actionable.setText(
             t("scan.actionable", count=fmt_count(len(scanner_app.actionable(ranked))))
@@ -462,10 +560,14 @@ class ScannerView(QWidget):
         visible = self._visible()
         shown = set(visible)
 
+        # Offset past the column header, which occupies index 0 and must stay
+        # there. Sorting into raw indices pushed it down by one place per
+        # re-sort, so after the first pass the headings sat under the rows they
+        # were naming.
         for index, symbol in enumerate(visible):
             row = self._rows.get(symbol)
             if row is not None:
-                self._list.insertWidget(index, row)
+                self._list.insertWidget(index + HEADER_INDEX + 1, row)
                 row.setVisible(True)
                 row.set_selected(symbol == self._selected)
 

@@ -3,25 +3,26 @@
 Tokens first, stylesheet second. Every colour, size and space in the UI comes
 from here, so a change is made once rather than hunted through widget code.
 
-## The system is monochrome, and that is a functional choice
+## What changed in 2.2, and why
 
-Surfaces, borders, text and every piece of chrome are pure neutrals. Nothing
-about a panel, a table, a button or a heading is coloured. What this buys is
-not tastefulness — it is that **the few coloured things left on screen are the
-only things carrying meaning**, so colour becomes a signal instead of
-decoration. An interface where the sidebar, the headings and the buttons are
-all tinted has spent its colour budget before the first warning appears.
+The previous system was strictly monochrome: every surface, border and control
+was a pure neutral, so that the few coloured things left on screen were the
+only ones carrying meaning. The reasoning was sound and it is kept. The result
+was not: with no elevation between them, a card and the window behind it were
+two greys a few points apart, nothing on screen sat in front of anything else,
+and an interface with no depth reads as unfinished rather than as restrained.
 
-Two palettes, same tokens. Dark is near-black rather than black (``#0D0D0D``):
-true black behind bright text produces halation that makes small type vibrate,
-and this application is mostly small type.
+So the discipline stays and the execution changes. Colour is still spent only
+on meaning. **Depth** is what carries structure now — five surface steps from
+the window plane to a raised popover, each with its own border, so hierarchy is
+visible without tinting anything.
 
-## Colour is assigned by job, and only three jobs qualify
+## Colour is assigned by job, and only four jobs qualify
 
 **Direction — LONG vs SHORT.** Carried primarily by an arrow and a word, never
-by hue alone. A low-chroma blue/amber pair backs them up so a column can be
-scanned at speed. Deliberately not green/red: green/red is spent below on
-permission, and a SHORT painted red reads as an error rather than a direction.
+by hue alone. A blue/amber pair backs them up so a column can be scanned at
+speed. Deliberately not green/red: green/red is spent below on permission, and
+a SHORT painted red reads as an error rather than a direction.
 
 **State — gates, guards, evidence tiers.** The fixed status palette. These four
 are *not* a categorical palette and do not pass a categorical validation, which
@@ -31,10 +32,19 @@ and a text label**, so hue never carries meaning on its own. ``StatusChip``
 enforces that by taking the icon and the label as required arguments.
 
 **Magnitude — rule score, realised R.** A *neutral* ramp for score, because a
-rule score is not a probability and a saturated blue-to-navy ramp makes it look
-like one reading off a calibrated instrument. Grey says "more of something"
-without claiming to say what. A diverging pair for realised R, where the sign
-genuinely is the message.
+rule score is not a probability and a saturated ramp makes it look like one
+reading off a calibrated instrument. Grey says "more of something" without
+claiming to say what. A diverging pair for realised R, where the sign genuinely
+is the message.
+
+**Interaction — and this one is new.** A single indigo, used for exactly four
+things: the active navigation indicator, the focus ring, the primary action,
+and a selected row. It is deliberately a hue no other job uses. Indigo, rather
+than a blue, because LONG is already a blue and the two would be confusable in
+peripheral vision — which is precisely where a focus ring and a direction
+column both get read.
+
+That is the whole colour budget. Nothing else on screen is tinted.
 
 ## Switching
 
@@ -46,8 +56,11 @@ its views — the same mechanism the language switch already uses.
 
 ## Type
 
-A real scale, because uniform 13px everywhere is what makes an interface read as
-a data dump: nothing is emphasised, so the eye has nowhere to land.
+A real scale with real weight contrast. Uniform 13px everywhere is what makes
+an interface read as a data dump: nothing is emphasised, so the eye has nowhere
+to land. Numbers that are meant to be compared down a column are set in the
+monospace face, because proportional digits in a price column do not align and
+a column that does not align cannot be scanned.
 """
 
 from __future__ import annotations
@@ -61,62 +74,71 @@ class Palette:
     dark: bool = True
 
     # ---- surfaces, furthest back to furthest forward --------------------
-    plane: str = "#0D0D0D"  # the window behind everything
-    surface: str = "#171717"  # cards
-    surface_high: str = "#212121"  # nested panels, inputs, table headers
-    surface_hover: str = "#2A2A2A"
-    border: str = "#262626"
-    border_strong: str = "#3A3A3A"
+    # Five steps, not two. Each is a real elevation the eye can order, and the
+    # cool cast (a few points of blue in every neutral) is what keeps a large
+    # dark field from reading as flat charcoal.
+    plane: str = "#080A0F"  # the window behind everything
+    surface: str = "#0E1117"  # cards
+    surface_high: str = "#151922"  # nested panels, inputs, table headers
+    surface_hover: str = "#1D222C"
+    surface_raised: str = "#242A36"  # popovers, tooltips, the thing on top
+    border: str = "#1B2029"
+    border_strong: str = "#2C3340"
 
     # ---- ink ------------------------------------------------------------
-    ink: str = "#ECECEC"
-    ink_secondary: str = "#B4B4B4"
-    ink_muted: str = "#8F8F8F"
-    ink_faint: str = "#6B6B6B"
+    ink: str = "#E9ECF2"
+    ink_secondary: str = "#AAB2C0"
+    ink_muted: str = "#7E8797"
+    ink_faint: str = "#5A6270"
 
     # ---- identity: direction (icon + word always accompany these) --------
-    long: str = "#5E97D6"
-    short: str = "#D08A4E"
-    long_wash: str = "rgba(94,151,214,0.12)"
-    short_wash: str = "rgba(208,138,78,0.12)"
+    long: str = "#4E9DE0"
+    short: str = "#DE9448"
+    long_wash: str = "rgba(78,157,224,0.13)"
+    short_wash: str = "rgba(222,148,72,0.13)"
 
-    # ---- interactive: the accent is the inverse of the plane -------------
-    # A white button on near-black, a black button on white. Exactly one
-    # primary action is visible at a time, and this makes it unmistakable
-    # without introducing a brand hue that would compete with the status
-    # colours for the operator's attention.
-    accent: str = "#ECECEC"
-    accent_hover: str = "#FFFFFF"
-    accent_ink: str = "#0D0D0D"
-    focus: str = "#8F8F8F"
+    # ---- interactive: one indigo, four uses -----------------------------
+    # Not a blue. LONG is a blue, and a focus ring and a direction column are
+    # both read peripherally, which is exactly where two blues merge.
+    accent: str = "#7D7AF0"
+    accent_hover: str = "#9491FF"
+    accent_ink: str = "#080A0F"
+    accent_wash: str = "rgba(125,122,240,0.14)"
+    accent_soft: str = "rgba(125,122,240,0.28)"
+    focus: str = "#7D7AF0"
 
     # ---- state: the fixed status palette (icon + label always) ----------
-    good: str = "#4FA96B"
+    good: str = "#43B581"
     warning: str = "#D9A441"
     serious: str = "#D3813F"
-    critical: str = "#D25B5B"
-    good_wash: str = "rgba(79,169,107,0.12)"
-    warning_wash: str = "rgba(217,164,65,0.12)"
-    serious_wash: str = "rgba(211,129,63,0.12)"
-    critical_wash: str = "rgba(210,91,91,0.12)"
+    critical: str = "#E05561"
+    good_wash: str = "rgba(67,181,129,0.13)"
+    warning_wash: str = "rgba(217,164,65,0.13)"
+    serious_wash: str = "rgba(211,129,63,0.13)"
+    critical_wash: str = "rgba(224,85,97,0.13)"
     # Unknown is not a status. It is the absence of one, and it must never
     # borrow a status colour — an unseen calendar that renders amber reads as
     # "mildly concerning" when the truth is "nobody looked".
-    unknown: str = "#8F8F8F"
-    unknown_wash: str = "rgba(143,143,143,0.10)"
+    unknown: str = "#7E8797"
+    unknown_wash: str = "rgba(126,135,151,0.10)"
 
     # ---- magnitude: a neutral ramp, strongest to faintest ----------------
-    seq_100: str = "#ECECEC"
-    seq_250: str = "#B4B4B4"
-    seq_400: str = "#8F8F8F"
-    seq_550: str = "#6B6B6B"
-    seq_700: str = "#4A4A4A"
+    seq_100: str = "#E9ECF2"
+    seq_250: str = "#AAB2C0"
+    seq_400: str = "#7E8797"
+    seq_550: str = "#5A6270"
+    seq_700: str = "#3B4250"
 
     # ---- chart chrome ---------------------------------------------------
-    grid: str = "#1E1E1E"
-    axis: str = "#333333"
-    candle_up: str = "#B4B4B4"
-    candle_down: str = "#5C5C5C"
+    # The plot area is a step *below* its card rather than above it. A chart is
+    # a window onto something, and a window that sits proud of the wall it is
+    # cut into looks like a sticker.
+    chart_plane: str = "#0A0D13"
+    grid: str = "#151A23"
+    axis: str = "#262D39"
+    crosshair: str = "#4A5364"
+    candle_up: str = "#C3CAD8"
+    candle_down: str = "#5A6270"
 
     # ---- type -----------------------------------------------------------
     font: str = "'Segoe UI Variable', 'Segoe UI', 'Inter', 'DejaVu Sans', system-ui, sans-serif"
@@ -129,44 +151,49 @@ LIGHT = Palette(
     name="light",
     dark=False,
     plane="#FFFFFF",
-    surface="#FAFAFA",
-    surface_high="#F2F2F2",
-    surface_hover="#E9E9E9",
-    border="#E5E5E5",
-    border_strong="#CFCFCF",
-    ink="#0D0D0D",
-    ink_secondary="#3F3F3F",
-    ink_muted="#6E6E6E",
-    ink_faint="#9B9B9B",
-    long="#2F6FB5",
-    short="#A85D23",
-    long_wash="rgba(47,111,181,0.10)",
-    short_wash="rgba(168,93,35,0.10)",
-    accent="#0D0D0D",
-    accent_hover="#2B2B2B",
+    surface="#FBFBFD",
+    surface_high="#F3F4F7",
+    surface_hover="#E9EBF0",
+    surface_raised="#FFFFFF",
+    border="#E4E6EC",
+    border_strong="#CBD0DA",
+    ink="#0C0F16",
+    ink_secondary="#3D4453",
+    ink_muted="#69707F",
+    ink_faint="#98A0AF",
+    long="#2A6FB5",
+    short="#A8621F",
+    long_wash="rgba(42,111,181,0.10)",
+    short_wash="rgba(168,98,31,0.10)",
+    accent="#5B57D8",
+    accent_hover="#4844C4",
     accent_ink="#FFFFFF",
-    focus="#6E6E6E",
-    good="#2E7D4F",
+    accent_wash="rgba(91,87,216,0.10)",
+    accent_soft="rgba(91,87,216,0.22)",
+    focus="#5B57D8",
+    good="#1F7A4D",
     warning="#8A6410",
     serious="#B25A1E",
     critical="#B3352F",
-    good_wash="rgba(46,125,79,0.10)",
+    good_wash="rgba(31,122,77,0.10)",
     warning_wash="rgba(138,100,16,0.12)",
     serious_wash="rgba(178,90,30,0.10)",
     critical_wash="rgba(179,53,47,0.10)",
-    unknown="#6E6E6E",
-    unknown_wash="rgba(110,110,110,0.09)",
+    unknown="#69707F",
+    unknown_wash="rgba(105,112,127,0.09)",
     # The ramp inverts with the theme: magnitude reads as "further from the
     # page", which is darker on white and lighter on near-black.
-    seq_100="#1A1A1A",
-    seq_250="#4A4A4A",
-    seq_400="#7A7A7A",
-    seq_550="#A5A5A5",
-    seq_700="#CFCFCF",
-    grid="#F0F0F0",
-    axis="#D8D8D8",
-    candle_up="#4A4A4A",
-    candle_down="#B0B0B0",
+    seq_100="#12161F",
+    seq_250="#414855",
+    seq_400="#727A88",
+    seq_550="#A2A9B6",
+    seq_700="#CDD2DB",
+    chart_plane="#FCFCFE",
+    grid="#F0F1F5",
+    axis="#D5D9E1",
+    crosshair="#9BA3B2",
+    candle_up="#3D4453",
+    candle_down="#A2A9B6",
 )
 
 THEMES: dict[str, Palette] = {"dark": DARK, "light": LIGHT}
@@ -217,9 +244,9 @@ def active_theme() -> Palette:
 class Type:
     """Type scale. Sizes in px, weights as Qt expects them."""
 
-    display: int = 34
-    h1: int = 22
-    h2: int = 17
+    display: int = 38
+    h1: int = 23
+    h2: int = 18
     h3: int = 15
     body: int = 14
     small: int = 12
@@ -241,9 +268,17 @@ class Space:
 TYPE = Type()
 SPACE = Space()
 
-RADIUS = 10
-RADIUS_SM = 6
+RADIUS = 12
+RADIUS_SM = 7
 RADIUS_PILL = 999
+
+#: Milliseconds. One duration for everything that moves, because an interface
+#: whose animations disagree about their own speed reads as several interfaces.
+#: 140ms is under the ~200ms threshold at which motion starts to feel like
+#: waiting, and above the ~80ms at which it stops registering as motion at all.
+MOTION_MS = 140
+#: For things that are appearing rather than merely changing.
+MOTION_SLOW_MS = 220
 
 
 def direction_colour(direction: int) -> str:
@@ -286,6 +321,32 @@ def r_colour(value: float) -> str:
     return PALETTE.ink_muted
 
 
+def severity_colour(severity: str) -> str:
+    """Map a severity word onto its colour.
+
+    Severity travels as a string through the core — ``supervision``,
+    ``recovery`` and ``environment`` all return one — so the widget layer needs
+    one place to resolve it rather than four ``if`` ladders that drift.
+    """
+    return {
+        "good": PALETTE.good,
+        "warning": PALETTE.warning,
+        "serious": PALETTE.serious,
+        "critical": PALETTE.critical,
+        "unknown": PALETTE.unknown,
+    }.get(severity, PALETTE.unknown)
+
+
+def severity_wash(severity: str) -> str:
+    return {
+        "good": PALETTE.good_wash,
+        "warning": PALETTE.warning_wash,
+        "serious": PALETTE.serious_wash,
+        "critical": PALETTE.critical_wash,
+        "unknown": PALETTE.unknown_wash,
+    }.get(severity, PALETTE.unknown_wash)
+
+
 def stylesheet(p: Palette | _ActivePalette = PALETTE) -> str:
     t, s = TYPE, SPACE
     return f"""
@@ -304,31 +365,45 @@ def stylesheet(p: Palette | _ActivePalette = PALETTE) -> str:
         border-right: 1px solid {p.border};
     }}
     QLabel#Brand {{
-        font-size: {t.h3}px;
+        font-size: {t.h2}px;
         font-weight: 700;
-        letter-spacing: 0.2px;
+        letter-spacing: 1.4px;
         color: {p.ink};
     }}
     QLabel#BrandSub {{
         font-size: {t.micro}px;
         color: {p.ink_faint};
-        letter-spacing: 0.5px;
+        letter-spacing: 1.6px;
+        font-weight: 600;
     }}
+    /* The nav item is a plain button; the active indicator is a separate 3px
+       bar drawn beside it. Putting the indicator in a border-left would make
+       the label shift by three pixels every time the selection moved, which is
+       the kind of jitter nobody consciously notices and everybody feels. */
     QPushButton#NavItem {{
         background: transparent;
         border: none;
         border-radius: {RADIUS_SM}px;
-        padding: 10px 12px;
+        padding: 9px 12px;
         text-align: left;
-        color: {p.ink_secondary};
+        color: {p.ink_muted};
         font-size: {t.body}px;
         font-weight: 500;
     }}
-    QPushButton#NavItem:hover {{ background: {p.surface_high}; color: {p.ink}; }}
+    QPushButton#NavItem:hover {{ background: {p.surface_high}; color: {p.ink_secondary}; }}
     QPushButton#NavItem:checked {{
         background: {p.surface_hover};
         color: {p.ink};
         font-weight: 600;
+    }}
+    QFrame#NavIndicator {{
+        background: {p.accent};
+        border: none;
+        border-radius: 2px;
+    }}
+    QFrame#NavIndicatorIdle {{
+        background: transparent;
+        border: none;
     }}
     QLabel#NavBadge {{
         background: {p.accent};
@@ -338,18 +413,28 @@ def stylesheet(p: Palette | _ActivePalette = PALETTE) -> str:
         font-size: {t.micro}px;
         font-weight: 700;
     }}
+    QLabel#NavSection {{
+        color: {p.ink_faint};
+        font-size: {t.micro}px;
+        font-weight: 700;
+        letter-spacing: 1.3px;
+    }}
 
     /* ------------------------------------------------------------ topbar */
     QFrame#TopBar {{
-        background: {p.plane};
+        background: {p.surface};
         border-bottom: 1px solid {p.border};
     }}
-    QLabel#ViewTitle {{ font-size: {t.h1}px; font-weight: 600; }}
+    QLabel#ViewTitle {{ font-size: {t.h1}px; font-weight: 650; letter-spacing: -0.2px; }}
     QLabel#ViewSubtitle {{ font-size: {t.small}px; color: {p.ink_muted}; }}
 
     /* ------------------------------------------------------------- cards */
+    /* A one-stop gradient rather than a flat fill. It is barely visible and it
+       is what stops a large panel from looking like a hole: real surfaces
+       catch slightly more light at the top. */
     QFrame#Card {{
-        background: {p.surface};
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+            stop:0 {p.surface_high}, stop:0.45 {p.surface}, stop:1 {p.surface});
         border: 1px solid {p.border};
         border-radius: {RADIUS}px;
     }}
@@ -364,30 +449,46 @@ def stylesheet(p: Palette | _ActivePalette = PALETTE) -> str:
         border: 1px solid {p.border_strong};
         border-radius: {RADIUS}px;
     }}
-    QFrame#SignalCard:hover {{ background: {p.surface_high}; }}
+    QFrame#SignalCard:hover {{
+        background: {p.surface_hover};
+        border-color: {p.accent_soft};
+    }}
+    /* The chart's own plate. Recessed rather than raised — see the token. */
+    QFrame#Plot {{
+        background: {p.chart_plane};
+        border: 1px solid {p.border};
+        border-radius: {RADIUS}px;
+    }}
 
     QLabel#CardTitle {{
         color: {p.ink_muted};
         font-size: {t.micro}px;
         font-weight: 700;
-        letter-spacing: 1.1px;
+        letter-spacing: 1.2px;
     }}
-    QLabel#Display  {{ font-size: {t.display}px; font-weight: 600; }}
-    QLabel#H1       {{ font-size: {t.h1}px; font-weight: 600; }}
-    QLabel#H2       {{ font-size: {t.h2}px; font-weight: 600; }}
+    QLabel#Display  {{ font-size: {t.display}px; font-weight: 620; letter-spacing: -0.8px; }}
+    QLabel#H1       {{ font-size: {t.h1}px; font-weight: 620; letter-spacing: -0.2px; }}
+    QLabel#H2       {{ font-size: {t.h2}px; font-weight: 620; }}
     QLabel#H3       {{ font-size: {t.h3}px; font-weight: 600; }}
     QLabel#Body     {{ font-size: {t.body}px; color: {p.ink_secondary}; }}
     QLabel#Caption  {{ font-size: {t.small}px; color: {p.ink_muted}; }}
     QLabel#Micro    {{ font-size: {t.micro}px; color: {p.ink_faint}; }}
     QLabel#Mono     {{ font-family: {p.mono}; font-size: {t.small}px; }}
     QLabel#MonoBig  {{ font-family: {p.mono}; font-size: {t.h3}px; font-weight: 600; }}
+    /* A price. Tabular by construction, because a column of proportional
+       digits does not align and a column that does not align cannot be
+       scanned — which is the only reason to put it in a column. */
+    QLabel#Numeric  {{
+        font-family: {p.mono}; font-size: {t.h2}px; font-weight: 600;
+        letter-spacing: -0.3px;
+    }}
 
     /* ------------------------------------------------------------ tables */
     QTableWidget {{
         background: transparent;
         border: none;
         gridline-color: transparent;
-        selection-background-color: {p.surface_hover};
+        selection-background-color: {p.accent_wash};
         selection-color: {p.ink};
     }}
     QTableWidget::item {{
@@ -395,7 +496,8 @@ def stylesheet(p: Palette | _ActivePalette = PALETTE) -> str:
         border: none;
         border-bottom: 1px solid {p.border};
     }}
-    QTableWidget::item:selected {{ background: {p.surface_hover}; }}
+    QTableWidget::item:selected {{ background: {p.accent_wash}; }}
+    QTableWidget::item:hover {{ background: {p.surface_high}; }}
     /* The header VIEW needs its own background. Styling only ::section leaves
        Qt's default palette showing through behind the sections, which renders
        as a pale strip across the top of every table in dark mode. */
@@ -409,7 +511,7 @@ def stylesheet(p: Palette | _ActivePalette = PALETTE) -> str:
         border-bottom: 1px solid {p.border};
         font-size: {t.micro}px;
         font-weight: 700;
-        letter-spacing: 0.8px;
+        letter-spacing: 0.9px;
     }}
     QTableCornerButton::section {{ background: transparent; border: none; }}
 
@@ -421,7 +523,7 @@ def stylesheet(p: Palette | _ActivePalette = PALETTE) -> str:
         padding: 9px 18px;
         font-weight: 600;
     }}
-    QPushButton:hover {{ background: {p.surface_hover}; }}
+    QPushButton:hover {{ background: {p.surface_hover}; border-color: {p.ink_faint}; }}
     QPushButton:disabled {{
         color: {p.ink_faint};
         background: transparent;
@@ -430,7 +532,7 @@ def stylesheet(p: Palette | _ActivePalette = PALETTE) -> str:
     QPushButton#Primary {{
         background: {p.accent}; border-color: {p.accent}; color: {p.accent_ink};
     }}
-    QPushButton#Primary:hover {{ background: {p.accent_hover}; }}
+    QPushButton#Primary:hover {{ background: {p.accent_hover}; border-color: {p.accent_hover}; }}
     QPushButton#Primary:disabled {{
         background: transparent; border-color: {p.border}; color: {p.ink_faint};
     }}
@@ -449,6 +551,11 @@ def stylesheet(p: Palette | _ActivePalette = PALETTE) -> str:
     }}
     QPushButton#Quiet:hover {{ color: {p.ink}; background: {p.surface_high}; }}
     QPushButton#Quiet:checked {{ color: {p.ink}; background: {p.surface_hover}; }}
+    QFrame#Segmented {{
+        background: {p.surface_high};
+        border: 1px solid {p.border};
+        border-radius: {RADIUS_SM + 2}px;
+    }}
 
     /* Arm and Confirm look different on purpose. They are two separate
        deliberate actions, and making them look alike invites a double-click
@@ -473,8 +580,11 @@ def stylesheet(p: Palette | _ActivePalette = PALETTE) -> str:
         border: 1px solid {p.border_strong};
         border-radius: {RADIUS_SM}px;
         padding: 8px 12px;
-        selection-background-color: {p.surface_hover};
+        selection-background-color: {p.accent_wash};
         selection-color: {p.ink};
+    }}
+    QComboBox:hover, QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover {{
+        border-color: {p.ink_faint};
     }}
     QComboBox:focus, QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
         border-color: {p.focus};
@@ -484,10 +594,10 @@ def stylesheet(p: Palette | _ActivePalette = PALETTE) -> str:
     }}
     QComboBox::drop-down {{ border: none; width: 22px; }}
     QComboBox QAbstractItemView {{
-        background: {p.surface_high};
+        background: {p.surface_raised};
         border: 1px solid {p.border_strong};
         border-radius: {RADIUS_SM}px;
-        selection-background-color: {p.surface_hover};
+        selection-background-color: {p.accent_wash};
         padding: 4px;
     }}
     QCheckBox {{ spacing: {s.sm}px; color: {p.ink_secondary}; }}
@@ -536,12 +646,14 @@ def stylesheet(p: Palette | _ActivePalette = PALETTE) -> str:
         background: {p.surface};
         border-top: 1px solid {p.border};
         color: {p.ink_muted};
+        font-size: {t.small}px;
     }}
     QStatusBar::item {{ border: none; }}
 
     QSplitter::handle {{ background: {p.border}; }}
+    QSplitter::handle:hover {{ background: {p.border_strong}; }}
     QToolTip {{
-        background: {p.surface_high};
+        background: {p.surface_raised};
         border: 1px solid {p.border_strong};
         color: {p.ink};
         padding: 7px 9px;

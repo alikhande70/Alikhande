@@ -20,7 +20,7 @@ Two components carry rules from the visualization method rather than taste:
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QFrame,
@@ -33,7 +33,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..i18n import t
+from ..i18n import fmt_count, t
+from .icons import paint_dot, paint_icon
+from .motion import Pulse, Tween
 from .theme import PALETTE, RADIUS, RADIUS_PILL, SPACE, TYPE, score_ramp
 
 
@@ -550,28 +552,237 @@ class RiskMeter(QWidget):
 
 # ------------------------------------------------------------- nav / shell
 class NavItem(QPushButton):
-    """One row in the sidebar. Icon, label, and an optional count badge."""
+    """One row in the sidebar: an active indicator, a vector icon, a label,
+    and an optional count badge.
 
-    def __init__(self, icon: str, text: str, parent=None):
-        super().__init__(f"  {icon}   {text}", parent)
+    Painted rather than composed from a text label with a glyph prefix. Three
+    things that were not previously possible follow from that:
+
+    * the icon takes its own colour, so it can recede while the label stays
+      readable — the reverse of what a single styled string can do;
+    * the **active indicator is a separate bar**, drawn in the leading margin.
+      Carrying selection in a ``border-left`` shifts the label three pixels
+      every time the selection moves, which is the kind of jitter nobody
+      consciously notices and everybody feels;
+    * the badge sits at the trailing edge at a fixed position instead of
+      appended to the text, so a count appearing does not re-centre the label.
+
+    The indicator's height is animated, so selection slides open rather than
+    snapping. It is the only motion in the sidebar and it is what makes a rail
+    feel like an application rather than a list of links.
+    """
+
+    def __init__(self, name: str, text: str, parent=None):
+        super().__init__(parent)
         self.setObjectName("NavItem")
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._icon = icon
+        self.setMinimumHeight(38)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._name = name
         self._text = text
+        self._badge = 0
+        self._indicator = Tween(self, start=0.0)
+        self._indicator.changed.connect(lambda _: self.update())
+        self.toggled.connect(self._on_toggled)
+
+    # ------------------------------------------------------------------ state
+    def _on_toggled(self, checked: bool) -> None:
+        self._indicator.to(1.0 if checked else 0.0)
 
     def set_badge(self, count: int) -> None:
-        self._badge = count
-        self._render()
+        if count != self._badge:
+            self._badge = count
+            self.update()
 
-    def relabel(self, icon: str, text: str) -> None:
+    def relabel(self, name: str, text: str) -> None:
         """Change the label without losing the badge — used on a language switch."""
-        self._icon, self._text = icon, text
-        self._render()
+        self._name, self._text = name, text
+        self.update()
 
-    def _render(self) -> None:
-        suffix = f"   ({self._badge})" if getattr(self, "_badge", 0) else ""
-        self.setText(f"  {self._icon}   {self._text}{suffix}")
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        return QSize(200, 38)
+
+    # ------------------------------------------------------------------ paint
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        # The stylesheet still paints the background, hover and checked states.
+        super().paintEvent(event)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect())
+        rtl = self.layoutDirection() == Qt.LayoutDirection.RightToLeft
+
+        checked = self.isChecked()
+        icon_colour = PALETTE.ink if checked else PALETTE.ink_muted
+        text_colour = PALETTE.ink if checked else PALETTE.ink_muted
+
+        # ---- active indicator, in the leading margin ---------------------
+        strength = self._indicator.value
+        if strength > 0.01:
+            full = rect.height() * 0.52
+            height = full * strength
+            bar = QRectF(0, 0, 3.0, height)
+            bar.moveCenter(QPointF(0, rect.center().y()))
+            bar.moveLeft(rect.right() - 3.0 if rtl else 0.0)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(PALETTE.accent))
+            painter.drawRoundedRect(bar, 1.5, 1.5)
+
+        # ---- icon ---------------------------------------------------------
+        box = 18.0
+        pad = SPACE.md
+        if rtl:
+            icon_rect = QRectF(rect.right() - pad - box, rect.center().y() - box / 2, box, box)
+        else:
+            icon_rect = QRectF(pad, rect.center().y() - box / 2, box, box)
+        paint_icon(painter, self._name, icon_rect, icon_colour, width=1.6)
+
+        # ---- badge, at the trailing edge -----------------------------------
+        badge_width = 0.0
+        if self._badge > 0:
+            text = fmt_count(self._badge)
+            font = QFont(self.font())
+            font.setPixelSize(TYPE.micro)
+            font.setWeight(QFont.Weight.Bold)
+            painter.setFont(font)
+            metrics = QFontMetrics(font)
+            badge_width = max(20.0, metrics.horizontalAdvance(text) + 12.0)
+            pill = QRectF(0, 0, badge_width, 17.0)
+            pill.moveCenter(QPointF(0, rect.center().y()))
+            pill.moveLeft(pad if rtl else rect.right() - pad - badge_width)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(PALETTE.accent))
+            painter.drawRoundedRect(pill, 8.5, 8.5)
+            painter.setPen(QColor(PALETTE.accent_ink))
+            painter.drawText(pill, Qt.AlignmentFlag.AlignCenter, text)
+            badge_width += SPACE.sm
+
+        # ---- label ----------------------------------------------------------
+        font = QFont(self.font())
+        font.setPixelSize(TYPE.body)
+        font.setWeight(QFont.Weight.DemiBold if checked else QFont.Weight.Medium)
+        painter.setFont(font)
+        painter.setPen(QColor(text_colour))
+        text_left = pad + box + SPACE.md
+        label_rect = QRectF(
+            pad + badge_width if rtl else text_left,
+            rect.top(),
+            rect.width() - text_left - pad - badge_width,
+            rect.height(),
+        )
+        alignment = (
+            Qt.AlignmentFlag.AlignRight if rtl else Qt.AlignmentFlag.AlignLeft
+        ) | Qt.AlignmentFlag.AlignVCenter
+        painter.drawText(label_rect, alignment, self._text)
+        painter.end()
+
+
+class LiveDot(QWidget):
+    """A pulsing dot that says the application is doing something.
+
+    Unattended software has one recurring credibility problem: a screen that
+    shows nothing changing is indistinguishable from a screen whose process
+    died twenty minutes ago. This is the cheapest possible fix and it is worth
+    the pixels.
+
+    The pulse is a smooth two-second ramp rather than a blink, because a hard
+    on/off at one hertz reads as an alarm — and the ramp never reaches zero, so
+    the dot does not appear to vanish in a screenshot.
+    """
+
+    def __init__(self, parent=None, diameter: int = 8):
+        super().__init__(parent)
+        self._diameter = diameter
+        self._colour = PALETTE.good
+        self._strength = 1.0
+        self.setFixedSize(diameter + 4, diameter + 4)
+        self._pulse = Pulse(self)
+        self._pulse.changed.connect(self._on_pulse)
+
+    def _on_pulse(self, value: float) -> None:
+        # 0.45 floor: a live indicator that fades to nothing is a dead one for
+        # as long as it is dark.
+        self._strength = 0.45 + 0.55 * value
+        self.update()
+
+    def set_state(self, colour: str, live: bool) -> None:
+        self._colour = colour
+        if live:
+            self._pulse.start()
+        else:
+            self._pulse.stop()
+            self._strength = 1.0
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        painter = QPainter(self)
+        centre = QPointF(self.width() / 2, self.height() / 2)
+        # A soft halo under the dot. It is what makes the pulse read as light
+        # rather than as the dot changing size.
+        paint_dot(painter, centre, self._diameter / 2 + 2.5, self._colour, 0.18 * self._strength)
+        paint_dot(painter, centre, self._diameter / 2, self._colour, self._strength)
+        painter.end()
+
+
+class EnvironmentPill(QFrame):
+    """Which of the three environments this session is in.
+
+    Given permanent space at the top of the window rather than being folded
+    into the status bar, because it is the one fact that changes what every
+    other number on screen *means*. A drawdown from a replay and a drawdown
+    from a live demo account render identically and are not the same claim, and
+    an operator who has to remember which they are looking at will eventually
+    remember wrong.
+
+    Production is drawn differently from the other two on purpose: a solid
+    filled pill rather than an outlined one, so it is impossible to be in
+    production and not notice. The lock is stated in the same breath — the pill
+    reads "PRODUCTION · LOCKED", never just "PRODUCTION", because the word on
+    its own invites exactly the wrong inference about what the app will do
+    next.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("EnvPill")
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(SPACE.md, 5, SPACE.md, 5)
+        row.setSpacing(SPACE.sm)
+        self._text = QLabel("")
+        row.addWidget(self._text)
+        self.set("DEMO", locked=False)
+
+    def set(self, environment: str, *, locked: bool) -> None:
+        from ..core.environment import Environment
+
+        if environment == Environment.PRODUCTION:
+            caption = f'{t("env.production")} · {t("env.locked")}'
+            colour, background, border = PALETTE.accent_ink, PALETTE.critical, PALETTE.critical
+        elif environment == Environment.BACKTEST:
+            caption = t("env.backtest")
+            colour, background, border = (
+                PALETTE.ink_secondary,
+                PALETTE.unknown_wash,
+                PALETTE.border_strong,
+            )
+        else:
+            caption = t("env.demo")
+            if locked:
+                caption = f'{caption} · {t("env.locked")}'
+            colour, background, border = PALETTE.good, PALETTE.good_wash, PALETTE.good
+
+        self._text.setText(caption.upper())
+        self._text.setStyleSheet(
+            f"font-size: {TYPE.micro}px; font-weight: 800; letter-spacing: 1.1px;"
+            f" color: {colour}; background: transparent; border: none;"
+        )
+        self.setStyleSheet(
+            f"QFrame#EnvPill {{ background: {background}; border: 1px solid {border};"
+            f" border-radius: {RADIUS_PILL}px; }}"
+        )
+        self.setToolTip(caption)
 
 
 def elevate(widget: QWidget, radius: int = 22, alpha: int = 90) -> QWidget:

@@ -45,6 +45,7 @@ from ..app.engine import ScanEngine
 from ..config import AppConfig
 from ..i18n import (
     LANGUAGES,
+    code,
     current,
     fmt_count,
     fmt_percent,
@@ -57,11 +58,12 @@ from ..i18n import (
 from ..core.calendar_gate import CalendarGate
 from ..core.enums import RunMode, RuntimeKind
 from ..core.journal import Journal
-from ..core.runtime import detect_runtime, persistence_plan
+from ..core.environment import Environment
+from ..core.runtime import detect_runtime, environment_plan, persistence_plan
 from ..core.statistics import Statistics
 from ..version import VERSION
 from ..profiles import Overrides, Profile, configure
-from .components import NavItem, StatusChip, label
+from .components import EnvironmentPill, LiveDot, NavItem, StatusChip, label
 from .theme import PALETTE, SPACE, active_theme, set_theme, stylesheet
 from .views.backtest import BacktestView
 from .views.dashboard import DashboardView
@@ -81,15 +83,15 @@ from .worker import Action, ScanWorker
 # order of the stack: index 0 is the landing screen. Everything after it is
 # somewhere you go to check a claim the scanner made.
 NAV = [
-    ("◎", "nav.scanner", "nav.scanner.tip"),
-    ("◈", "nav.dashboard", "nav.dashboard.tip"),
-    ("◉", "nav.signal", "nav.signal.tip"),
-    ("◔", "nav.risk", "nav.risk.tip"),
-    ("◆", "nav.execution", "nav.execution.tip"),
-    ("▤", "nav.backtest", "nav.backtest.tip"),
-    ("◇", "nav.health", "nav.health.tip"),
-    ("⚙", "nav.settings", "nav.settings.tip"),
-    ("?", "nav.guide", "nav.guide.tip"),
+    ("scanner", "nav.scanner", "nav.scanner.tip"),
+    ("dashboard", "nav.dashboard", "nav.dashboard.tip"),
+    ("signal", "nav.signal", "nav.signal.tip"),
+    ("risk", "nav.risk", "nav.risk.tip"),
+    ("execution", "nav.execution", "nav.execution.tip"),
+    ("backtest", "nav.backtest", "nav.backtest.tip"),
+    ("health", "nav.health", "nav.health.tip"),
+    ("settings", "nav.settings", "nav.settings.tip"),
+    ("guide", "nav.guide", "nav.guide.tip"),
 ]
 
 # Referenced by name rather than as literals, because the two indices other
@@ -318,6 +320,19 @@ class MainWindow(QMainWindow):
         titles.addWidget(self._subtitle)
         row.addLayout(titles)
         row.addStretch(1)
+
+        # The environment reads before anything else on this bar, because it is
+        # the single fact that changes what every other number on screen means.
+        # A drawdown figure from a replay and one from a live demo account look
+        # identical and are not the same claim.
+        self._env_pill = EnvironmentPill()
+        row.addWidget(self._env_pill)
+
+        # A live indicator, next to the pass timing it corroborates. "3 ms" on
+        # its own is equally consistent with a scanner running well and one
+        # that stopped twenty minutes ago showing its last reading.
+        self._live = LiveDot()
+        row.addWidget(self._live)
 
         self._chip_execution = StatusChip("○", "IDLE", "neutral")
         self._chip_pass = StatusChip("◷", "—", "neutral")
@@ -605,7 +620,7 @@ class MainWindow(QMainWindow):
         # falsehood this project exists to refuse.
         if not live:
             self._chip_runtime.set(
-                "!", f'{snapshot.runtime.kind.name} · {t("chip.no_broker")}', "warning"
+                "!", f'{code(snapshot.runtime.kind.name).upper()} · {t("chip.no_broker")}', "warning"
             )
             self._chip_runtime.setToolTip(t("chip.no_broker.tip"))
             self._chip_account.set("!", t("chip.simulated"), "warning")
@@ -624,12 +639,27 @@ class MainWindow(QMainWindow):
 
         self._chip_execution.set(
             "✕" if snapshot.requires_manual_review else "○",
-            snapshot.execution_state,
+            code(snapshot.execution_state).upper(),
             "critical"
             if snapshot.requires_manual_review
             else ("warning" if snapshot.execution_state not in ("IDLE", "COMPLETED") else "neutral"),
         )
-        self._chip_pass.set("◷", f"{snapshot.last_pass_ms:.0f} ms", "neutral")
+        self._chip_pass.set(
+            "◷", f'{fmt_count(int(snapshot.last_pass_ms))} {t("unit.ms")}', "neutral"
+        )
+
+        # ---- environment and liveness ---------------------------------------
+        self._env_pill.set(snapshot.environment, locked=bool(snapshot.send_lock))
+        self._env_pill.setToolTip(t(f"env.{snapshot.environment.lower()}.tip"))
+
+        # The dot pulses only while passes are actually landing. Pulsing on a
+        # dead worker would make the indicator worse than nothing — it would be
+        # actively asserting the one thing it exists to disprove.
+        advancing = snapshot.passes != getattr(self, "_last_pass_count", -1)
+        self._last_pass_count = snapshot.passes
+        self._live.set_state(
+            PALETTE.good if snapshot.connected else PALETTE.unknown, live=advancing
+        )
 
         # ---- banner ----------------------------------------------------------
         if account is not None and not account.is_demo and live:
@@ -680,17 +710,28 @@ class MainWindow(QMainWindow):
                 "status.pass",
                 passes=fmt_count(snapshot.passes),
                 ms=fmt_count(int(snapshot.last_pass_ms)),
-                runtime=snapshot.runtime.description,
+                runtime=code(snapshot.runtime.kind.name),
                 risk=fmt_percent(snapshot.exposure_open_pct),
             )
         )
 
 
-def build_application(offline: bool = False):
+def build_application(offline: bool = False, environment: str = ""):
     """Assemble everything. Separated from ``run_application`` so a test can
-    construct the window without entering the Qt event loop."""
+    construct the window without entering the Qt event loop.
+
+    ``environment`` is the declared one. An empty string means "whatever the
+    operator chose last", read from preferences — with one override that is not
+    negotiable: an offline session is a BACKTEST no matter what is stored,
+    because there is no terminal, and a window claiming to be in production
+    while reading synthetic bars would be the single most misleading thing this
+    application could put on screen.
+    """
     config = AppConfig()
     journal = Journal()
+
+    stored = load_preferences(data_directory())
+    declared = Environment.parse(environment or stored.get("environment"))
 
     gateway = None
     connected = False
@@ -717,10 +758,22 @@ def build_application(offline: bool = False):
         gateway = synthetic
         connected = False
 
+    if not connected:
+        declared = Environment.BACKTEST
+
     runtime = detect_runtime(
         connected=connected, replay=False, identity_seed=str(data_directory())
     )
-    persistence = persistence_plan(runtime, data_directory())
+    # Routed by the declared environment, not by the runtime kind. A demo
+    # session and a production session are both RuntimeKind.LIVE and would
+    # otherwise land in one file, which is exactly the contamination the
+    # original routing exists to prevent.
+    persistence = environment_plan(
+        declared,
+        data_directory(),
+        session_identity=runtime.session_identity,
+        connected=connected,
+    )
 
     repositories = None
     if persistence.enabled:
@@ -744,6 +797,7 @@ def build_application(offline: bool = False):
         journal=journal,
         repositories=repositories,
         calendar=CalendarGate(None, config.news, journal),
+        environment=declared,
     )
 
     application = QApplication.instance() or QApplication(sys.argv)

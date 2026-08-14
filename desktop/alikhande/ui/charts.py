@@ -274,12 +274,28 @@ class PriceChart(QWidget):
 
 
 class Sparkline(QWidget):
-    """A compact closing-price line. Answers direction and nothing else."""
+    """A compact closing-price line. Answers direction and nothing else.
 
-    def __init__(self, parent=None):
+    Three things beyond a plain polyline, each earning its pixels:
+
+    A **soft area fill** under the trace. It costs nothing to draw and it is
+    what lets the eye read the shape at 26 pixels tall — a bare 1.6px line in a
+    dense list reads as texture rather than as a curve.
+
+    A **dot at the newest end**, so the direction of time is unambiguous. In a
+    right-to-left interface the chart deliberately does not mirror (a mirrored
+    uptrend looks like a downtrend to anybody who has seen a chart), which
+    means the reader needs something other than reading order to tell them
+    which end is now.
+
+    A **baseline at the first value**, so "up" and "down" are relative to
+    where the window opened rather than to the bottom of the box.
+    """
+
+    def __init__(self, parent=None, width: int = 96, height: int = 28):
         super().__init__(parent)
         self._values: list[float] = []
-        self.setFixedSize(84, 26)
+        self.setFixedSize(width, height)
 
     def set(self, values: list[float]) -> None:
         self._values = values[-60:] if values else []
@@ -294,23 +310,51 @@ class Sparkline(QWidget):
         low, high = min(self._values), max(self._values)
         span = (high - low) or 1.0
         step = self.width() / (len(self._values) - 1)
+        top, bottom = 3.0, self.height() - 3.0
+        usable = bottom - top
+
+        def y_for(value: float) -> float:
+            return bottom - (value - low) / span * usable
 
         path = QPainterPath()
         for index, value in enumerate(self._values):
-            point = QPointF(
-                index * step,
-                self.height() - 3 - (value - low) / span * (self.height() - 6),
-            )
+            point = QPointF(index * step, y_for(value))
             if index == 0:
                 path.moveTo(point)
             else:
                 path.lineTo(point)
 
         rising = self._values[-1] >= self._values[0]
-        painter.setPen(
-            QPen(QColor(PALETTE.ink_secondary if rising else PALETTE.ink_faint), 1.6)
-        )
+        colour = QColor(PALETTE.ink_secondary if rising else PALETTE.ink_faint)
+
+        # ---- area under the trace -----------------------------------------
+        area = QPainterPath(path)
+        area.lineTo(QPointF(self.width(), bottom))
+        area.lineTo(QPointF(0.0, bottom))
+        area.closeSubpath()
+        fill = QColor(colour)
+        fill.setAlpha(28)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(fill)
+        painter.drawPath(area)
+
+        # ---- the baseline it is measured from ------------------------------
+        baseline = QPen(QColor(PALETTE.border_strong), 1.0, Qt.PenStyle.DotLine)
+        painter.setPen(baseline)
+        start_y = y_for(self._values[0])
+        painter.drawLine(QPointF(0.0, start_y), QPointF(float(self.width()), start_y))
+
+        # ---- the trace -----------------------------------------------------
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(colour, 1.6))
         painter.drawPath(path)
+
+        # ---- which end is now ----------------------------------------------
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(colour)
+        painter.drawEllipse(
+            QPointF(self.width() - 1.0, y_for(self._values[-1])), 2.2, 2.2
+        )
         painter.end()
 
 
