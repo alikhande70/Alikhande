@@ -306,6 +306,29 @@ class MainWindow(QMainWindow):
         self._operations.export_settings_requested.connect(self._export_settings)
 
 
+    def _on_environment_change(self, index: int) -> None:
+        """Store the chosen environment and say when it takes effect.
+
+        Deliberately **not** applied to the running session. Switching
+        environments changes which database accumulates the evidence and which
+        execution engine the orders would go through, and doing that under a
+        live session would either mix two environments' records in one file or
+        silently orphan an in-flight execution in the one being left.
+
+        Neither is worth the convenience of not restarting. So the preference
+        is written, the window says so plainly, and the change lands on the
+        next launch — which is also when the persistence routing is decided.
+        """
+        chosen = self._environment.itemData(index)
+        if not chosen or chosen == self._engine.environment:
+            return
+        self._save_preferences()
+        QMessageBox.information(
+            self,
+            t("shell.environment"),
+            t("env.restart", environment=t(f"env.{chosen.lower()}")),
+        )
+
     # ------------------------------------------------- operational subsystems
     def _observe_link(self, snapshot) -> None:
         """Turn this pass into one health probe.
@@ -507,6 +530,21 @@ class MainWindow(QMainWindow):
 
         column.addStretch(1)
 
+        # The environment sits above the mode, because it decides which modes
+        # are selectable at all — offering DEMO_CONFIRM and then refusing it
+        # would teach the operator to distrust the control.
+        self._env_label = label(t("shell.environment"), "CardTitle")
+        column.addWidget(self._env_label)
+        self._environment = QComboBox()
+        for name in Environment.ALL:
+            self._environment.addItem(t(f"env.{name.lower()}"), name)
+        self._environment.setCurrentIndex(
+            self._environment.findData(self._engine.environment)
+        )
+        self._environment.currentIndexChanged.connect(self._on_environment_change)
+        column.addWidget(self._environment)
+        column.addSpacing(SPACE.md)
+
         self._mode_label = label(t("shell.mode"), "CardTitle")
         column.addWidget(self._mode_label)
         self._mode = QComboBox()
@@ -705,7 +743,13 @@ class MainWindow(QMainWindow):
             "theme": active_theme().name,
             "profile": self._profile.value,
             "overrides": self._overrides.to_dict(),
-            "environment": self._engine.environment,
+            # The selector, not the engine: the operator's choice is what should
+            # survive a restart, and the engine is still running the previous one.
+            "environment": (
+                self._environment.currentData()
+                if hasattr(self, "_environment")
+                else self._engine.environment
+            ),
             "view": self._stack.currentIndex(),
             "width": self.width(),
             "height": self.height(),

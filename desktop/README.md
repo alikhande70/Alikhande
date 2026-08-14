@@ -54,14 +54,89 @@ Before connecting to a broker: start MetaTrader 5, log in to a **demo** account,
 enable Algo Trading (Tools → Options → Expert Advisors), and add your symbols to
 Market Watch.
 
+## The three environments
+
+Declared, not inferred. Each carries a capability matrix computed from its name
+on every read rather than stored, so nothing holding a reference can mutate it.
+
+| | Data | Database | Can send? |
+|---|---|---|---|
+| **Backtest** | recorded or synthetic bars | `replay_*.sqlite` | never — no broker |
+| **Demo** | a live terminal, demo account | `alikhande.sqlite` | yes, after Arm **and** Confirm |
+| **Production** | a live terminal, real account | `production.sqlite` | **hard-locked** |
+
+Production runs everything short of the send: connection supervision, data
+quality, sizing against real contract specifications, preflight, reconciliation,
+recovery and reporting. That is the point — production readiness is measured
+rather than assumed.
+
+The lock is not a setting. `capabilities()` returns a hard `False` for
+production rather than deriving it from the module constant, so finding the
+constant and flipping it changes nothing; a test does exactly that and asserts
+it changed nothing. There is no code path that opens it. If real trading is ever
+authorised it arrives as its own reviewed change.
+
+Routing is by the **declared** environment, not by the runtime kind. A demo
+session and a production session are both `RuntimeKind.LIVE` and would otherwise
+share one database — which is precisely the contamination the original routing
+exists to prevent.
+
+## The robot
+
+Everything a person should not have to do by hand, and nothing more. It watches
+session windows (in broker server time, never local), rotates symbols, keeps the
+link alive, takes verified backups, escalates health, pauses itself when the
+account says stop, and queues qualified candidates with their evidence already
+assembled.
+
+**It does not arm and it does not confirm.** Execution requires two deliberate
+human actions on separate controls; an autopilot performing either one would not
+weaken that gate, it would remove it, because a single click would then be
+enough to send an order. `RobotDecision` has no arm/confirm/send field at all,
+and a test asserts it never grows one.
+
+The reverse direction is unrestricted: it may disarm, cancel, pause and stop on
+its own at any time. Actions that reduce exposure need no ceremony; only actions
+that create it do.
+
+## Reliability
+
+Six subsystems for the things that only matter on a bad day. Each is pure and
+*decides* rather than acts, so a six-hour flapping link can be tested in
+milliseconds instead of against a terminal nobody has.
+
+- **Connection supervision.** Health is inferred from what the gateway did, not
+  read from it. The state that matters is `STALLED` — every call answering,
+  every call fast, every call returning the same server time. That is the normal
+  shape of a broken MT5 session, and a boolean `is_connected()` reports it as
+  healthy forever.
+- **Data quality.** Per-pass refusals are correct and forgettable; only the
+  accumulated record can distinguish a symbol still downloading from one the
+  broker does not serve.
+- **Order errors.** Every retcode classified by whose problem it is and whether
+  an identical retry could plausibly succeed. No `REQUEST`-category error is
+  retryable, and an unrecognised code is `UNKNOWN` and not retryable rather than
+  being given a plausible category.
+- **Crash recovery.** Sessions, detected by absence: a record still holding
+  `closed_at == 0` means nobody ran the shutdown path. A crash holding an
+  in-flight order outranks a plain crash.
+- **Notifications.** Routed by consequence rather than log level, throttled per
+  subject so a chatty subject cannot crowd out a quiet important one. Critical is
+  never throttled.
+- **Backup, restore, diagnostics.** Backups use SQLite's online backup API and
+  are verified by being read back — an unverified backup is a file with a
+  reassuring name. Restore moves the current database aside instead of
+  overwriting it, and deletes nothing, ever.
+
 ## Safety policy
 
 Structural, not configurable:
 
-- **Real accounts are refused, three times over.** `ExecState` has no live-trading
-  mode; `core.execution` returns `REAL_ACCOUNT_BLOCKED` on any non-demo account;
-  and the MT5 adapter refuses again in `send_order` through code that shares
-  nothing with the first check. Deleting one does not disable the others.
+- **Real accounts are refused, four times over.** The declared environment
+  refuses on what the operator declared; `ExecState` has no live-trading mode;
+  `core.execution` returns `REAL_ACCOUNT_BLOCKED` on any non-demo account; and
+  the MT5 adapter refuses again in `send_order` through code that shares nothing
+  with the first check. Deleting one does not disable the others.
 - **One order boundary.** Only `core/execution.py` may call `send_order`. A test
   scans the package and fails if any other module so much as mentions it.
 - **No single action can send.** Demo execution requires Arm, then Confirm, on
@@ -84,16 +159,50 @@ alikhande/
     indicators, trend, zones, regime, spread, signals
     risk, portfolio, guards, preflight, execution, arming
     outcomes, statistics, lifecycle, calendar_gate, runtime
-    ports.py   the Protocols everything outside core implements
+    environment  the three environments and their capability matrix
+    supervision  connection health, reconnect policy
+    dataquality  bar gaps, staleness, chronic-failure accumulation
+    order_errors retcode taxonomy: whose problem, and is a retry worth it
+    recovery     sessions, crash detection, what to restore
+    notifications what is worth interrupting somebody for
+    robot        session windows, autopilot policy, the execution lock
+    ports.py     the Protocols everything outside core implements
   adapters/
     mt5/       live gateway (Windows + running terminal)
     offline/   deterministic in-memory gateway for replay and offline use
     sqlite/    schema, migrations, repositories
-  app/         scan orchestrator, backtest engine
-  ui/          PySide6 five-tab window, theme, worker thread
-tests/         180 tests, stdlib unittest, no MetaTrader required
+  app/         scan orchestrator, backtest engine, maintenance
+  ui/          PySide6 window: theme, motion, icons, eleven views
+tests/         406 tests, stdlib unittest, no MetaTrader required
 packaging/     PyInstaller spec and Windows build script
 ```
+
+## Design system
+
+Colour is spent only on meaning; **depth** carries structure. Five surface steps
+from the window plane to a raised popover, each with its own border, so
+hierarchy is visible without tinting anything.
+
+Four jobs qualify for colour, and nothing else on screen is tinted:
+
+- **Direction** — LONG/SHORT, always with an arrow and a word beside the hue.
+- **State** — the fixed status palette. Warning and serious share a warm family
+  by design, so every status colour ships with an icon and a text label;
+  `StatusChip` takes both as required arguments.
+- **Magnitude** — a *neutral* ramp for a rule score, because a saturated ramp
+  makes it look like a probability read off a calibrated instrument.
+- **Interaction** — one indigo, on the active nav indicator, focus ring, primary
+  action and selected row. Indigo rather than blue because LONG is already a
+  blue, and a focus ring and a direction column are both read peripherally.
+
+Motion is tied to state changes only: nothing animates on first paint, no
+animated value ever tweens its own digits, and every animation replaces rather
+than queues — passes land every 250 ms and a queueing animation falls further
+behind the data on each one.
+
+Persian is right-to-left throughout, with one deliberate exception: **the price
+chart never mirrors.** RTL flips reading order, not time, and a mirrored uptrend
+looks like a downtrend to anybody who has seen a chart.
 
 `core` depends on nothing outside itself. That is what lets the whole pipeline
 be tested here, and it is the single biggest difference from the MQL5 build.
