@@ -61,6 +61,15 @@ class ScanWorker(QObject):
     def run(self) -> None:
         self._running = True
         try:
+            # The connection is established HERE, on the worker thread, and
+            # never by whoever constructed the gateway. The MetaTrader5 package
+            # stamps an owner thread on attach and refuses calls from any
+            # other, so connecting on the UI thread made every subsequent pass
+            # raise — silently, because the engine swallows gateway errors, so
+            # the window showed "disconnected" against a perfectly healthy
+            # terminal.
+            self._connect()
+
             while self._running:
                 now = self._now()
                 if not self._initialised:
@@ -73,6 +82,34 @@ class ScanWorker(QObject):
                 QThread.msleep(self._interval_ms)
         except Exception as error:  # a dead worker must not fail silently
             self.failed.emit(f"{type(error).__name__}: {error}")
+
+    def _connect(self) -> None:
+        """Attach the gateway on this thread. Failure is reported, not raised.
+
+        A gateway that cannot attach still produces passes — the engine reports
+        `connected=False` and every view renders the offline state it already
+        knows how to render. Raising here would kill the worker and leave a
+        window that never updates again, which is strictly worse than a window
+        that says it has no broker.
+        """
+        connect = getattr(self._engine.gateway, "ensure_connected", None)
+        if connect is None:
+            return
+        try:
+            connect()
+        except Exception as error:
+            self.failed.emit(f"{type(error).__name__}: {error}")
+
+    def reconnect(self) -> bool:
+        """Re-attach on this thread. Called from the action queue, never
+        directly by the UI — see the thread rule above."""
+        rebind = getattr(self._engine.gateway, "reconnect", None)
+        if rebind is None:
+            return False
+        try:
+            return bool(rebind())
+        except Exception:
+            return False
 
     def _now(self) -> int:
         """The engine's clock, falling back to local time only to keep turning.

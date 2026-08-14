@@ -31,6 +31,7 @@ convention and asserted in ``_require_owner_thread``.
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 from typing import Any
 
 from ...core.enums import Direction, Timeframe
@@ -65,14 +66,76 @@ def _import_mt5() -> Any:
     return mt5
 
 
+@dataclass(frozen=True)
+class TerminalProbe:
+    """What a short attach-and-detach found out about the machine.
+
+    Used at startup to decide the environment and where evidence should live,
+    *before* the scan worker exists to own the real connection. It attaches,
+    reads, and detaches again — it deliberately does not leave a connection
+    behind, because that connection would belong to the wrong thread.
+    """
+
+    available: bool = False
+    reason: str = ""
+    build: int = 0
+    trade_allowed: bool = False
+    login: int = 0
+    server: str = ""
+    is_demo: bool | None = None
+
+    @property
+    def account_known(self) -> bool:
+        return self.is_demo is not None
+
+
+def probe_terminal() -> TerminalProbe:
+    """Attach briefly, report, detach. Never raises."""
+    try:
+        mt5 = _import_mt5()
+    except MT5Unavailable as error:
+        return TerminalProbe(available=False, reason=str(error))
+
+    try:
+        if not mt5.initialize():
+            code, message = mt5.last_error()
+            return TerminalProbe(
+                available=False, reason=f"terminal not reachable ({code}: {message})"
+            )
+        terminal = mt5.terminal_info()
+        account = mt5.account_info()
+        return TerminalProbe(
+            available=True,
+            build=int(getattr(terminal, "build", 0) or 0),
+            trade_allowed=bool(getattr(terminal, "trade_allowed", False)),
+            login=int(getattr(account, "login", 0) or 0) if account else 0,
+            server=str(getattr(account, "server", "") or "") if account else "",
+            # ``trade_mode`` 0 is demo, 1 real, 2 contest. None when no account
+            # answered — which must never collapse into "not demo", because the
+            # environment verdict keys off exactly this distinction.
+            is_demo=(int(account.trade_mode) == 0) if account is not None else None,
+        )
+    except Exception as error:  # pragma: no cover - defensive
+        return TerminalProbe(available=False, reason=f"{type(error).__name__}: {error}")
+    finally:
+        try:
+            mt5.shutdown()
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+
 class MT5Gateway:
     """Implements ``BrokerGateway`` against a live MetaTrader 5 terminal."""
 
-    def __init__(self) -> None:
+    def __init__(self, **connect_options: Any) -> None:
         self._mt5: Any = None
         self._owner_thread: int | None = None
         self._spec_cache: dict[str, SymbolSpec] = {}
         self._selected: set[str] = set()
+        # Held rather than applied. `ensure_connected` uses them on whichever
+        # thread calls it, which is how the owner thread ends up being the one
+        # that will actually make the calls.
+        self._connect_options = connect_options
 
     # ------------------------------------------------------------- lifecycle
     def connect(
@@ -92,8 +155,6 @@ class MT5Gateway:
         than storing a password here.
         """
         mt5 = _import_mt5()
-        self._mt5 = mt5
-        self._owner_thread = threading.get_ident()
 
         kwargs: dict[str, Any] = {"timeout": timeout_ms}
         if path:
@@ -111,6 +172,67 @@ class MT5Gateway:
                 f"could not attach to the MetaTrader 5 terminal ({code}: {message}). "
                 "Check that it is running, logged in, and that Algo Trading is enabled."
             )
+
+        # Assigned only after `initialize` succeeded. Setting them first left a
+        # failed connection looking attached: `_mt5` was non-None, so
+        # `is_connected()` went on to call into a terminal that had refused us,
+        # and `ensure_connected()` would have reported success and never
+        # retried.
+        self._mt5 = mt5
+        self._owner_thread = threading.get_ident()
+
+    def ensure_connected(self) -> bool:
+        """Connect if not already, **on the calling thread**.
+
+        This exists because of a defect that made the entire live path
+        unusable and which no test could have caught, since nothing ever ran
+        this class.
+
+        ``build_application`` runs on the UI thread. It used to call
+        ``connect()`` there, which stamped the UI thread as the owner. The scan
+        worker then ran on a ``QThread`` and every single gateway call it made
+        hit ``_require_owner_thread`` and raised. The engine's ``_safe_*``
+        wrappers swallow exceptions, so the window reported "disconnected"
+        while the terminal was in fact attached — a silent, permanent, entirely
+        misleading failure.
+
+        The guard was not the bug; the guard was right. Connecting on the wrong
+        thread was. So connection is now deferred to whoever is going to use
+        the gateway, and the worker calls this before its first pass.
+
+        Idempotent, and safe to call every pass. Returns whether a usable
+        connection exists.
+        """
+        if self._mt5 is not None and self._owner_thread == threading.get_ident():
+            return True
+        if self._mt5 is not None:
+            # Attached, but to a different thread. Reconnecting here would let
+            # the owner silently migrate, which defeats the guard entirely.
+            # Refuse loudly instead: this can only happen if the application
+            # wired its threads wrongly, and that is a defect to fix, not to
+            # paper over at runtime.
+            raise GatewayError(
+                "MT5Gateway is already connected on a different thread. "
+                "ensure_connected() must be called from the thread that will "
+                "make the calls — the scan worker."
+            )
+        self.connect(**self._connect_options)
+        return self._mt5 is not None
+
+    def reconnect(self) -> bool:
+        """Drop the attachment and take a fresh one on the calling thread.
+
+        What the robot's auto-reconnect actually does. Shutting down first
+        matters: ``mt5.initialize()`` against an already-initialised terminal
+        returns success without re-establishing anything, so a reconnect that
+        skipped the shutdown would report success and change nothing — which is
+        the worst possible outcome for a recovery path.
+        """
+        self.shutdown()
+        try:
+            return self.ensure_connected()
+        except GatewayError:
+            return False
 
     def shutdown(self) -> None:
         if self._mt5 is not None:
@@ -423,13 +545,21 @@ class MT5Gateway:
             raise GatewayError(f"no symbol info for {request.symbol}")
 
         # Filling policy comes from the symbol rather than a hardcoded guess; an
-        # unsupported filling mode is a common source of retcode 10030.
-        filling = mt5.ORDER_FILLING_IOC
-        mode = int(info.filling_mode)
+        # unsupported filling mode is the most common source of retcode 10030.
+        #
+        # The bitmask reports which of FOK (1) and IOC (2) the symbol supports.
+        # A symbol may report **neither**, which is an ordinary configuration on
+        # Market Execution accounts, and the previous code defaulted to IOC in
+        # exactly that case — asking for the one policy the symbol had just said
+        # it does not accept, and guaranteeing a rejection. RETURN is the
+        # documented remaining option and is what those symbols want.
+        mode = int(getattr(info, "filling_mode", 0) or 0)
         if mode & 1:  # SYMBOL_FILLING_FOK
             filling = mt5.ORDER_FILLING_FOK
         elif mode & 2:  # SYMBOL_FILLING_IOC
             filling = mt5.ORDER_FILLING_IOC
+        else:
+            filling = mt5.ORDER_FILLING_RETURN
 
         return {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -445,7 +575,13 @@ class MT5Gateway:
             "tp": float(request.take_profit),
             "deviation": int(request.deviation),
             "magic": int(request.magic),
-            "comment": request.comment,
+            # MetaTrader stores an order comment in a fixed 32-byte field and
+            # truncates anything longer itself. Truncating here means the
+            # comment this application *recorded* matches the one the broker
+            # actually holds — otherwise reconciliation compares a string
+            # against its own truncated copy and reports a mismatch that is
+            # purely an artefact of the field width.
+            "comment": str(request.comment)[:31],
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": filling,
         }

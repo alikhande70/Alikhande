@@ -178,6 +178,17 @@ class ScanEngine:
     def environment(self) -> str:
         return self._environment
 
+    @property
+    def gateway(self):
+        """The broker gateway, for lifecycle only.
+
+        The worker needs it to attach on its own thread and to re-attach on a
+        reconnect. Nothing else should reach through here: every consumer of
+        market data reads the snapshot the engine produced, which is what keeps
+        gateway access on one thread.
+        """
+        return self._gateway
+
     def account_snapshot(self) -> AccountInfo | None:
         """The account, or ``None`` when the gateway could not say.
 

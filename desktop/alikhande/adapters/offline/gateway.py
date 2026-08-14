@@ -247,6 +247,18 @@ class OfflineGateway:
         return len(self._bars.get((symbol, timeframe), []))
 
     # -------------------------------------------------------- MarketGateway
+    def ensure_connected(self) -> bool:
+        """No-op. An offline gateway has nothing to attach to.
+
+        Present so the worker can call it unconditionally rather than testing
+        which kind of gateway it holds — a check that would go stale the moment
+        a third gateway appeared.
+        """
+        return True
+
+    def reconnect(self) -> bool:
+        return True
+
     def is_connected(self) -> bool:
         return bool(self._bars)
 

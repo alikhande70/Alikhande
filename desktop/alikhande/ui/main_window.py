@@ -1056,15 +1056,33 @@ def build_application(offline: bool = False, environment: str = ""):
     gateway = None
     connected = False
     if not offline:
-        try:
-            from ..adapters.mt5.gateway import MT5Gateway
+        # Probe, do not connect. The probe attaches, reads and detaches again,
+        # which answers the two questions this function needs — is a terminal
+        # there, and is its account a demo — without leaving a connection
+        # stamped with the UI thread as its owner. The real attachment happens
+        # on the scan worker, in `ScanWorker._connect`.
+        from ..adapters.mt5.gateway import MT5Gateway, probe_terminal
 
-            candidate = MT5Gateway()
-            candidate.connect()
-            gateway = candidate
+        probe = probe_terminal()
+        if probe.available:
+            gateway = MT5Gateway()
             connected = True
-        except Exception as error:
-            journal.warn("MT5_UNAVAILABLE", "", str(error), 0)
+            journal.info(
+                "MT5_AVAILABLE",
+                "",
+                f"terminal build {probe.build}, account {probe.login} @ {probe.server}",
+                0,
+            )
+            if not probe.trade_allowed:
+                journal.warn(
+                    "ALGO_TRADING_DISABLED",
+                    "",
+                    "Algo Trading is off in the terminal; no order can be sent until "
+                    "it is enabled in Tools -> Options -> Expert Advisors",
+                    0,
+                )
+        else:
+            journal.warn("MT5_UNAVAILABLE", "", probe.reason, 0)
 
     if gateway is None:
         from ..adapters.offline.gateway import OfflineGateway
