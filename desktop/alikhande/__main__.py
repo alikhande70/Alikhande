@@ -21,50 +21,139 @@ from pathlib import Path
 
 
 def _cmd_doctor(_: argparse.Namespace) -> int:
+    """Report what this machine can and cannot do — by trying it.
+
+    This is the first thing that runs on the Windows machine before a demo
+    account is ever attached, so it is deliberately not a list of imports. It
+    walks the same path the application walks, in the same order, and stops at
+    the first thing that would stop the app:
+
+        package -> terminal -> account -> algo trading -> symbols -> history
+
+    Each step reports the *fix*, not just the failure. "cannot connect" is the
+    single most confusing thing this application can say, because it has at
+    least four unrelated causes and they need four different actions.
+
+    Exit code 0 means the machine could run a demo session today; 1 means
+    something named below has to be dealt with first.
+    """
     import platform
 
-    print(f"platform         {platform.system()} {platform.release()} ({platform.machine()})")
-    print(f"python           {sys.version.split()[0]}")
+    ok = True
+
+    def line(name: str, status: str, hint: str = "") -> None:
+        print(f"{name:<18}{status}")
+        if hint:
+            for part in hint.splitlines():
+                print(f"{'':<18}{part}")
+
+    line("platform", f"{platform.system()} {platform.release()} ({platform.machine()})")
+    line("python", sys.version.split()[0])
 
     try:
-        import PySide6  # noqa: F401
+        import PySide6
 
-        print("PySide6          installed — the desktop UI can run")
+        line("PySide6", f"{PySide6.__version__} — the desktop UI can run")
     except ImportError:
-        print("PySide6          MISSING — install with: pip install PySide6")
+        ok = False
+        line("PySide6", "MISSING", "install with: pip install PySide6")
 
     if platform.system() != "Windows":
-        print(
-            "MetaTrader5      unavailable — the package is Windows-only.\n"
-            "                 The UI, the backtest and every core engine still run\n"
-            "                 here; only live broker access needs Windows."
+        line(
+            "MetaTrader5",
+            "unavailable — the package is Windows-only",
+            "The UI, the backtest and every core engine still run here.\n"
+            "Only live broker access needs Windows.",
         )
-        return 0
+        return 0 if ok else 1
+
+    from .adapters.mt5.gateway import MT5Gateway, probe_terminal
 
     try:
         import MetaTrader5 as mt5
-    except ImportError:
-        print("MetaTrader5      MISSING — install with: pip install MetaTrader5")
-        return 0
 
-    print(f"MetaTrader5      {mt5.__version__} installed")
-    if not mt5.initialize():
-        code, message = mt5.last_error()
-        print(f"terminal         NOT REACHABLE ({code}: {message})")
-        print("                 Start MetaTrader 5, log in, and enable Algo Trading.")
+        line("MetaTrader5", f"{mt5.__version__} installed")
+    except ImportError:
+        line("MetaTrader5", "MISSING", "install with: pip install MetaTrader5")
         return 1
 
-    terminal = mt5.terminal_info()
-    account = mt5.account_info()
-    print(f"terminal         connected — build {terminal.build}")
-    print(f"algo trading     {'ENABLED' if terminal.trade_allowed else 'DISABLED — enable it'}")
-    if account is not None:
-        kind = {0: "DEMO", 1: "REAL", 2: "CONTEST"}.get(int(account.trade_mode), "?")
-        print(f"account          {account.login} @ {account.server} [{kind}]")
-        if kind != "DEMO":
-            print("                 This build refuses to trade a non-demo account.")
-    mt5.shutdown()
-    return 0
+    probe = probe_terminal()
+    if not probe.available:
+        line("terminal", f"NOT REACHABLE — {probe.reason}",
+             "Start MetaTrader 5 and log in to the account you intend to use.")
+        return 1
+    line("terminal", f"connected — build {probe.build}")
+
+    if not probe.account_known:
+        ok = False
+        line("account", "NOT READABLE",
+             "The terminal answered but reported no account. Log in first.")
+    else:
+        kind = "DEMO" if probe.is_demo else "REAL"
+        line("account", f"{probe.login} @ {probe.server} [{kind}]")
+        if not probe.is_demo:
+            line("", "This build never sends an order on a non-demo account.",
+                 "Declare the Production environment to rehearse everything\n"
+                 "except the send, or log in to a demo account to trade.")
+
+    if not probe.trade_allowed:
+        ok = False
+        line("algo trading", "DISABLED",
+             "Enable it: Tools -> Options -> Expert Advisors -> Allow algorithmic trading.")
+    else:
+        line("algo trading", "enabled")
+
+    # ---- the real path, on one thread, exactly as the worker does it -------
+    from .config import AppConfig
+    from .core.enums import Timeframe
+
+    gateway = MT5Gateway()
+    try:
+        gateway.ensure_connected()
+    except Exception as error:
+        line("gateway", f"FAILED — {error}")
+        return 1
+
+    try:
+        config = AppConfig()
+        resolved, missing, thin = [], [], []
+        for requested in config.symbols:
+            name = gateway.resolve_symbol(requested)
+            if name is None:
+                missing.append(requested)
+                continue
+            spec = gateway.symbol_spec(name)
+            if spec is None or not spec.ready:
+                missing.append(f"{requested} (no specification)")
+                continue
+            bars = gateway.bars(name, Timeframe.M5, config.scan.minimum_bars)
+            if len(bars) < config.scan.minimum_bars:
+                thin.append(f"{name}: {len(bars)}/{config.scan.minimum_bars} M5 bars")
+            resolved.append(f"{requested} -> {name}")
+
+        line("symbols", f"{len(resolved)} of {len(config.symbols)} resolved")
+        for entry in resolved:
+            line("", entry)
+        if missing:
+            ok = False
+            line("", "NOT FOUND: " + ", ".join(missing),
+                 "Add them to Market Watch in the terminal, or correct the names.")
+        if thin:
+            ok = False
+            line("history", "INSUFFICIENT")
+            for entry in thin:
+                line("", entry)
+            line("", "Open each symbol's M5 chart in MetaTrader and scroll back\n"
+                     "so the terminal downloads the history.")
+        elif resolved:
+            line("history", f"at least {config.scan.minimum_bars} M5 bars per symbol")
+    finally:
+        gateway.shutdown()
+
+    print()
+    print("READY — this machine can run a demo session." if ok
+          else "NOT READY — deal with the items marked above first.")
+    return 0 if ok else 1
 
 
 def _cmd_backtest(args: argparse.Namespace) -> int:
@@ -228,7 +317,9 @@ def _load_csv_bars(gateway, folder: Path, symbols: tuple[str, ...]) -> str:
                 handle.seek(0)
                 delimiter = "\t" if "\t" in sample else ","
                 reader = csv.reader(handle, delimiter=delimiter)
-                header = next(reader, None)
+                # Consumed for its side effect: MetaTrader's export has a
+                # header row that must not be parsed as a bar.
+                next(reader, None)
                 for line, row in enumerate(reader, start=2):
                     row = [c for c in row if c != ""]
                     if len(row) < 6:

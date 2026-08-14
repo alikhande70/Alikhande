@@ -173,7 +173,8 @@ alikhande/
     sqlite/    schema, migrations, repositories
   app/         scan orchestrator, backtest engine, maintenance
   ui/          PySide6 window: theme, motion, icons, eleven views
-tests/         406 tests, stdlib unittest, no MetaTrader required
+tests/         469 tests, stdlib unittest, no MetaTrader required
+               fake_mt5.py    a terminal double, so the live adapter executes
 packaging/     PyInstaller spec and Windows build script
 ```
 
@@ -229,7 +230,7 @@ blunt warning when the data is synthetic.
 
 ## Status
 
-**Executed and passing:** 180 tests, covering the indicators, all analysis
+**Executed and passing:** 469 tests, covering the indicators, all analysis
 engines, position sizing, portfolio risk, the arming protocol, the calendar
 gate, the SQLite schema against real sqlite3, the outcome loop end to end, and
 every safety gate above. The UI has been constructed, run and rendered
@@ -243,8 +244,13 @@ a backtest run writes 1,247 outcomes that the statistics layer reads back.
 
 **Not verified:**
 
-- **Live broker access.** No Windows machine and no MetaTrader terminal existed
-  where this was built. `adapters/mt5/gateway.py` has never executed.
+- **Live broker access, against a real terminal.** The adapter now *executes* —
+  against `tests/fake_mt5.py`, a double for the MetaTrader5 module surface it
+  uses — which is how a defect that broke every live pass was finally found: the
+  gateway attached on the UI thread and the scan worker's every call was then
+  refused by the package's owner-thread guard, silently, reported as
+  "disconnected". What is still unproven is that MetaQuotes' package behaves as
+  the double models it. That closes on Windows and nowhere else.
 - **Indicator agreement with MetaTrader.** The formulas follow MetaTrader's
   published sources — including that MT5's ATR is a *simple* average of True
   Range, not Wilder smoothing — but that agreement is derived from documentation,

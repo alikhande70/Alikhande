@@ -1,4 +1,4 @@
-# Verification status — Desktop 2.0.0
+# Verification status — Desktop 2.2.0
 
 Being precise about what has and has not been established matters more here than
 anywhere else in the project: this is a system whose entire purpose is to stop
@@ -22,11 +22,12 @@ indicator agreement — which is recorded below rather than glossed over.
 ## VERIFIED — executed in this environment
 
 ### The test suite
-180 tests, stdlib `unittest`, no external dependency:
+469 tests, stdlib `unittest`, no external dependency beyond PySide6 for the UI
+subset:
 
 ```
 python -m unittest discover -s tests -t .
-Ran 180 tests — OK
+Ran 469 tests — OK
 ```
 
 Covering:
@@ -87,17 +88,38 @@ In the MQL5 build this was permanently false.
 
 ## NOT VERIFIED
 
-### Live broker access — NOT VERIFIED
-`adapters/mt5/gateway.py` has **never executed**. No Windows machine and no
-MetaTrader terminal existed where this was built; the `MetaTrader5` package is
-Windows-only and cannot even be imported here. Specifically unproven: attaching
-to a terminal, symbol resolution against real broker decoration, `order_check`
-retcodes, filling-mode selection, `order_calc_profit` on cross-currency pairs,
-and `order_send` against a real demo server.
+### Live broker access — PARTIALLY VERIFIED
 
-Everything the gateway feeds is tested against a stub implementing the same
-Protocol, so the *contract* is exercised. Whether MetaTrader honours it as
-documented is not established.
+This entry used to read "has never executed", and that sentence was the single
+most expensive line in this document. Because nothing ran the adapter, a defect
+that broke **every live pass** survived a green suite, a static gate and two
+reviews: `build_application` attached the gateway on the UI thread, the scan
+worker ran on another, and the MetaTrader5 package's owner-thread guard then
+refused every call. The engine swallows gateway errors by design, so the window
+reported "disconnected" against a healthy, logged-in terminal — permanently,
+and pointing at the wrong cause.
+
+**Now executed** against `tests/fake_mt5.py`, a double for the subset of the
+MetaTrader5 module surface the adapter touches, installed into `sys.modules` so
+the code under test is the real code. 34 tests in `tests/test_mt5_gateway.py`
+cover: thread ownership and the refusal to migrate an owner, attach failure not
+leaving the gateway looking connected, reconnect shutting down first, the probe
+leaving nothing attached, symbol resolution against broker decoration,
+specification mapping, request construction, filling-mode selection including
+the neither-FOK-nor-IOC case, retcode interpretation, and the adapter's own
+independent real-account refusal.
+
+Writing those tests found three further defects in code that had never run —
+see "Defects found by running the code" below.
+
+**Still not established:** that MetaQuotes' package behaves as the double models
+it. The constants, field names and semantics come from published documentation,
+and a double built from documentation inherits every misunderstanding in it.
+Specifically still unproven against a real terminal: `order_send` on a demo
+server, `order_calc_profit` on cross-currency pairs, real broker symbol
+decoration, and whether `filling_mode` reports what the documentation says.
+
+That gap closes on Windows with a running terminal and nowhere else.
 
 ### Indicator agreement with MetaTrader — NOT VERIFIED
 This is the desktop build's own new risk, and it did not exist in the EA.
@@ -121,6 +143,15 @@ periods through `iMA`/`iATR`/`iADX`, and diff.
 does not cross-compile, so a Windows executable cannot be produced or tested
 from Linux. The spec is written from PyInstaller's documented behaviour.
 
+Two invariants the spec *can* be checked against without building, and now are
+(`tests/test_readiness.py`): `MetaTrader5` stays a hidden import, since it is
+imported inside a `try`/`except` and the dependency graph cannot see it; and
+**numpy is not excluded**. The spec used to exclude numpy — the pure core never
+touches it, so it looked like free weight — but the MetaTrader5 wheel depends on
+numpy and `copy_rates_from_pos` returns a numpy structured array the gateway
+reads by field name. That exclusion would have produced an executable which ran
+perfectly offline and failed the instant it touched a terminal.
+
 ### Strategy edge — NOT VERIFIED, AND NOT CLAIMED
 There is no out-of-sample result, no walk-forward and no live record on real
 data.
@@ -136,9 +167,36 @@ profitable.** The persistence layer exists precisely so that this can eventually
 be answered with data instead of opinion — and now, unlike in the MQL5 build,
 the machinery to collect that data actually works.
 
-## A defect found by running the code
+## Defects found by running the code
 
-Worth recording, because it is the clearest argument for the port.
+Worth recording, because between them they are the clearest argument for
+executing things rather than reviewing them.
+
+### The subsystems that were built, tested and connected to nothing
+
+Four modules had complete, passing unit tests and no consumers: the order-error
+taxonomy was fed by nothing, the robot's `reconnect` and `disarm` decisions were
+returned and discarded, notifications were routed into a deque nobody read, and
+the crash-recovery verdict was computed at startup and thrown away.
+
+Unit tests cannot catch this by construction — a module with no consumers passes
+its own tests perfectly. `tests/test_wiring.py` now asserts the couplings
+instead: 17 tests checking that a decision made in one place produces an effect
+in another, including one that walks every field of `RobotDecision` and fails if
+the window does not read it.
+
+### The adapter defects, found by executing it for the first time
+
+- `connect()` assigned the module handle *before* `initialize()` succeeded, so a
+  refused connection reported itself as attached and was never retried.
+- Filling mode fell back to IOC when the symbol's bitmask reported support for
+  neither FOK nor IOC — asking for the one policy the symbol had just refused,
+  and guaranteeing retcode 10030 on brokers that configure symbols that way.
+- Order comments were not truncated to MetaTrader's 32-byte field, so
+  reconciliation would compare a recorded comment against the broker's truncated
+  copy of it and report a mismatch that was purely an artefact of field width.
+
+### The inverted stop
 
 The backtest's first run reported 1,197 wins, 8,444 losses and a total of
 **+8,130 R**. With a 2R target those numbers cannot coexist: 1,197 × 2 − 8,444 =
@@ -160,8 +218,15 @@ results were arithmetically possible.
 
 ## Required next steps
 
-1. On Windows with MT5 running: `python -m alikhande doctor`. Gate: terminal
-   reachable, Algo Trading enabled, account reported DEMO.
+1. On Windows with MT5 running: `python -m alikhande doctor`. It walks the real
+   path in the order the application does — package, terminal, account, algo
+   trading, symbol resolution, history depth — and stops at the first thing that
+   would stop the app, reporting the *fix* rather than the symptom. Exit code 0
+   means the machine could run a demo session today. Its Windows branch is
+   itself tested against the fake terminal (`tests/test_readiness.py`), so the
+   command that certifies the machine is not itself unexercised.
+
+   Gate: exit code 0, account reported DEMO.
 2. Run `python -m alikhande ui` against a demo account in **Alert-only** mode.
    Confirm symbols resolve, spreads warm up and signals appear.
 3. Verify the indicators: export bars, compare EMA/ATR/ADX against the terminal.

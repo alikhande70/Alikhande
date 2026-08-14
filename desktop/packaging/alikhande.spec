@@ -38,7 +38,12 @@ a = Analysis(
     excludes=[
         "tkinter",
         "matplotlib",
-        "numpy",
+        # NOT numpy. The pure core has no use for it and excluding it looks
+        # like free weight — but the MetaTrader5 wheel depends on numpy and
+        # `copy_rates_from_pos` returns a numpy structured array, which the
+        # gateway reads by field name. Excluding it produced an executable that
+        # ran perfectly offline and failed the instant it touched a terminal,
+        # which is the worst possible place for this to surface.
         "PySide6.QtWebEngineCore",
         "PySide6.QtWebEngineWidgets",
         "PySide6.Qt3DCore",
