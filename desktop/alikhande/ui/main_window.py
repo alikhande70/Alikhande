@@ -42,6 +42,17 @@ from PySide6.QtWidgets import (
 )
 
 from ..app.engine import ScanEngine
+from ..app.maintenance import (
+    backup_database,
+    diagnostics,
+    export_settings,
+    list_backups,
+    load_sessions,
+    prune_backups,
+    restore_database,
+    save_sessions,
+    write_diagnostics,
+)
 from ..config import AppConfig
 from ..i18n import (
     LANGUAGES,
@@ -56,10 +67,16 @@ from ..i18n import (
     t,
 )
 from ..core.calendar_gate import CalendarGate
-from ..core.enums import RunMode, RuntimeKind
+from ..core.enums import DataState, RunMode, RuntimeKind, Timeframe
 from ..core.journal import Journal
+from ..core.dataquality import DataQualityMonitor
 from ..core.environment import Environment
+from ..core.notifications import NotificationRouter, Urgency
+from ..core.order_errors import ErrorTally
+from ..core.recovery import SessionLedger, SessionRecord
+from ..core.robot import Robot, RobotPolicy, minute_of_day
 from ..core.runtime import detect_runtime, environment_plan, persistence_plan
+from ..core.supervision import ConnectionSupervisor, Probe
 from ..core.statistics import Statistics
 from ..version import VERSION
 from ..profiles import Overrides, Profile, configure
@@ -70,7 +87,9 @@ from .views.dashboard import DashboardView
 from .views.execution import ExecutionView
 from .views.guide import GuideView
 from .views.health import HealthView
+from .views.operations import OperationsView
 from .views.risk import RiskView
+from .views.robot import RobotView
 from .views.scanner import ScannerView
 from .views.settings import SettingsView
 from .views.signal import SignalView
@@ -88,8 +107,10 @@ NAV = [
     ("signal", "nav.signal", "nav.signal.tip"),
     ("risk", "nav.risk", "nav.risk.tip"),
     ("execution", "nav.execution", "nav.execution.tip"),
+    ("robot", "nav.robot", "nav.robot.tip"),
     ("backtest", "nav.backtest", "nav.backtest.tip"),
     ("health", "nav.health", "nav.health.tip"),
+    ("diagnostics", "nav.ops", "nav.ops.tip"),
     ("settings", "nav.settings", "nav.settings.tip"),
     ("guide", "nav.guide", "nav.guide.tip"),
 ]
@@ -138,6 +159,36 @@ class MainWindow(QMainWindow):
             config, self._profile, self._overrides, self._outcome_summary()
         )
         self._statistics = Statistics(repositories, self._config.statistics)
+
+        # ---- the operational subsystems ------------------------------------
+        # Built before the views, because several of them are rendered on the
+        # first pass and a view holding None for its subsystem would have to
+        # guard every read.
+        self._supervisor = ConnectionSupervisor()
+        self._quality = DataQualityMonitor()
+        self._notifications = NotificationRouter(minimum_urgency=Urgency.NOTABLE)
+        self._robot = Robot(RobotPolicy(**(preferences.get("robot") or {})))
+        self._errors = ErrorTally()
+
+        # The session ledger is opened here rather than at first pass, so a
+        # crash during startup is still recorded as one.
+        # A per-run identity. ``runtime.session_identity`` is a hash of the data
+        # directory and is therefore the *same string every launch*, which made
+        # the session history eight rows all called E1F87784 — unreadable, and
+        # useless for saying which run crashed.
+        import time as _time
+        import uuid as _uuid
+
+        started = int(_time.time())
+        self._sessions = SessionLedger(load_sessions(data_directory()))
+        self._recovery = self._sessions.open(
+            SessionRecord(
+                session_id=_uuid.uuid4().hex[:8].upper(),
+                environment=engine.environment,
+                version=VERSION,
+                started_at=started,
+            )
+        )
 
         self.setWindowTitle(f"Alikhande Scanner {VERSION}")
         self.resize(1560, 960)
@@ -211,7 +262,9 @@ class MainWindow(QMainWindow):
             self._config,
             self._persistence.filename if self._persistence.enabled else "",
         )
+        self._robot_view = RobotView(self._robot.policy)
         self._health = HealthView(self._config, self._runtime, self._persistence)
+        self._operations = OperationsView()
         self._settings = SettingsView(
             self._config,
             self._profile,
@@ -227,8 +280,10 @@ class MainWindow(QMainWindow):
             self._signal,
             self._risk,
             self._execution,
+            self._robot_view,
             self._backtest,
             self._health,
+            self._operations,
             self._settings,
             self._guide,
         ):
@@ -243,6 +298,181 @@ class MainWindow(QMainWindow):
         self._execution.acknowledge_requested.connect(
             lambda note: self._post(Action("acknowledge", note))
         )
+        self._robot_view.policy_changed.connect(self._on_robot_policy)
+        self._robot_view.resume_requested.connect(self._robot.resume)
+        self._operations.backup_requested.connect(self._run_backup)
+        self._operations.restore_requested.connect(self._run_restore)
+        self._operations.diagnostics_requested.connect(self._write_diagnostics)
+        self._operations.export_settings_requested.connect(self._export_settings)
+
+
+    # ------------------------------------------------- operational subsystems
+    def _observe_link(self, snapshot) -> None:
+        """Turn this pass into one health probe.
+
+        The pass duration stands in for round-trip latency. It is not a pure
+        measurement — it includes the analysis — but it is monotonic in the
+        thing being measured and it needs no extra call to the terminal, which
+        a health check that itself hammers a struggling link would.
+        """
+        server_time = snapshot.now if snapshot.connected else 0
+        self._supervisor.observe(
+            Probe(
+                ok=snapshot.connected,
+                latency_ms=snapshot.last_pass_ms,
+                server_time=server_time,
+                detail="" if snapshot.connected else "gateway reported not connected",
+            ),
+            snapshot.now,
+        )
+
+        state = self._supervisor.health.state
+        previous = getattr(self, "_last_link_state", None)
+        if state != previous:
+            self._last_link_state = state
+            subject = {
+                "HEALTHY": "link.restored",
+                "DEGRADED": "link.degraded",
+                "STALLED": "link.stalled",
+                "DISCONNECTED": "link.disconnected",
+            }[state.name]
+            self._notifications.notify(
+                subject, self._supervisor.health.detail, now=snapshot.now
+            )
+
+    def _record_quality(self, snapshot) -> None:
+        """Grade each symbol's series from what the pass already carried.
+
+        ``view.bars`` is a **display slice** — the engine copies the last 140
+        M5 bars for the chart and analyses a much longer window it does not
+        hand over. Grading that slice against the 300-bar analysis minimum
+        reports every symbol as permanently unusable, which is what the first
+        render of this panel did: four symbols, "unusable in 100% of 31
+        passes", every one of them fine.
+
+        So sufficiency is taken from the engine's own verdict — ``data_state``
+        is READY exactly when the full window was there — and the slice is used
+        for the two questions it can actually answer: is the series continuous,
+        and is it current.
+        """
+        from ..core.dataquality import inspect_series
+
+        for view in snapshot.symbols:
+            if not view.resolved or not view.bars:
+                continue
+            ready = view.snapshot.data_state == DataState.READY
+            required = len(view.bars) if ready else self._config.scan.minimum_bars
+            series = inspect_series(
+                view.symbol,
+                Timeframe.M5,
+                [bar.time for bar in view.bars],
+                required=required,
+                now=snapshot.now,
+            )
+            self._quality.record(view.symbol, [series], snapshot.now)
+
+    def _drive_robot(self, snapshot) -> None:
+        """One robot pass, and whatever it asked for."""
+        weekday, minute = minute_of_day(snapshot.now) if snapshot.now else (0, 0)
+        actionable = sum(
+            1
+            for v in snapshot.symbols
+            if v.resolved and v.plan is not None and v.plan.valid and not v.news_blocks
+        )
+        decision = self._robot.evaluate(
+            now=snapshot.now,
+            weekday=weekday,
+            minute_of_day=minute,
+            environment=snapshot.environment,
+            link_usable=self._supervisor.health.usable,
+            data_usable=self._quality.worst_grade() <= 2,
+            news_blocked=snapshot.news_blind,
+            may_trade=snapshot.may_trade,
+            execution_unresolved=self._engine.execution.has_unresolved(),
+            candidates=actionable,
+            armed_stale=bool(snapshot.armed_symbol) and snapshot.armed_seconds <= 0,
+        )
+
+        for subject, detail in decision.notify:
+            self._notifications.notify(subject, detail, now=snapshot.now)
+
+        # The robot asked for a backup; it does not take one itself, because
+        # deciding and acting are kept apart so the decision stays testable.
+        if decision.backup and self._persistence.enabled:
+            self._run_backup(quiet=True)
+
+        self._robot_view.update_view(decision.status)
+
+    # -------------------------------------------------------- operator actions
+    def _on_robot_policy(self, policy) -> None:
+        self._robot.configure(policy)
+        self._save_preferences()
+
+    def _backup_folder(self) -> Path:
+        folder = data_directory() / "backups"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def _run_backup(self, quiet: bool = False) -> None:
+        if not self._persistence.enabled:
+            return
+        folder = self._backup_folder()
+        result = backup_database(self._persistence.filename, folder)
+        if result.ok:
+            prune_backups(folder)
+            self._operations.set_recovery_status(
+                t("ops.backup.ok", path=result.path), "good"
+            )
+            if not quiet:
+                self._notifications.notify("backup.written", result.path, now=0)
+        else:
+            self._operations.set_recovery_status(
+                t("ops.backup.failed", error=result.error), "critical"
+            )
+            # Always notified, quiet or not. A scheduled backup that silently
+            # failed for three weeks is the exact situation backups exist for.
+            self._notifications.notify("backup.failed", result.error, now=0)
+        self._operations.set_backups(list_backups(folder))
+
+    def _run_restore(self, path: str) -> None:
+        if not self._persistence.enabled:
+            return
+        result = restore_database(path, self._persistence.filename)
+        if result.ok:
+            self._operations.set_recovery_status(
+                t("ops.restore.ok", path=result.displaced_to), "warning"
+            )
+            QMessageBox.information(
+                self, t("ops.restore"), t("ops.restore.ok", path=result.displaced_to)
+            )
+        else:
+            self._operations.set_recovery_status(
+                t("ops.restore.failed", error=result.error), "critical"
+            )
+        self._operations.set_backups(list_backups(self._backup_folder()))
+
+    def _write_diagnostics(self) -> None:
+        bundle = diagnostics(
+            version=VERSION,
+            environment=self._engine.environment,
+            data_dir=data_directory(),
+            link=self._supervisor.health,
+            quality=self._quality.symbols(),
+            sessions=self._sessions.history(),
+            errors=self._errors,
+            account=self._engine.account_snapshot(),
+            journal_entries=self._engine.journal.recent(200),
+        )
+        path = write_diagnostics(bundle, data_directory() / "diagnostics")
+        self._operations.set_recovery_status(t("ops.diagnostics.ok", path=path), "good")
+
+    def _export_settings(self) -> None:
+        path = export_settings(
+            self._preferences_payload(),
+            version=VERSION,
+            path=data_directory() / "settings-export.json",
+        )
+        self._operations.set_recovery_status(t("ops.settings.ok", path=path), "good")
 
     # ------------------------------------------------------------------ shell
     def _build_sidebar(self) -> QWidget:
@@ -459,22 +689,44 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(VIEW_SIGNAL)
         self._signal._picker.setFocus()
 
-    def _save_preferences(self) -> None:
-        save_preferences(
-            data_directory(),
-            {
-                "language": current().code,
-                "theme": active_theme().name,
-                "profile": self._profile.value,
-                "overrides": self._overrides.to_dict(),
-                "view": self._stack.currentIndex(),
-                "width": self.width(),
-                "height": self.height(),
+    def _preferences_payload(self) -> dict:
+        """Everything worth restoring next launch, in one place.
+
+        Shared by the periodic save and by the settings export, so the two can
+        never disagree about what a "setting" is — an export missing the robot
+        policy would restore an operator onto a new machine with their
+        automation silently switched off.
+        """
+        from dataclasses import asdict
+
+        policy = self._robot.policy
+        return {
+            "language": current().code,
+            "theme": active_theme().name,
+            "profile": self._profile.value,
+            "overrides": self._overrides.to_dict(),
+            "environment": self._engine.environment,
+            "view": self._stack.currentIndex(),
+            "width": self.width(),
+            "height": self.height(),
+            # Windows are dropped: they are dataclasses, and the reconstruction
+            # on load would have to be version-tolerant for a value the
+            # operator cannot yet edit. The permissions are what they change.
+            "robot": {
+                k: v for k, v in asdict(policy).items() if k != "windows"
             },
-        )
+        }
+
+    def _save_preferences(self) -> None:
+        save_preferences(data_directory(), self._preferences_payload())
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         self._save_preferences()
+        # Closing the ledger IS the shutdown path whose absence marks a crash.
+        # It runs before the worker is stopped, so a hang in thread teardown
+        # still leaves this session recorded as having closed cleanly.
+        self._sessions.close(getattr(self, "_last_now", 0))
+        save_sessions(self._sessions.history(), data_directory())
         self._backtest.shutdown()
         self._worker.stop()
         self._thread.quit()
@@ -610,6 +862,9 @@ class MainWindow(QMainWindow):
         # Recorded so an offscreen render can wait for real data rather than
         # screenshotting the loading state.
         self._passes_seen = snapshot.passes
+        # Kept so `closeEvent` can stamp the session with broker time rather
+        # than the local clock, which every other timestamp in the ledger uses.
+        self._last_now = snapshot.now
         account = snapshot.account
         live = snapshot.runtime.kind == RuntimeKind.LIVE
 
@@ -704,6 +959,27 @@ class MainWindow(QMainWindow):
             snapshot, self._engine.execution.current, self._engine.working_orders()
         )
         self._health.update_view(snapshot, self._engine.journal)
+
+        # ---- the operational subsystems, fed from this pass -----------------
+        self._observe_link(snapshot)
+        self._record_quality(snapshot)
+        self._drive_robot(snapshot)
+
+        self._operations.update_view(
+            link=self._supervisor.health,
+            quality=self._quality.symbols(),
+            sessions=self._sessions.history(),
+            journal=self._engine.journal.entries(),
+        )
+
+        # The in-flight flag is written every pass rather than at shutdown,
+        # because its whole value is being correct at the moment the process
+        # dies — and a process that dies does not run its shutdown path.
+        in_flight = self._engine.execution.has_unresolved()
+        self._sessions.mark_in_flight(snapshot.execution_message or "", in_flight)
+        if in_flight != getattr(self, "_last_in_flight", None):
+            self._last_in_flight = in_flight
+            save_sessions(self._sessions.history(), data_directory())
 
         self.statusBar().showMessage(
             t(

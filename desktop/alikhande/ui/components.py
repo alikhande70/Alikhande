@@ -230,7 +230,16 @@ class KeyValue(QWidget):
         self._column.setSpacing(SPACE.sm)
         self._rows: dict[str, QLabel] = {}
 
-    def row(self, key: str, value: str = "—") -> None:
+    def row(self, key: str, value: str = "—", mono: bool = True) -> None:
+        """Add a row. ``mono=False`` for values that are prose rather than data.
+
+        The monospace face exists so digits line up down the column, and for a
+        price or a count that is exactly right. For a *word* it is wrong, and in
+        Persian it is worse than wrong: the bundled monospace fonts have no
+        Arabic-script coverage, so the shaper falls back per glyph and the text
+        renders unjoined — "خاموش" came out as "خا موش". A value that is a
+        sentence gets the body face.
+        """
         line = QHBoxLayout()
         line.setContentsMargins(0, 0, 0, 0)
         line.setSpacing(SPACE.md)
@@ -240,7 +249,7 @@ class KeyValue(QWidget):
         name.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
 
         value_label = QLabel(value)
-        value_label.setObjectName("Mono")
+        value_label.setObjectName("Mono" if mono else "Body")
         value_label.setWordWrap(True)
         value_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop
@@ -261,6 +270,20 @@ class KeyValue(QWidget):
             return
         widget.setText(value)
         widget.setStyleSheet(f"color: {colour};" if colour else "")
+
+    def clear(self) -> None:
+        """Drop every row.
+
+        Needed by lists whose *keys* change rather than only their values — the
+        robot's session windows, the backup list — where ``set`` cannot help
+        because the row it would update may no longer belong there.
+        """
+        while self._column.count():
+            item = self._column.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._rows.clear()
 
     def stretch(self) -> None:
         self._column.addStretch(1)

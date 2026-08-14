@@ -69,8 +69,15 @@ def render(out: Path, language: str, theme: str, settle_passes: int = 12) -> lis
     written: list[Path] = []
     for index, (_icon, key, _tip) in enumerate(NAV):
         window._stack.setCurrentIndex(index)
-        for _ in range(12):
+        # Animations advance on timer events over wall-clock time, so draining
+        # the event queue is not enough on its own — without the sleep the
+        # capture lands mid-transition and the previous nav item is still
+        # showing part of its active indicator, which reads as two selected
+        # rows rather than as a slide nobody was there to see.
+        settle = time.time() + 0.5
+        while time.time() < settle:
             application.processEvents()
+            time.sleep(0.02)
         name = key.split(".", 1)[1]
         path = out / f"{theme}_{language}_{index}_{name}.png"
         window.grab().save(str(path))

@@ -175,6 +175,20 @@ class ScanEngine:
         return self._mode
 
     @property
+    def environment(self) -> str:
+        return self._environment
+
+    def account_snapshot(self) -> AccountInfo | None:
+        """The account, or ``None`` when the gateway could not say.
+
+        A public accessor so the diagnostics bundle does not have to reach into
+        ``_safe_account``. Same swallow-and-return-None behaviour: a bundle that
+        raises because the terminal went away is a bundle you cannot generate
+        at exactly the moment you need one.
+        """
+        return self._safe_account()
+
+    @property
     def execution(self) -> ExecutionEngine:
         return self._execution
 

@@ -283,6 +283,85 @@ def import_settings(path: str | Path) -> tuple[dict, str]:
     return preferences, ""
 
 
+# -------------------------------------------------------------- session ledger
+SESSIONS_FILE = "sessions.json"
+
+
+def load_sessions(data_dir: str | Path) -> list:
+    """Read the session ring. A missing or unreadable file yields an empty list.
+
+    Never raises. This is read during startup, before the window exists, and a
+    corrupt sessions file must not be the reason the application cannot open —
+    the worst consequence of losing it is that one crash goes unreported.
+    """
+    from ..core.recovery import SessionRecord
+
+    path = Path(data_dir) / SESSIONS_FILE
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, list):
+        return []
+
+    records = []
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+        try:
+            records.append(
+                SessionRecord(
+                    session_id=str(row.get("session_id", "")),
+                    environment=str(row.get("environment", "")),
+                    version=str(row.get("version", "")),
+                    started_at=int(row.get("started_at", 0)),
+                    closed_at=int(row.get("closed_at", 0)),
+                    last_view=str(row.get("last_view", "")),
+                    execution_in_flight=bool(row.get("execution_in_flight", False)),
+                    in_flight_symbol=str(row.get("in_flight_symbol", "")),
+                    stats=dict(row.get("stats") or {}),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return records
+
+
+def save_sessions(records, data_dir: str | Path) -> None:
+    """Write the session ring. Best effort, and deliberately silent on failure.
+
+    Called from the scan loop as well as at shutdown — the in-flight flag is
+    only worth having if it is current at the moment the process dies — so a
+    failure here must not interrupt scanning. A read-only data directory
+    degrades crash detection and nothing else.
+    """
+    path = Path(data_dir) / SESSIONS_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                [
+                    {
+                        "session_id": r.session_id,
+                        "environment": r.environment,
+                        "version": r.version,
+                        "started_at": r.started_at,
+                        "closed_at": r.closed_at,
+                        "last_view": r.last_view,
+                        "execution_in_flight": r.execution_in_flight,
+                        "in_flight_symbol": r.in_flight_symbol,
+                        "stats": r.stats,
+                    }
+                    for r in records
+                ],
+                indent=1,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        return
+
+
 # ---------------------------------------------------------- diagnostics bundle
 def diagnostics(
     *,
