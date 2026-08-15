@@ -219,12 +219,15 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
     Appending would double the sample behind every rate while describing the
     same trades twice, and the numbers would appear to be improving.
     """
+    import time
+
     from .adapters.offline.gateway import OfflineGateway
     from .adapters.sqlite.database import Database
     from .adapters.sqlite.repositories import Repositories
     from .app.backtest import BACKTEST_TIMEFRAMES, Backtester
     from .config import AppConfig
     from .core.enums import RuntimeKind
+    from .core.hashing import fnv1a
     from .core.models import RuntimeContext
     from .core.runtime import persistence_plan
     from .ui.main_window import data_directory
@@ -248,21 +251,38 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
     database.open(target)
     repositories = Repositories(database)
 
-    removed = repositories.purge_runs_of_kind(RuntimeKind.REPLAY.name)
-    if removed:
-        print(f"  replaced    {removed:,} signals from the previous calibration")
-
     gateway = OfflineGateway(equity=args.equity)
     gateway.load_synthetic(symbols, BACKTEST_TIMEFRAMES, args.h4_bars, seed=args.seed)
 
-    result = Backtester(config).run(
-        gateway,
-        symbols,
-        warmup_bars=args.warmup,
-        max_steps=args.steps,
-        data_source="synthetic",
-        repositories=repositories,
-    )
+    # Replay first, replace afterwards. This used to purge the previous
+    # calibration before running, so an interrupted replay — Ctrl-C, a raised
+    # exception, a full disk — left the operator with no calibration at all and
+    # nothing to restore it from. The previous evidence was destroyed by an
+    # action that produced none.
+    run_id = fnv1a(f"calibrate|{time.time()}")
+    result = None
+    try:
+        result = Backtester(config).run(
+            gateway,
+            symbols,
+            warmup_bars=args.warmup,
+            max_steps=args.steps,
+            data_source="synthetic",
+            repositories=repositories,
+            run_id=run_id,
+        )
+    except BaseException:
+        # BaseException, so a KeyboardInterrupt cleans up too — that is the
+        # interruption an operator is most likely to cause.
+        repositories.purge_run(run_id)
+        database.close()
+        print("\n  interrupted — the previous calibration was left untouched.")
+        raise
+
+    removed = repositories.purge_runs_of_kind(RuntimeKind.REPLAY.name, keep_run_id=run_id)
+    if removed:
+        print(f"  replaced    {removed:,} signals from the previous calibration")
+
     print(result.report(min_sample=config.statistics.min_outcome_sample))
 
     print("  per symbol and setup, as the scanner will read it:")

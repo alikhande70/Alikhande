@@ -173,7 +173,7 @@ alikhande/
     sqlite/    schema, migrations, repositories
   app/         scan orchestrator, backtest engine, maintenance
   ui/          PySide6 window: theme, motion, icons, eleven views
-tests/         469 tests, stdlib unittest, no MetaTrader required
+tests/         493 tests, stdlib unittest, no MetaTrader required
                fake_mt5.py    a terminal double, so the live adapter executes
 packaging/     PyInstaller spec and Windows build script
 ```
@@ -230,7 +230,7 @@ blunt warning when the data is synthetic.
 
 ## Status
 
-**Executed and passing:** 469 tests, covering the indicators, all analysis
+**Executed and passing:** 493 tests, covering the indicators, all analysis
 engines, position sizing, portfolio risk, the arming protocol, the calendar
 gate, the SQLite schema against real sqlite3, the outcome loop end to end, and
 every safety gate above. The UI has been constructed, run and rendered

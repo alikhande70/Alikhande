@@ -122,6 +122,20 @@ class EngineSnapshot:
     #: this verbatim rather than deciding for itself whether sending is possible.
     send_lock: str = ""
 
+    # ---- broker state ------------------------------------------------------
+    # Carried here rather than fetched by the UI, and that is a threading
+    # requirement rather than a style preference. The MetaTrader5 package stamps
+    # an owner thread on attach and refuses every call from another, so a view
+    # that asked the engine for positions was asking the gateway from the UI
+    # thread — which raised, was swallowed by the engine's `_safe_*` wrappers,
+    # and rendered as "no open positions" against an account that had them.
+    #
+    # The accessors that made that possible have been removed, so the only way
+    # to read broker state is from a snapshot the worker produced.
+    positions: list = field(default_factory=list)
+    orders: list = field(default_factory=list)
+    exposure: object = None
+
 
 class ScanEngine:
     def __init__(
@@ -165,6 +179,9 @@ class ScanEngine:
         self._views: dict[str, SymbolView] = {}
         self._passes = 0
         self._cursor = 0  # round-robin position for slicing
+        # Signals submitted and awaiting a confirmed fill price. An outcome
+        # cannot be opened until the broker says what it filled at.
+        self._pending_outcomes: dict[str, SignalCandidate] = {}
 
         if self._repo is not None:
             self._execution.set_persistence(self._repo.save_execution)
@@ -188,16 +205,6 @@ class ScanEngine:
         gateway access on one thread.
         """
         return self._gateway
-
-    def account_snapshot(self) -> AccountInfo | None:
-        """The account, or ``None`` when the gateway could not say.
-
-        A public accessor so the diagnostics bundle does not have to reach into
-        ``_safe_account``. Same swallow-and-return-None behaviour: a bundle that
-        raises because the terminal went away is a bundle you cannot generate
-        at exactly the moment you need one.
-        """
-        return self._safe_account()
 
     @property
     def execution(self) -> ExecutionEngine:
@@ -235,15 +242,11 @@ class ScanEngine:
         except Exception:
             return fallback
 
-    def own_positions(self):
-        return self._own_positions()
-
-    def working_orders(self):
-        return self._safe_orders()
-
-    def exposure_summary(self, account=None):
-        equity = account.equity if account and account.equity > 0 else 1.0
-        return self._risk.exposure("", self._own_positions(), self._specs, equity)
+    # `own_positions`, `working_orders` and `exposure_summary` used to live
+    # here. They are gone rather than deprecated: each one reached the gateway,
+    # every caller was on the UI thread, and leaving them available meant the
+    # next view that needed positions would reintroduce the same defect. The
+    # snapshot carries all three now.
 
     def set_mode(self, mode: RunMode, now: int) -> tuple[bool, str]:
         """Change run mode.
@@ -413,8 +416,15 @@ class ScanEngine:
         if self._execution.has_unresolved():
             self._execution.reconcile(self._gateway, now)
 
+        self._track_fills(now)
+        self._resolve_outcomes(now)
+
+        # Read once and reused for both the exposure figure and the snapshot.
+        # Two calls would mean the number the operator sees and the list it is
+        # derived from could come from different moments.
+        positions = self._own_positions()
         exposure = self._risk.exposure(
-            "", self._own_positions(), self._specs, equity if equity > 0 else 1.0
+            "", positions, self._specs, equity if equity > 0 else 1.0
         )
 
         intent = self._arming.current
@@ -447,7 +457,65 @@ class ScanEngine:
             account_severity=severity,
             account_code=account_code,
             send_lock=send_refusal(self._environment, self._mode),
+            positions=positions,
+            orders=self._safe_orders(),
+            exposure=exposure,
         )
+
+    def _track_fills(self, now: int) -> None:
+        """Open an outcome once the broker has confirmed what it filled at.
+
+        The gap this closes: `confirm()` used to open the outcome immediately,
+        at the planned entry. That is a price nobody traded — the broker fills
+        somewhere else, and on a demo account "somewhere else" is exactly the
+        slippage the evidence base exists to measure.
+        """
+        if not self._pending_outcomes:
+            return
+        record = self._execution.current
+        if record.fill_price <= 0.0 or record.filled_volume <= 0.0:
+            return
+
+        signal = self._pending_outcomes.get(record.signal_id)
+        if signal is None:
+            return
+        if self._outcomes.open(signal, record.fill_price, now):
+            self._journal.info(
+                "OUTCOME_OPENED",
+                signal.symbol,
+                f"tracking {signal.signal_id} from the filled price {record.fill_price}"
+                f" (planned {signal.preferred_entry})",
+                now,
+            )
+        # Removed either way. A signal whose fill produced no usable risk
+        # distance is refused by the tracker, and retrying it every pass would
+        # journal the same refusal forever.
+        self._pending_outcomes.pop(record.signal_id, None)
+
+    def _resolve_outcomes(self, now: int) -> None:
+        """Score tracked signals against the newest closed bar, and persist.
+
+        Nothing outside the backtest wrote to the ``outcomes`` table. The
+        infrastructure existed, the tracker existed, and in a live or demo
+        session it was never called — so the evidence base could only ever be
+        filled by a replay, and the "closed outcome loop" was closed in exactly
+        one of the two places that matter.
+        """
+        if not self._outcomes.tracked:
+            return
+        for view in self._views.values():
+            if not view.resolved or not view.bars:
+                continue
+            for outcome, state in self._outcomes.update(view.symbol, view.bars[-1], now):
+                if self._repo is not None:
+                    self._repo.save_outcome(outcome)
+                    self._repo.update_signal_state(outcome.signal_id, state)
+                self._journal.info(
+                    "OUTCOME_RESOLVED",
+                    view.symbol,
+                    f"{outcome.signal_id} {state.name} at {outcome.realized_r:+.2f}R",
+                    now,
+                )
 
     def _safe_connected(self) -> bool:
         try:
@@ -643,7 +711,14 @@ class ScanEngine:
         )
         if accepted and view.signal is not None:
             self._account_guard.register_risk_used(view.plan.risk_percent, now)
-            self._outcomes.open(view.signal, view.plan.entry, now)
+            # The outcome is NOT opened here. It used to be, at
+            # ``view.plan.entry`` — the price the plan asked for, recorded
+            # before the broker had said anything at all. Every realised R in
+            # the evidence base was then measured from a price that was never
+            # traded, off by the slippage, in the direction that flatters the
+            # result. It is opened in `_track_fills` instead, on the price the
+            # broker reports, and only once a fill is confirmed.
+            self._pending_outcomes[view.signal.signal_id] = view.signal
             if self._repo is not None:
                 self._repo.update_signal_state(view.signal.signal_id, SignalState.ACTIVE)
         return accepted, submit_reason

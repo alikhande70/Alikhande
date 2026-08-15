@@ -35,6 +35,7 @@ has to kill the application to escape.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
@@ -52,6 +53,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...config import AppConfig
+from ...core.hashing import fnv1a
 from ...i18n import fmt_count, t
 from ..components import Card, StatusChip, label
 from ..theme import PALETTE, SPACE
@@ -109,15 +111,16 @@ class BacktestWorker(QObject):
             database = Database()
             database.open(request["database"])
             repositories = Repositories(database)
-            # Replace rather than accumulate, for the same reason the CLI
-            # calibration does: a second run appended would double the sample
-            # behind every rate while describing the same trades twice.
-            repositories.purge_runs_of_kind(RuntimeKind.REPLAY.name)
 
         def progress(done: int, total: int) -> bool:
             self.progress.emit(done, total)
             return not self._stop
 
+        # A fresh identity for this run, so the old calibration and the new one
+        # can coexist in the database until we know the new one is worth
+        # keeping.
+        run_id = fnv1a(f"backtest|{time.time()}")
+        result = None
         try:
             result = Backtester(config).run(
                 gateway,
@@ -126,8 +129,26 @@ class BacktestWorker(QObject):
                 data_source=source,
                 repositories=repositories,
                 progress=progress,
+                run_id=run_id,
             )
         finally:
+            if repositories is not None:
+                # Replace, but only once there is something to replace *with*.
+                #
+                # This used to purge before replaying. An operator who pressed
+                # Stop, or a replay that raised halfway, was then left with no
+                # calibration at all and nothing to restore it from — the
+                # previous evidence destroyed by an action that produced none.
+                #
+                # A cancelled run is discarded rather than kept: it describes a
+                # smaller sample than was asked for, and stored under the same
+                # label as a complete one it is indistinguishable from it.
+                if result is not None and not result.cancelled:
+                    repositories.purge_runs_of_kind(
+                        RuntimeKind.REPLAY.name, keep_run_id=run_id
+                    )
+                else:
+                    repositories.purge_run(run_id)
             if database is not None:
                 database.close()
 

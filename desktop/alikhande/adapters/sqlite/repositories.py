@@ -375,7 +375,7 @@ class Repositories:
             return 0, 0
         return int(row["wins"] or 0), int(row["total"] or 0)
 
-    def purge_runs_of_kind(self, kind: str) -> int:
+    def purge_runs_of_kind(self, kind: str, *, keep_run_id: str = "") -> int:
         """Delete every run of ``kind`` and everything hanging off it.
 
         Exists so calibration is *replaceable* rather than cumulative. Without
@@ -387,16 +387,65 @@ class Repositories:
         Deliberately scoped by run kind and never by "everything": a call that
         could reach a LIVE run would be one typo away from erasing the only
         records in this application that came from a real account.
+
+        ``keep_run_id`` spares one run, and it is what makes replacement safe
+        rather than merely correct-on-success. Callers used to purge *before*
+        replaying, so an operator who cancelled the run — or a replay that
+        raised halfway — was left with no calibration at all and nothing to
+        restore it from. The order is now: write the new run, then purge the
+        others, keeping the one just written.
         """
         if not self.ready:
+            return 0
+
+        if keep_run_id:
+            rows = self._db.execute(
+                "SELECT s.signal_id AS signal_id FROM signals s"
+                " JOIN runs r ON r.run_id = s.run_id"
+                " WHERE r.kind = ? AND s.run_id <> ?",
+                (kind, keep_run_id),
+            ).fetchall()
+        else:
+            rows = self._db.execute(
+                "SELECT s.signal_id AS signal_id FROM signals s"
+                " JOIN runs r ON r.run_id = s.run_id WHERE r.kind = ?",
+                (kind,),
+            ).fetchall()
+        signals = [row["signal_id"] for row in rows]
+
+        if signals:
+            marks = ",".join("?" * len(signals))
+            for table in ("outcomes", "signal_features", "trade_plans"):
+                self._db.connection.execute(
+                    f"DELETE FROM {table} WHERE signal_id IN ({marks})", signals
+                )
+            self._db.connection.execute(
+                f"DELETE FROM signals WHERE signal_id IN ({marks})", signals
+            )
+        if keep_run_id:
+            self._db.execute(
+                "DELETE FROM runs WHERE kind = ? AND run_id <> ?", (kind, keep_run_id)
+            )
+        else:
+            self._db.execute("DELETE FROM runs WHERE kind = ?", (kind,))
+        self._db.commit()
+        return len(signals)
+
+    def purge_run(self, run_id: str) -> int:
+        """Delete one run and everything hanging off it.
+
+        The undo for a replay that was cancelled or raised. The partial rows it
+        wrote describe a run that never finished, and leaving them would put a
+        truncated sample into the evidence base under a label that says nothing
+        about being truncated.
+        """
+        if not self.ready or not run_id:
             return 0
 
         signals = [
             row["signal_id"]
             for row in self._db.execute(
-                "SELECT s.signal_id AS signal_id FROM signals s"
-                " JOIN runs r ON r.run_id = s.run_id WHERE r.kind = ?",
-                (kind,),
+                "SELECT signal_id FROM signals WHERE run_id = ?", (run_id,)
             ).fetchall()
         ]
         if signals:
@@ -408,7 +457,7 @@ class Repositories:
             self._db.connection.execute(
                 f"DELETE FROM signals WHERE signal_id IN ({marks})", signals
             )
-        self._db.execute("DELETE FROM runs WHERE kind = ?", (kind,))
+        self._db.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
         self._db.commit()
         return len(signals)
 

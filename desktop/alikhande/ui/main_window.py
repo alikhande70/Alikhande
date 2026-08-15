@@ -437,15 +437,16 @@ class MainWindow(QMainWindow):
         self._robot_view.update_view(decision.status)
 
     def _now(self) -> int:
-        """Broker server time when there is one, local time otherwise.
+        """The broker's clock as of the last pass, or local time before one.
 
-        Only used for events raised outside a scan pass — a backup taken from a
-        button, the recovery verdict at launch. Anything inside a pass uses the
-        snapshot's clock, which is the broker's.
+        Deliberately not `engine.server_time()`: that asks the gateway, and
+        every caller of this method is on the UI thread. The last snapshot's
+        timestamp is the same number the worker read, a few hundred
+        milliseconds stale at most, and it costs no cross-thread call.
         """
         import time as _time
 
-        return self._engine.server_time(int(_time.time()))
+        return getattr(self, "_last_now", 0) or int(_time.time())
 
     def _report_recovery(self) -> None:
         """Say what happened to the previous session.
@@ -557,7 +558,8 @@ class MainWindow(QMainWindow):
             quality=self._quality.symbols(),
             sessions=self._sessions.history(),
             errors=self._engine.execution.errors,
-            account=self._engine.account_snapshot(),
+            # From the snapshot, not the gateway: this runs on the UI thread.
+            account=getattr(self, "_last_account", None),
             journal_entries=self._engine.journal.recent(200),
         )
         path = write_diagnostics(bundle, data_directory() / "diagnostics")
@@ -985,6 +987,13 @@ class MainWindow(QMainWindow):
         # Kept so `closeEvent` can stamp the session with broker time rather
         # than the local clock, which every other timestamp in the ledger uses.
         self._last_now = snapshot.now
+        # The last pass, held whole. The handful of UI-thread consumers that
+        # run outside a pass — the diagnostics bundle, the recovery report,
+        # a backup taken from a button — read what the worker last observed
+        # rather than asking the gateway, which they are on the wrong thread
+        # to do.
+        self._last_snapshot = snapshot
+        self._last_account = snapshot.account
         account = snapshot.account
         live = snapshot.runtime.kind == RuntimeKind.LIVE
 
@@ -1071,12 +1080,16 @@ class MainWindow(QMainWindow):
         self._dashboard.update_view(snapshot, evidence)
         self._signal.update_view(snapshot)
 
-        positions = self._engine.own_positions()
+        # Everything here comes off the snapshot. Asking the engine would ask
+        # the gateway, and this method runs on the UI thread — the MetaTrader5
+        # package refuses calls from any thread but the one that attached, so
+        # those reads raised, were swallowed, and rendered as an account with no
+        # positions and no exposure. The accessors that allowed it are gone.
         self._risk.update_view(
-            snapshot, positions, self._engine.exposure_summary(account), self._engine.guard_state
+            snapshot, snapshot.positions, snapshot.exposure, self._engine.guard_state
         )
         self._execution.update_view(
-            snapshot, self._engine.execution.current, self._engine.working_orders()
+            snapshot, self._engine.execution.current, snapshot.orders
         )
         self._health.update_view(snapshot, self._engine.journal)
 

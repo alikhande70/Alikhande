@@ -4,7 +4,7 @@ Two builds of one system:
 
 | | |
 |---|---|
-| **[`desktop/`](desktop/) — Desktop 2.2.0** | A standalone Windows application. Its own process, window and database; MetaTrader runs headless in the background purely as a quote/execution gateway. Three declared environments, an in-app robot, connection supervision, crash recovery, backup/restore and diagnostics. 469 tests execute, including the live MT5 adapter against a terminal double; the backtest runs; the outcome loop is closed. |
+| **[`desktop/`](desktop/) — Desktop 2.2.0** | A standalone Windows application. Its own process, window and database; MetaTrader runs headless in the background purely as a quote/execution gateway. Three declared environments, an in-app robot, connection supervision, crash recovery, backup/restore and diagnostics. 493 tests execute, including the live MT5 adapter against a terminal double and a thread-discipline harness that enforces MetaTrader's owner-thread rule on the real window; the backtest runs; the outcome loop is closed. |
 | **`MQL5/` — MT5 v1.3.0** | The MetaTrader Expert Advisor. Statically verified, never compiled. |
 
 Read [`desktop/README.md`](desktop/README.md) first if you want the application,

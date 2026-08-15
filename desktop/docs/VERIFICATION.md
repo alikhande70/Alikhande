@@ -22,12 +22,12 @@ indicator agreement — which is recorded below rather than glossed over.
 ## VERIFIED — executed in this environment
 
 ### The test suite
-469 tests, stdlib `unittest`, no external dependency beyond PySide6 for the UI
+493 tests, stdlib `unittest`, no external dependency beyond PySide6 for the UI
 subset:
 
 ```
 python -m unittest discover -s tests -t .
-Ran 469 tests — OK
+Ran 493 tests — OK
 ```
 
 Covering:
@@ -171,6 +171,66 @@ the machinery to collect that data actually works.
 
 Worth recording, because between them they are the clearest argument for
 executing things rather than reviewing them.
+
+### The UI thread was still reaching the broker
+
+The first thread-ownership fix moved the *attachment* to the scan worker. It did
+not stop the UI thread from making calls. `_on_snapshot` — a queued Qt slot, so
+UI thread by construction — asked the engine for `own_positions()`,
+`working_orders()` and `exposure_summary()`, and all three reached the gateway.
+
+On MetaTrader those raise. The engine's `_safe_*` wrappers swallow gateway
+exceptions by design, so the Risk view would have shown **zero open positions
+and zero exposure on an account that had both**, permanently and without a
+single error on screen. The submit gate was never at risk — the engine computes
+its own exposure inside the pass, on the worker thread — but the number the
+operator reads to decide whether to take another trade was wrong.
+
+Found by attaching a gateway that enforces MetaTrader's owner-thread rule to the
+real window and watching who called it. `tests/test_thread_discipline.py`
+automates exactly that, and the three accessors are **removed** rather than
+deprecated: the snapshot carries positions, orders and exposure now, and leaving
+the accessors available meant the next view that needed positions would
+reintroduce the defect.
+
+### The outcome was recorded at a price nobody traded
+
+`confirm()` opened the outcome tracker at `plan.entry` the instant the submit
+was accepted — before the broker had said anything about the fill. Realised R
+was therefore measured from the *planned* entry, which differs from the real one
+by the slippage, in the direction that flatters the result.
+
+The execution record now carries `fill_price`, volume-weighted across entry
+deals and overridden by a live position's `price_open` when reconciliation finds
+one, and the outcome opens on that price and only once a fill is confirmed.
+
+Filled *volume* is deliberately still owned by the deal ledger. Taking it from
+the send result as well double-counted the deal that followed and drove a
+partial fill to FILLED — the existing idempotency tests caught that within a
+minute of the change.
+
+### The outcome loop was closed in the backtest and open everywhere else
+
+`save_outcome` had exactly one caller: `app/backtest.py`. A live or demo session
+persisted signals, plans, executions and deals, tracked nothing, and wrote no
+outcomes at all — so the evidence base could only ever be filled by a replay.
+The claim that "the outcome loop is closed" was true of the half that describes
+a synthetic generator and false of the half that describes a broker.
+
+The engine now resolves tracked signals against each new closed bar and persists
+what resolves, every pass, in every environment that has a database.
+
+### A cancelled replay destroyed the evidence it failed to replace
+
+Both the calibration command and the Backtest view purged the previous replay
+*before* starting the new one. Press Stop, or hit an exception, or Ctrl-C, and
+the operator was left with no calibration and nothing to restore it from.
+
+The order is now: write the new run under its own id, and replace the others
+only once it has finished. A cancelled run is discarded rather than kept — a
+truncated sample stored under the same label as a complete one is
+indistinguishable from it afterwards. `purge_runs_of_kind` gained
+`keep_run_id`; `purge_run` is the undo.
 
 ### The subsystems that were built, tested and connected to nothing
 

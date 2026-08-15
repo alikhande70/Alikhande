@@ -247,6 +247,15 @@ class ExecutionRecord:
     position_id: int = 0
     requested_volume: float = 0.0
     filled_volume: float = 0.0
+    #: Volume-weighted average price of the entry deals, as the broker reported
+    #: them. Zero until a fill is confirmed.
+    #:
+    #: This exists because the outcome tracker used to be opened at the
+    #: *planned* entry, the moment `confirm()` returned, before the broker had
+    #: said anything. Every realised R in the evidence base was then measured
+    #: from a price that was never traded — off by the slippage, in the
+    #: direction that flatters the result.
+    fill_price: float = 0.0
     retcode: int = 0
     message: str = ""
     created_at: int = 0

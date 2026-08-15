@@ -77,6 +77,9 @@ class BrokerTruth:
     source: str = ""
     detail: str = ""
     filled_volume: float = 0.0
+    #: The broker's own open price for the position, when a live position was
+    #: what resolved this execution. Zero when the source could not say.
+    fill_price: float = 0.0
     position_id: int = 0
 
 
@@ -331,6 +334,16 @@ class ExecutionEngine:
         self._current.deal_ticket = outcome.deal
         self._current.retcode = outcome.retcode
         self._current.message = outcome.comment
+        # A synchronous DONE carries the executed price. Taken as a provisional
+        # value; the deal stream corrects it if the fill was split.
+        #
+        # The *volume* is deliberately not taken from here. Filled volume is
+        # owned by the deal ledger, which is where idempotency lives — setting
+        # it from the send result means the deal that follows adds to a total
+        # that already counted it, and a partial fill reads as complete. The
+        # existing partial-fill tests caught exactly that.
+        if outcome.ok and outcome.price > 0.0:
+            self._current.fill_price = outcome.price
 
         if not outcome.ok:
             # Classify before deciding what to say. The retcode alone is not a
@@ -397,6 +410,9 @@ class ExecutionEngine:
                 source="POSITION",
                 detail=f"position {position.position_id} open",
                 filled_volume=position.volume,
+                # The broker's own record of what this position opened at, which
+                # is authoritative in a way the request never was.
+                fill_price=getattr(position, "price_open", 0.0) or 0.0,
                 position_id=position.position_id,
             )
         return None
@@ -572,6 +588,10 @@ class ExecutionEngine:
                 self._current.position_id = truth.position_id
             if truth.filled_volume > 0.0:
                 self._current.filled_volume = truth.filled_volume
+            if truth.fill_price > 0.0:
+                # Authoritative: this is what the broker says the position
+                # opened at, not what the request asked for.
+                self._current.fill_price = truth.fill_price
             self._journal.info(
                 "RECONCILED",
                 self._current.symbol,
@@ -675,7 +695,15 @@ class ExecutionEngine:
             self._current.state = ExecState.COMPLETED
             self._current.terminal = True
         else:
+            # Volume-weighted, because a partial fill can arrive as several
+            # deals at different prices and the entry that matters is the one
+            # the position actually holds — not the first tick of it.
+            previous_volume = self._current.filled_volume
             self._current.filled_volume += deal.volume
+            if self._current.filled_volume > 0.0 and deal.price > 0.0:
+                self._current.fill_price = (
+                    self._current.fill_price * previous_volume + deal.price * deal.volume
+                ) / self._current.filled_volume
             self._current.state = (
                 ExecState.FILLED
                 if self._current.filled_volume + 1e-8 >= self._current.requested_volume
