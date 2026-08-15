@@ -369,11 +369,11 @@ class SignalView(QWidget):
     def _render_execute(self, view, snapshot) -> None:
         armed_here = snapshot.armed_symbol == view.symbol
         has_plan = view.plan is not None and view.plan.valid
-        demo = snapshot.mode == RunMode.DEMO_CONFIRM
+        confirmable = snapshot.mode in (RunMode.SHADOW, RunMode.DEMO_CONFIRM)
         gated = view.news_blocks or not snapshot.may_trade or snapshot.requires_manual_review
 
-        self._arm.setEnabled(demo and has_plan and not armed_here and not gated)
-        self._confirm.setEnabled(demo and has_plan and armed_here)
+        self._arm.setEnabled(confirmable and has_plan and not armed_here and not gated)
+        self._confirm.setEnabled(confirmable and has_plan and armed_here and not gated)
 
         if armed_here:
             ttl = max(1, self._config.execution.arm_ttl_seconds)
@@ -386,7 +386,7 @@ class SignalView(QWidget):
             return
 
         self._countdown.setValue(0)
-        if not demo:
+        if not confirmable:
             self._set_status(
                 t(
                     "exec.mode_blocks",

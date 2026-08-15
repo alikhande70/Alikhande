@@ -38,10 +38,9 @@ POSITION_KEYS = ["col.symbol","col.side","col.volume","col.entry","col.stop","co
 
 
 class RiskView(QWidget):
-    def __init__(self, config, repositories=None):
+    def __init__(self, config):
         super().__init__()
         self._config = config
-        self._repo = repositories
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -186,21 +185,33 @@ class RiskView(QWidget):
         )
 
     # ----------------------------------------------------------------- render
-    def update_view(self, snapshot, positions, exposure, guard_state) -> None:
+    def update_view(self, snapshot, positions=None, exposure=None, guard_state=None) -> None:
+        positions = snapshot.positions if positions is None else positions
+        exposure = snapshot.exposure if exposure is None else exposure
+        guard_state = snapshot.guard_state if guard_state is None else guard_state
         risk = self._config.risk
         account = snapshot.account
         equity = account.equity if account else 0.0
+        positions_known = getattr(snapshot, "positions_known", True)
 
         self._tile_equity.set(
             fmt_money(equity, 0) if account else t("common.none"),
             account.currency if account else t("chip.no_account"),
         )
-        self._tile_risk.set(
-            fmt_percent(exposure.open_risk_pct),
-            t("dash.tile.risk.caption", cap=fmt_percent(risk.max_open_risk_pct)),
-            PALETTE.critical if exposure.open_risk_pct > risk.max_open_risk_pct else None,
-        )
-        self._tile_positions.set(fmt_count(exposure.open_positions), t("risk.tile.positions.caption"))
+        if positions_known:
+            self._tile_risk.set(
+                fmt_percent(exposure.open_risk_pct),
+                t("dash.tile.risk.caption", cap=fmt_percent(risk.max_open_risk_pct)),
+                PALETTE.critical
+                if exposure.open_risk_pct > risk.max_open_risk_pct
+                else None,
+            )
+            self._tile_positions.set(
+                fmt_count(exposure.open_positions), t("risk.tile.positions.caption")
+            )
+        else:
+            self._tile_risk.set("?", t("risk.exposure.unknown"), PALETTE.critical)
+            self._tile_positions.set("?", t("risk.positions.unknown"), PALETTE.critical)
 
         drawdown = 0.0
         if guard_state.peak_equity > 0 and equity > 0:
@@ -211,17 +222,27 @@ class RiskView(QWidget):
             PALETTE.critical if drawdown >= risk.total_drawdown_limit_pct else None,
         )
 
-        unbounded = exposure.unbounded_positions > 0
+        unbounded = exposure.unbounded_positions > 0 or not positions_known
         for (meter, value), current, cap in (
             (self._meter_open, exposure.open_risk_pct, risk.max_open_risk_pct),
             (self._meter_currency, exposure.currency_risk_pct, risk.max_currency_risk_pct),
             (self._meter_class, exposure.asset_class_risk_pct, risk.max_asset_class_risk_pct),
         ):
             meter.set(current, cap, unbounded)
-            value.setText(f"{current:.2f}% / {cap:.2f}%")
-            value.setStyleSheet(f"color: {PALETTE.critical};" if current > cap else "")
+            value.setText(
+                f"{current:.2f}% / {cap:.2f}%"
+                if positions_known
+                else f"? / {cap:.2f}%"
+            )
+            value.setStyleSheet(
+                f"color: {PALETTE.critical};"
+                if not positions_known or current > cap
+                else ""
+            )
 
-        if unbounded:
+        if not positions_known:
+            self._unbounded.set("?", t("risk.exposure.unknown"), "critical")
+        elif unbounded:
             self._unbounded.set(
                 "✕",
                 t(
@@ -249,13 +270,13 @@ class RiskView(QWidget):
         self._guards.set(t("guard.losses"), str(guard_state.consecutive_losses))
         self._guards.set(t("guard.used"), f"{guard_state.daily_risk_used_pct:.2f}%")
 
-        self._render_evidence()
-        self._render_positions(positions)
+        self._render_evidence(snapshot.outcome_summary, snapshot.persistence_ready)
+        self._render_positions(positions, known=positions_known)
 
-    def _render_evidence(self) -> None:
+    def _render_evidence(self, summary: dict, persistence_ready: bool) -> None:
         floor = self._config.statistics.min_outcome_sample
 
-        if self._repo is None or not self._repo.ready:
+        if not persistence_ready:
             self._evidence_body.setVisible(False)
             self._evidence_empty.setVisible(True)
             self._evidence_empty.set(
@@ -265,7 +286,6 @@ class RiskView(QWidget):
             )
             return
 
-        summary = self._repo.outcome_summary()
         total = int(summary["total"])
 
         if total == 0:
@@ -305,7 +325,18 @@ class RiskView(QWidget):
             f"[{interval[0] * 100:.1f}%, {interval[1] * 100:.1f}%]" if interval else "—",
         )
 
-    def _render_positions(self, positions) -> None:
+    def _render_positions(self, positions, *, known: bool = True) -> None:
+        if not known:
+            self._positions_empty.set(
+                "?", t("risk.positions.unknown"), t("risk.positions.unknown.detail")
+            )
+            self._positions_empty.setVisible(True)
+            self._table.setVisible(False)
+            self._table.setRowCount(0)
+            return
+        self._positions_empty.set(
+            "○", t("risk.no_positions"), t("risk.no_positions.detail")
+        )
         self._positions_empty.setVisible(not positions)
         self._table.setVisible(bool(positions))
         self._table.setRowCount(len(positions))

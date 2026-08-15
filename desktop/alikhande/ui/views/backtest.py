@@ -35,7 +35,6 @@ has to kill the application to escape.
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QThread, Signal
@@ -53,7 +52,6 @@ from PySide6.QtWidgets import (
 )
 
 from ...config import AppConfig
-from ...core.hashing import fnv1a
 from ...i18n import fmt_count, t
 from ..components import Card, StatusChip, label
 from ..theme import PALETTE, SPACE
@@ -101,56 +99,32 @@ class BacktestWorker(QObject):
             )
             source = "synthetic"
 
-        repositories = None
-        database = None
-        if request["persist"]:
-            from ...adapters.sqlite.database import Database
-            from ...adapters.sqlite.repositories import Repositories
-            from ...core.enums import RuntimeKind
-
-            database = Database()
-            database.open(request["database"])
-            repositories = Repositories(database)
-
         def progress(done: int, total: int) -> bool:
             self.progress.emit(done, total)
             return not self._stop
 
-        # A fresh identity for this run, so the old calibration and the new one
-        # can coexist in the database until we know the new one is worth
-        # keeping.
-        run_id = fnv1a(f"backtest|{time.time()}")
-        result = None
-        try:
+        options = dict(
+            warmup_bars=request["warmup"],
+            data_source=source,
+            progress=progress,
+            cancelled=lambda: self._stop,
+        )
+        if request["persist"]:
+            from ...app.backtest import run_with_atomic_persistence
+
+            result = run_with_atomic_persistence(
+                Backtester(config),
+                gateway,
+                symbols,
+                target_database=request["database"],
+                **options,
+            )
+        else:
             result = Backtester(config).run(
                 gateway,
                 symbols,
-                warmup_bars=request["warmup"],
-                data_source=source,
-                repositories=repositories,
-                progress=progress,
-                run_id=run_id,
+                **options,
             )
-        finally:
-            if repositories is not None:
-                # Replace, but only once there is something to replace *with*.
-                #
-                # This used to purge before replaying. An operator who pressed
-                # Stop, or a replay that raised halfway, was then left with no
-                # calibration at all and nothing to restore it from — the
-                # previous evidence destroyed by an action that produced none.
-                #
-                # A cancelled run is discarded rather than kept: it describes a
-                # smaller sample than was asked for, and stored under the same
-                # label as a complete one it is indistinguishable from it.
-                if result is not None and not result.cancelled:
-                    repositories.purge_runs_of_kind(
-                        RuntimeKind.REPLAY.name, keep_run_id=run_id
-                    )
-                else:
-                    repositories.purge_run(run_id)
-            if database is not None:
-                database.close()
 
         return result.report(min_sample=config.statistics.min_outcome_sample), True
 
@@ -368,7 +342,7 @@ class BacktestView(QWidget):
         self._report.setPlainText(t("bt.error.failed", message=message))
         self._teardown()
 
-    def _teardown(self) -> None:
+    def _teardown(self) -> bool:
         """Join the thread before dropping it.
 
         Letting Qt destroy a still-running QThread prints a warning and can
@@ -378,16 +352,21 @@ class BacktestView(QWidget):
         """
         if self._thread is not None:
             self._thread.quit()
-            self._thread.wait(5000)
+            if not self._thread.wait(5000):
+                # Keep both references alive. Dropping the parent-owned QThread
+                # while it still runs is a process-level Qt failure, and callers
+                # use the False result to postpone rebuilding/closing the view.
+                return False
             self._thread = None
         self._worker = None
         self._run.setEnabled(True)
         self._stop.setVisible(False)
         self._stop.setEnabled(True)
         self._progress.setVisible(False)
+        return True
 
-    def shutdown(self) -> None:
+    def shutdown(self) -> bool:
         """Stop any run in flight. Called when the view is discarded."""
         if self._worker is not None:
             self._worker.stop()
-        self._teardown()
+        return self._teardown()

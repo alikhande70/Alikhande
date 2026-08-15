@@ -1,4 +1,4 @@
-# Alikhande Scanner Desktop 2.0.0
+# Alikhande Scanner Desktop 2.2.0
 
 A standalone Windows application. Its own process, its own window, its own
 database. MetaTrader is not part of its interface.
@@ -52,7 +52,9 @@ The build script runs the test suite first and refuses to package a red build.
 
 Before connecting to a broker: start MetaTrader 5, log in to a **demo** account,
 enable Algo Trading (Tools → Options → Expert Advisors), and add your symbols to
-Market Watch.
+Market Watch. Live Demo/Shadow also requires the covered operator calendar at
+`%LOCALAPPDATA%\AlikhandeScanner\calendar.csv`; see
+[`docs/WINDOWS_INSTALL.md`](docs/WINDOWS_INSTALL.md) for its exact format.
 
 ## The three environments
 
@@ -132,11 +134,12 @@ milliseconds instead of against a terminal nobody has.
 
 Structural, not configurable:
 
-- **Real accounts are refused, four times over.** The declared environment
-  refuses on what the operator declared; `ExecState` has no live-trading mode;
-  `core.execution` returns `REAL_ACCOUNT_BLOCKED` on any non-demo account; and
-  the MT5 adapter refuses again in `send_order` through code that shares nothing
-  with the first check. Deleting one does not disable the others.
+- **Real-account sends are refused independently.** Production exposes
+  Alert-only and Shadow rehearsal, but no sending mode. `core.execution`
+  refuses Demo Confirm on a non-demo account immediately before the sole send,
+  and the MT5 adapter refuses again inside `send_order` through independent
+  code. Shadow returns before that boundary and is stored as non-scorable
+  `SHADOW/PREFLIGHT_ONLY` evidence.
 - **One order boundary.** Only `core/execution.py` may call `send_order`. A test
   scans the package and fails if any other module so much as mentions it.
 - **No single action can send.** Demo execution requires Arm, then Confirm, on
@@ -146,6 +149,17 @@ Structural, not configurable:
   for an order across positions, working orders, order history *and* deal
   history, the execution stays non-terminal, the submit gate stays shut, and it
   stays shut across a restart. Only a typed operator acknowledgement clears it.
+- **The GUI owns no live state.** MT5, SQLite and `ScanEngine` are constructed,
+  used and closed by `ScanWorker`; Qt receives deep-copied snapshots and posts
+  queued intents.
+- **Attribution is exact.** Broker truth uses execution correlation, tickets and
+  position identity, never magic+symbol. Conflicts and netting contamination
+  become blocking `UNKNOWN`, not a plausible outcome. Failed position/order
+  reads stay visibly unknown in the UI; they are never painted as empty broker
+  state. Mixed or missing close reasons are non-scorable `CLOSED`, never an
+  inferred TP/SL.
+- **Replay publication is atomic.** Cancel, error and copy failure preserve the
+  previous valid replay sample; only a finished staged run replaces it.
 - **A rule score is not a probability.** Historical win rate appears only above
   30 real outcomes for that symbol, setup and rule version — always with its
   Wilson interval and sample size, or not at all.
@@ -173,7 +187,7 @@ alikhande/
     sqlite/    schema, migrations, repositories
   app/         scan orchestrator, backtest engine, maintenance
   ui/          PySide6 window: theme, motion, icons, eleven views
-tests/         493 tests, stdlib unittest, no MetaTrader required
+tests/         full unittest suite, no MetaTrader required
                fake_mt5.py    a terminal double, so the live adapter executes
 packaging/     PyInstaller spec and Windows build script
 ```
@@ -230,19 +244,20 @@ blunt warning when the data is synthetic.
 
 ## Status
 
-**Executed and passing:** 493 tests, covering the indicators, all analysis
-engines, position sizing, portfolio risk, the arming protocol, the calendar
-gate, the SQLite schema against real sqlite3, the outcome loop end to end, and
-every safety gate above. The UI has been constructed, run and rendered
-headlessly. A 95,600-bar backtest completes and its arithmetic reconciles.
+`STATIC_CANDIDATE`: the full local suite covers indicators, analysis, position
+sizing, portfolio risk, arming, covered-calendar fail-closed behaviour, schema
+v4 on real sqlite3, exact Demo outcome reconstruction, Shadow provenance and
+atomic replay replacement. The UI is constructed and rendered headlessly.
+Final acceptance remains `BLOCKED` until Windows + real MT5 gates run.
 
 **The outcome loop is closed.** This is the gap the MQL5 build never filled:
 there, `SaveOutcome` was defined and called by nothing, so `outcomes` stayed
-empty and every probability rendered "n/a" forever. Here, `core/outcomes.py`
-tracks an active signal to its TP or SL and records realised R, MFE and MAE, and
-a backtest run writes 1,247 outcomes that the statistics layer reads back.
+empty and every probability rendered "n/a" forever. Here replay outcomes carry
+realised R/MFE/MAE, while Demo outcomes are rebuilt from exact broker deals and
+leave unavailable MFE/MAE as null. TP/SL comes only from the broker close reason;
+other exact closes are non-scorable `CLOSED`.
 
-**Not verified:**
+**Runtime gates still blocked:**
 
 - **Live broker access, against a real terminal.** The adapter now *executes* —
   against `tests/fake_mt5.py`, a double for the MetaTrader5 module surface it
@@ -261,4 +276,5 @@ a backtest run writes 1,247 outcomes that the statistics layer reads back.
   generator whose trend component is a sum of sine waves and is therefore
   predictable in a way no market is.
 
-See `docs/VERIFICATION.md` for the full accounting.
+See `docs/E2E_FINAL_AUDIT_PR6.md` for the final path audit and
+`docs/VERIFICATION.md` for the qualification boundary.

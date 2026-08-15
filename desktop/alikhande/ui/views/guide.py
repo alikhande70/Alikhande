@@ -158,7 +158,9 @@ GUIDE: list[tuple[str, str, str, str, str]] = [
         "consulted and the window is empty. BLOCKED means a relevant event was "
         "found. UNKNOWN means no calendar could be consulted at all.\n\n"
         "The MetaTrader5 Python package exposes no calendar API, so a live "
-        "session has no source unless you supply one. UNKNOWN blocks trading in a "
+        "session reads an operator-supplied calendar.csv from the application "
+        "data folder. It requires time,currency,name,importance,coverage_until; "
+        "missing, malformed or expired coverage is UNKNOWN. UNKNOWN blocks trading in a "
         "live session and does not block in a replay, where it is flagged "
         "NEWS-BLIND instead — a backtest that refused every trade would make the "
         "filter unfalsifiable rather than safe.\n\n"
@@ -169,8 +171,10 @@ GUIDE: list[tuple[str, str, str, str, str]] = [
         "دروازهٔ اخبار سه حالت دارد، نه دو تا. **پاک** یعنی یک تقویم بررسی شد و "
         "پنجره خالی بود. **مسدود** یعنی رویداد مرتبطی پیدا شد. **نامعلوم** یعنی "
         "اصلاً هیچ تقویمی قابل بررسی نبود.\n\n"
-        "پکیج پایتونی MetaTrader5 هیچ API تقویمی ندارد، پس یک نشست زنده تا وقتی "
-        "خودتان منبعی ندهید هیچ منبعی ندارد. «نامعلوم» در نشست زنده معامله را "
+        "پکیج پایتونی MetaTrader5 هیچ API تقویمی ندارد، پس نشست زنده فایل "
+        "calendar.csv را از پوشهٔ دادهٔ برنامه می‌خواند. ستون‌های time، currency، "
+        "name، importance و coverage_until اجباری‌اند؛ فایل غایب، خراب یا با "
+        "پوشش منقضی «نامعلوم» است. «نامعلوم» در نشست زنده معامله را "
         "مسدود می‌کند و در بازپخش مسدود نمی‌کند بلکه با برچسب «کور نسبت به اخبار» "
         "علامت می‌خورد — بک‌تستی که همهٔ معاملات را رد کند فیلتر را به‌جای ایمن، "
         "غیرقابل‌ابطال می‌کند.\n\n"
@@ -182,8 +186,8 @@ GUIDE: list[tuple[str, str, str, str, str]] = [
         "◇",
         "What is NOT proven",
         "Be clear about the limits of this build:\n\n"
-        "• The live broker path has never executed. No Windows machine with "
-        "MetaTrader existed where it was written.\n"
+        "• The MT5 adapter executes against a terminal double, but the live "
+        "broker path has not executed on Windows with a real MetaTrader terminal.\n"
         "• Indicator agreement with MetaTrader is derived from the documented "
         "algorithms, not measured against a terminal.\n"
         "• There is NO out-of-sample result on real data. Nothing here "
@@ -192,8 +196,8 @@ GUIDE: list[tuple[str, str, str, str, str]] = [
         "parameter is labelled [ASSUMED] so you can go and check it.",
         "چه چیزی اثبات نشده",
         "دربارهٔ محدودیت‌های این نسخه صریح باشیم:\n\n"
-        "• مسیر بروکر زنده هرگز اجرا نشده است. جایی که این کد نوشته شد هیچ ماشین "
-        "ویندوزی با متاتریدر وجود نداشت.\n"
+        "• آداپتر MT5 با شبیه‌ساز ترمینال اجرا شده، اما مسیر بروکر زنده هنوز روی "
+        "ویندوز و یک ترمینال واقعی متاتریدر اجرا نشده است.\n"
         "• تطابق اندیکاتورها با متاتریدر از روی الگوریتم‌های مستند استنتاج شده، نه "
         "اندازه‌گیری‌شده روی ترمینال.\n"
         "• **هیچ نتیجهٔ خارج از نمونه روی دادهٔ واقعی وجود ندارد.** هیچ چیز اینجا "
@@ -350,7 +354,9 @@ GUIDE: list[tuple[str, str, str, str, str]] = [
         "The run happens on its own thread, so the window stays usable, and "
         "Stop actually stops it — a cancelled run is labelled CANCELLED in the "
         "report, because a truncated backtest quoted as a finished one is a "
-        "silently smaller sample.",
+        "silently smaller sample. Persisted output is staged separately: cancel "
+        "or error preserves prior valid evidence, and only a complete run replaces "
+        "it in one transaction.",
         "اجرای بک‌تست، و اینکه جوابش چقدر می‌ارزد",
         "نمای بک‌تست تاریخچه را از **همان** مسیری بازپخش می‌کند که اسکنر زنده "
         "استفاده می‌کند — همان موتور سیگنال، همان محاسبهٔ ریسک، همان ردیاب "
@@ -372,7 +378,9 @@ GUIDE: list[tuple[str, str, str, str, str]] = [
         "اجرا روی نخ جداگانه‌ای انجام می‌شود تا پنجره قابل‌استفاده بماند، و "
         "دکمهٔ توقف واقعاً متوقفش می‌کند — اجرای متوقف‌شده در گزارش با برچسب "
         "CANCELLED مشخص می‌شود، چون بک‌تست ناتمامی که به‌عنوان تمام‌شده نقل شود "
-        "یعنی یک نمونهٔ کوچک‌ترِ اعلام‌نشده.",
+        "یعنی یک نمونهٔ کوچک‌ترِ اعلام‌نشده. خروجی جدید جداگانه ساخته می‌شود؛ لغو "
+        "یا خطا Evidence معتبر قبلی را نگه می‌دارد و فقط اجرای کامل در یک تراکنش "
+        "جایگزینش می‌کند.",
     ),
     (
         "◈",

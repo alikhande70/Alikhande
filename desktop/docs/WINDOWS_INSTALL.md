@@ -92,7 +92,9 @@ For broker files: open a chart in MetaTrader, press **Ctrl+S**, save as
 view at that folder.
 
 The run happens on its own thread, so the window stays usable, and **Stop**
-actually stops it.
+actually stops it. When persistence is enabled the run writes to a disposable
+staging database. Cancel or error keeps the previous valid evidence; only a
+complete run replaces it in one transaction.
 
 ### Connecting to a broker
 
@@ -104,6 +106,35 @@ the backtest all work with no broker at all. For live data and orders:
 3. Add every symbol you want scanned to *Market Watch*.
 4. Leave the terminal running. The Python package talks to it over local IPC;
    there is no supported REST or FIX path for retail accounts.
+
+### Supply the live news calendar
+
+The MetaTrader5 Python package has no calendar API, so live Demo/Shadow fails
+closed until this file exists:
+
+```text
+%LOCALAPPDATA%\AlikhandeScanner\calendar.csv
+```
+
+The format is:
+
+```csv
+time,currency,name,importance,coverage_until
+2026-08-15T12:30:00Z,USD,Retail Sales,HIGH,2026-08-17T00:00:00Z
+```
+
+`time` and `coverage_until` accept Unix seconds or ISO-8601 UTC. Importance must
+be `HIGH`, `MEDIUM` or `LOW`; currency is a three-letter code. To state that a
+covered period has no events, use a coverage-only row:
+
+```csv
+time,currency,name,importance,coverage_until
+,,,,2026-08-17T00:00:00Z
+```
+
+Keep `coverage_until` beyond the entire intended trading window. A missing,
+malformed or expired file produces `UNKNOWN` and blocks Arm/Confirm. Run
+`python -m alikhande doctor` again after updating it.
 
 The build refuses to send an order to a non-demo account. That refusal is
 structural — it is not a setting you can turn off in the UI.
@@ -223,7 +254,9 @@ python -m alikhande backtest --data <folder> --database <file>
 همان پوشه را در برنامه انتخاب کنید.
 
 اجرا روی نخ جداگانه‌ای انجام می‌شود، پس پنجره قابل‌استفاده می‌ماند و دکمهٔ
-**توقف** واقعاً متوقفش می‌کند.
+**توقف** واقعاً متوقفش می‌کند. با فعال بودن ذخیره‌سازی، اجرا ابتدا در یک
+پایگاه‌دادهٔ موقت نوشته می‌شود؛ لغو یا خطا Evidence معتبر قبلی را نگه می‌دارد
+و فقط اجرای کامل در یک تراکنش جایگزین آن می‌شود.
 
 ### اتصال به بروکر
 
@@ -235,6 +268,35 @@ python -m alikhande backtest --data <folder> --database <file>
 ۳. هر نمادی که می‌خواهید اسکن شود را به *Market Watch* اضافه کنید.
 ۴. ترمینال را باز نگه دارید. پکیج پایتون از طریق IPC محلی با آن صحبت می‌کند؛
    برای حساب‌های خرد هیچ مسیر REST یا FIX پشتیبانی‌شده‌ای وجود ندارد.
+
+### تأمین تقویم زندهٔ اخبار
+
+پکیج پایتونی MetaTrader5 API تقویم ندارد؛ بنابراین Demo/Shadow زنده تا وقتی
+فایل زیر وجود نداشته باشد به‌صورت fail-closed مسدود می‌ماند:
+
+```text
+%LOCALAPPDATA%\AlikhandeScanner\calendar.csv
+```
+
+قالب فایل:
+
+```csv
+time,currency,name,importance,coverage_until
+2026-08-15T12:30:00Z,USD,Retail Sales,HIGH,2026-08-17T00:00:00Z
+```
+
+زمان‌ها می‌توانند Unix یا ISO-8601 UTC باشند. اهمیت فقط `HIGH`، `MEDIUM` یا
+`LOW` و ارز یک کد سه‌حرفی است. برای اعلام یک بازهٔ پوشش‌داده‌شده بدون رویداد،
+این ردیف کافی است:
+
+```csv
+time,currency,name,importance,coverage_until
+,,,,2026-08-17T00:00:00Z
+```
+
+مقدار `coverage_until` باید از پایان کل بازهٔ معامله جلوتر باشد. فایل غایب،
+خراب یا منقضی نتیجهٔ `UNKNOWN` می‌دهد و Arm/Confirm را می‌بندد. پس از هر
+به‌روزرسانی دوباره `python -m alikhande doctor` را اجرا کنید.
 
 این نسخه از ارسال سفارش به حساب غیردمو خودداری می‌کند. این محدودیت ساختاری
 است، نه تنظیمی که بشود از داخل رابط کاربری خاموشش کرد.

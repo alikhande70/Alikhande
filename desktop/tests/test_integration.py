@@ -24,15 +24,18 @@ from alikhande.adapters.sqlite.repositories import Repositories
 from alikhande.app.backtest import BACKTEST_TIMEFRAMES, Backtester
 from alikhande.app.engine import ScanEngine
 from alikhande.config import AppConfig
+from alikhande.core.calendar_gate import CalendarGate, StaticCalendar
 from alikhande.core.enums import (
     Direction,
+    ExecState,
     RunMode,
     SetupType,
     SignalState,
     Timeframe,
 )
 from alikhande.core.indicators import atr
-from alikhande.core.models import Bar, SignalCandidate
+from alikhande.core.environment import Environment
+from alikhande.core.models import Bar, ExecutionRecord, SignalCandidate, TradePlan
 from alikhande.core.outcomes import OutcomeTracker
 from alikhande.core.runtime import detect_runtime
 from alikhande.core.statistics import Statistics
@@ -155,6 +158,8 @@ class TestOutcomeLoopClosure(unittest.TestCase):
                 price = bar(high=1.1050, low=1.1000) if winner else bar(high=1.1000, low=1.0970)
                 outcome, state = tracker.update("EURUSD", price, 2000)[0]
                 repo.save_outcome(outcome)
+                repo.update_signal_state(f"S{i}", SignalState.PREVIEWED)
+                repo.update_signal_state(f"S{i}", SignalState.ACTIVE)
                 repo.update_signal_state(f"S{i}", state)
 
             statistics = Statistics(repo, AppConfig().statistics)
@@ -178,7 +183,6 @@ class TestOutcomeLoopClosure(unittest.TestCase):
                 signal = candidate()
                 signal.signal_id = f"S{i}"
                 repo.save_signal(signal, "RUN1")
-                repo.save_outcome_stub = None
                 from alikhande.core.models import Outcome
 
                 repo.save_outcome(Outcome(signal_id=f"S{i}", result="TP", closed_at=1))
@@ -191,7 +195,362 @@ class TestOutcomeLoopClosure(unittest.TestCase):
             db.close()
 
 
+class TestDemoBrokerOutcomeLoop(unittest.TestCase):
+    """Actual broker fill -> close deals -> durable evidence, including crash recovery."""
+
+    def _arrange(self, path: str):
+        config = AppConfig().with_symbols(("EURUSD",))
+        gateway = OfflineGateway()
+        gateway.load_synthetic(("EURUSD",), BACKTEST_TIMEFRAMES, 400, seed=9)
+        gateway.set_cursor(gateway.series_length("EURUSD", Timeframe.M5))
+        now = gateway.server_time()
+        tick = gateway.tick("EURUSD")
+        spec = gateway.symbol_spec("EURUSD")
+
+        database = Database()
+        database.open(path)
+        repo = Repositories(database)
+        engine = ScanEngine(
+            gateway,
+            config,
+            runtime=detect_runtime(connected=True, replay=False),
+            repositories=repo,
+            environment=Environment.DEMO,
+        )
+        engine.initialize(now)
+        signal = SignalCandidate(
+            signal_id="S-DEMO",
+            symbol="EURUSD",
+            direction=Direction.LONG,
+            setup=SetupType.TREND_PULLBACK,
+            state=SignalState.PREVIEWED,
+            preferred_entry=tick.ask,
+            stop_loss=tick.ask - 0.002,
+            take_profit=tick.ask + 0.004,
+            creation_time=now,
+            expires_at=now + 100,
+            rule_version="RULE-DEMO",
+            scoring_version="SCORE-DEMO",
+            parameter_hash="PARAM-DEMO",
+            broker_spec_hash=spec.fingerprint,
+        )
+        plan = TradePlan(
+            plan_id="P-DEMO",
+            signal_id=signal.signal_id,
+            symbol="EURUSD",
+            direction=Direction.LONG,
+            entry=tick.ask,
+            stop_loss=signal.stop_loss,
+            take_profit=signal.take_profit,
+            risk_percent=0.25,
+            risk_amount=20.0,
+            actual_risk_amount=20.0,
+            lot_size=0.1,
+            created_at=now,
+            expires_at=now + 100,
+            max_drift_points=30.0,
+            valid=True,
+        )
+        repo.save_signal(signal, engine._run_id)
+        repo.save_plan(plan)
+        repo.update_signal_state(signal.signal_id, SignalState.PREVIEWED)
+        accepted, reason = engine.execution.submit(
+            plan,
+            RunMode.DEMO_CONFIRM,
+            gateway=gateway,
+            account=gateway.account(),
+            spec=spec,
+            now=now,
+        )
+        self.assertTrue(accepted, reason)
+        return database, repo, engine, gateway, signal, now
+
+    def test_real_fill_to_tp_outcome_is_exact_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            database, repo, engine, gateway, signal, now = self._arrange(
+                str(Path(folder) / "demo.sqlite")
+            )
+            first = engine.run_pass(now)
+            self.assertEqual(first.execution.state.name, "POSITION_ACTIVE")
+            self.assertEqual(repo.signal_state(signal.signal_id), SignalState.ACTIVE)
+
+            gateway.close_position(
+                engine.execution.current.position_id,
+                signal.take_profit,
+                40.0,
+                reason="TP",
+            )
+            closed = engine.run_pass(now + 1)
+            outcome = repo.outcome_for_execution(closed.execution.execution_id)
+            self.assertEqual(outcome.result, "TP")
+            self.assertEqual(outcome.source, "LIVE_DEMO")
+            self.assertEqual(outcome.evidence_quality, "BROKER_DEALS")
+            self.assertTrue(outcome.valid_for_statistics)
+            self.assertAlmostEqual(outcome.realized_r, 2.0)
+            self.assertIsNone(outcome.mfe_r)  # broker deals do not state the path
+            self.assertEqual(repo.outcome_counts("EURUSD", int(signal.setup), "RULE-DEMO"), (1, 1))
+
+            # A later pass sees the same history but cannot duplicate deals or
+            # rewrite the already valid outcome.
+            engine.run_pass(now + 2)
+            self.assertEqual(database.execute("SELECT COUNT(*) FROM deals").fetchone()[0], 2)
+            self.assertEqual(database.execute("SELECT COUNT(*) FROM outcomes").fetchone()[0], 1)
+            exit_row = database.execute(
+                "SELECT position_id, broker_time, reason FROM deals"
+                " WHERE entry_type=1"
+            ).fetchone()
+            self.assertEqual(exit_row["position_id"], closed.execution.position_id)
+            self.assertGreater(exit_row["broker_time"], 0)
+            self.assertEqual(exit_row["reason"], "TP")
+            database.close()
+
+    def test_exit_at_target_without_broker_tp_reason_is_closed_not_a_win(self):
+        with tempfile.TemporaryDirectory() as folder:
+            database, repo, engine, gateway, signal, now = self._arrange(
+                str(Path(folder) / "reasonless.sqlite")
+            )
+            engine.run_pass(now)
+            gateway.close_position(
+                engine.execution.current.position_id,
+                signal.take_profit,
+                40.0,
+                reason="",
+            )
+            closed = engine.run_pass(now + 1)
+            outcome = repo.outcome_for_execution(closed.execution.execution_id)
+            self.assertEqual(outcome.result, "CLOSED")
+            self.assertFalse(outcome.valid_for_statistics)
+            self.assertEqual(
+                repo.outcome_counts("EURUSD", int(signal.setup), "RULE-DEMO"),
+                (0, 0),
+            )
+            database.close()
+
+    def test_crash_after_completed_execution_recovers_missing_outcome(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / "demo.sqlite")
+            database, repo, engine, gateway, signal, now = self._arrange(path)
+            engine.run_pass(now)
+            gateway.close_position(
+                engine.execution.current.position_id,
+                signal.stop_loss,
+                -20.0,
+                reason="SL",
+            )
+            truth = engine.execution.reconcile(gateway, now + 1)
+            self.assertTrue(truth.terminal)
+            execution_id = engine.execution.current.execution_id
+            self.assertIsNone(repo.outcome_for_execution(execution_id))
+            database.close()  # crash before ScanEngine._apply_broker_truth
+
+            # Restart reconstruction must not depend on MT5 history still
+            # answering. The exact deals were committed before COMPLETED.
+            def history_unavailable(*_args, **_kwargs):
+                raise RuntimeError("history IPC unavailable")
+
+            gateway.history_deals = history_unavailable
+            gateway.history_orders = history_unavailable
+
+            restarted_db = Database()
+            restarted_db.open(path)
+            restarted_repo = Repositories(restarted_db)
+            restarted = ScanEngine(
+                gateway,
+                AppConfig().with_symbols(("EURUSD",)),
+                runtime=detect_runtime(connected=True, replay=False),
+                repositories=restarted_repo,
+                environment=Environment.DEMO,
+            )
+            restarted.initialize(now + 2)
+            self.assertFalse(restarted.execution.has_unresolved())
+            # The missing outcome is closed during initialize from persisted
+            # broker facts; a pass is only an idempotency check now.
+            restarted.run_pass(now + 2)
+            outcome = restarted_repo.outcome_for_execution(execution_id)
+            self.assertEqual(outcome.result, "SL")
+            self.assertAlmostEqual(outcome.realized_r, -1.0)
+            self.assertEqual(restarted_repo.load_risk_state().consecutive_losses, 1)
+            restarted_db.close()
+
+    def test_crash_after_rejection_commits_not_filled_before_resubmission(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / "rejected.sqlite")
+            gateway = OfflineGateway()
+            gateway.load_synthetic(("EURUSD",), BACKTEST_TIMEFRAMES, 400, seed=10)
+            gateway.set_cursor(gateway.series_length("EURUSD", Timeframe.M5))
+            now = gateway.server_time()
+
+            database = Database()
+            database.open(path)
+            repo = Repositories(database)
+            signal = SignalCandidate(
+                signal_id="S-REJECTED",
+                symbol="EURUSD",
+                direction=Direction.LONG,
+                setup=SetupType.TREND_PULLBACK,
+                state=SignalState.PREVIEWED,
+                creation_time=now,
+                expires_at=now + 100,
+                rule_version="RULE-DEMO",
+            )
+            repo.save_signal(signal, "")
+            repo.save_execution(
+                ExecutionRecord(
+                    execution_id="E-REJECTED",
+                    plan_id="P-REJECTED",
+                    signal_id=signal.signal_id,
+                    symbol=signal.symbol,
+                    state=ExecState.REJECTED,
+                    message="broker rejected request",
+                    created_at=now,
+                    updated_at=now,
+                    terminal=True,
+                )
+            )
+            database.close()  # crash before outcome + terminal signal commit
+
+            restarted_db = Database()
+            restarted_db.open(path)
+            restarted_repo = Repositories(restarted_db)
+            restarted = ScanEngine(
+                gateway,
+                AppConfig().with_symbols(("EURUSD",)),
+                runtime=detect_runtime(connected=True, replay=False),
+                repositories=restarted_repo,
+                environment=Environment.DEMO,
+            )
+            restarted.initialize(now + 1)
+            outcome = restarted_repo.outcome_for_execution("E-REJECTED")
+            self.assertIsNotNone(outcome)
+            self.assertEqual(outcome.result, "NOT_FILLED")
+            self.assertFalse(outcome.valid_for_statistics)
+            self.assertEqual(
+                restarted_repo.signal_state(signal.signal_id), SignalState.NOT_FILLED
+            )
+            self.assertFalse(restarted.execution.has_unresolved())
+            restarted_db.close()
+
+    def test_real_account_shadow_is_reachable_and_never_becomes_demo_evidence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            gateway = OfflineGateway(is_demo=False)
+            gateway.load_synthetic(("EURUSD",), BACKTEST_TIMEFRAMES, 400, seed=11)
+            gateway.set_cursor(gateway.series_length("EURUSD", Timeframe.M5))
+            now = gateway.server_time()
+            tick = gateway.tick("EURUSD")
+            spec = gateway.symbol_spec("EURUSD")
+
+            database = Database()
+            database.open(str(Path(folder) / "shadow.sqlite"))
+            repo = Repositories(database)
+            engine = ScanEngine(
+                gateway,
+                AppConfig().with_symbols(("EURUSD",)),
+                runtime=detect_runtime(connected=True, replay=False),
+                repositories=repo,
+                calendar=CalendarGate(StaticCalendar([], loaded=True)),
+                environment=Environment.PRODUCTION,
+            )
+            engine.initialize(now)
+            signal = SignalCandidate(
+                signal_id="S-SHADOW",
+                symbol="EURUSD",
+                direction=Direction.LONG,
+                setup=SetupType.TREND_PULLBACK,
+                state=SignalState.PREVIEWED,
+                preferred_entry=tick.ask,
+                stop_loss=tick.ask - 0.002,
+                take_profit=tick.ask + 0.004,
+                creation_time=now,
+                expires_at=now + 100,
+                rule_version="RULE-SHADOW",
+                broker_spec_hash=spec.fingerprint,
+            )
+            plan = TradePlan(
+                plan_id="P-SHADOW",
+                signal_id=signal.signal_id,
+                symbol=signal.symbol,
+                direction=signal.direction,
+                entry=signal.preferred_entry,
+                stop_loss=signal.stop_loss,
+                take_profit=signal.take_profit,
+                risk_percent=0.25,
+                risk_amount=20.0,
+                actual_risk_amount=20.0,
+                lot_size=0.1,
+                created_at=now,
+                expires_at=now + 100,
+                max_drift_points=30.0,
+                valid=True,
+            )
+            repo.save_signal(signal, engine._run_id)
+            repo.save_plan(plan)
+            view = engine._views["EURUSD"]
+            view.signal = signal
+            view.plan = plan
+
+            self.assertEqual(engine.set_mode(RunMode.SHADOW, now), (True, ""))
+            self.assertEqual(engine.arm("EURUSD", now), (True, ""))
+            self.assertEqual(engine.confirm("EURUSD", now + 1), (True, "SHADOW_MODE"))
+
+            self.assertEqual(gateway.positions(None), [])
+            self.assertEqual(gateway.history_deals(0, now + 10, None), [])
+            outcome = repo.outcome_for_execution(engine.execution.current.execution_id)
+            self.assertEqual(outcome.result, "SHADOW")
+            self.assertEqual(outcome.source, "SHADOW")
+            self.assertEqual(outcome.evidence_quality, "PREFLIGHT_ONLY")
+            self.assertFalse(outcome.valid_for_statistics)
+            self.assertEqual(repo.signal_state(signal.signal_id), SignalState.NOT_FILLED)
+
+            # Simulate the crash window after the terminal execution row was
+            # persisted but before the atomic shadow outcome/state commit.
+            database.execute("DELETE FROM outcomes WHERE signal_id=?", (signal.signal_id,))
+            database.execute(
+                "UPDATE signals SET state='PREVIEWED' WHERE signal_id=?",
+                (signal.signal_id,),
+            )
+            database.commit()
+            database.close()
+
+            restarted_db = Database()
+            restarted_db.open(str(Path(folder) / "shadow.sqlite"))
+            restarted_repo = Repositories(restarted_db)
+            restarted = ScanEngine(
+                gateway,
+                AppConfig().with_symbols(("EURUSD",)),
+                runtime=detect_runtime(connected=True, replay=False),
+                repositories=restarted_repo,
+                calendar=CalendarGate(StaticCalendar([], loaded=True)),
+                environment=Environment.PRODUCTION,
+            )
+            restarted.initialize(now + 2)
+            recovered = restarted_repo.outcome_for_execution(
+                engine.execution.current.execution_id
+            )
+            self.assertEqual(recovered.source, "SHADOW")
+            self.assertFalse(restarted.execution.has_unresolved())
+            restarted_db.close()
+
 class TestOfflineGateway(unittest.TestCase):
+    def test_reconnect_refresh_resolves_symbols_missed_during_initial_attach(self):
+        gateway = OfflineGateway()
+        gateway.load_synthetic(("EURUSD",), BACKTEST_TIMEFRAMES, 400, seed=12)
+        gateway.set_cursor(gateway.series_length("EURUSD", Timeframe.M5))
+        real_resolve = gateway.resolve_symbol
+        gateway.resolve_symbol = lambda _requested: None
+        engine = ScanEngine(
+            gateway,
+            AppConfig().with_symbols(("EURUSD",)),
+            runtime=detect_runtime(connected=True, replay=False),
+        )
+        now = gateway.server_time()
+        engine.initialize(now)
+        self.assertFalse(engine._views["EURUSD"].resolved)
+
+        gateway.resolve_symbol = real_resolve
+        engine.refresh_gateway_state(now + 1)
+        self.assertTrue(engine._views["EURUSD"].resolved)
+        self.assertIsNotNone(engine._views["EURUSD"].spec)
+
     def test_synthetic_bars_are_deterministic(self):
         a = synthesise_bars("EURUSD", Timeframe.M5, 100, seed=7)
         b = synthesise_bars("EURUSD", Timeframe.M5, 100, seed=7)
@@ -353,6 +712,8 @@ class TestBacktest(unittest.TestCase):
                 self._gateway(), ("EURUSD",), warmup_bars=10_000, max_steps=3_000,
                 repositories=repo,
             )
+            self.assertGreaterEqual(result.elapsed_seconds, 0.0)
+            self.assertLess(result.elapsed_seconds, 120.0)
             if result.trades:
                 summary = repo.outcome_summary()
                 self.assertEqual(summary["total"], result.trades)
@@ -381,6 +742,17 @@ class TestScanEngine(unittest.TestCase):
             snapshot = engine.run_pass(2000 + i)
         self.assertEqual(snapshot.passes, 20)
 
+    def test_snapshot_is_a_deep_thread_boundary_not_shared_engine_state(self):
+        engine = self._engine()
+        engine.initialize(1000)
+        first = engine.run_pass(2000)
+        self.assertIsNot(first.symbols[0], engine._views["EURUSD"])
+        self.assertIsNot(first.execution, engine.execution.current)
+        self.assertIsNot(first.guard_state, engine.guard_state)
+        original_error = first.symbols[0].last_error
+        engine._views["EURUSD"].last_error = "MUTATED_NEXT_PASS"
+        self.assertEqual(first.symbols[0].last_error, original_error)
+
     def test_an_unresolvable_symbol_is_reported_not_fatal(self):
         gateway = OfflineGateway()
         gateway.load_synthetic(("EURUSD",), BACKTEST_TIMEFRAMES, 200)
@@ -402,17 +774,34 @@ class TestScanEngine(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "PERSISTENCE_REQUIRED_FOR_DEMO_EXECUTION")
 
-    def test_arming_is_refused_outside_demo_confirm_mode(self):
+    def test_arming_is_refused_in_alert_only_mode(self):
         engine = self._engine()
         engine.initialize(1000)
         ok, reason = engine.arm("EURUSD", 2000)
         self.assertFalse(ok)
-        self.assertIn(reason, ("NO_VALID_PLAN", "ARMING_REQUIRES_DEMO_CONFIRM_MODE"))
+        self.assertIn(reason, ("NO_VALID_PLAN", "ARMING_REQUIRES_CONFIRMABLE_MODE"))
 
     def test_alert_only_is_always_permitted(self):
         engine = self._engine()
         engine.initialize(1000)
         self.assertEqual(engine.set_mode(RunMode.ALERT_ONLY, 2000), (True, ""))
+
+    def test_failed_exposure_reads_remain_unknown_in_the_snapshot(self):
+        engine = self._engine()
+        engine.initialize(1000)
+
+        def unavailable(*_args, **_kwargs):
+            raise RuntimeError("IPC unavailable")
+
+        engine._gateway.positions = unavailable
+        engine._gateway.orders = unavailable
+        snapshot = engine.run_pass(2000)
+        self.assertFalse(snapshot.positions_known)
+        self.assertFalse(snapshot.orders_known)
+        self.assertFalse(snapshot.may_trade)
+        self.assertIn("BROKER_POSITIONS_UNAVAILABLE", snapshot.guard_codes)
+        self.assertIn("BROKER_ORDERS_UNAVAILABLE", snapshot.guard_codes)
+        self.assertEqual(engine.arm("EURUSD", 2000), (False, "BROKER_STATE_UNAVAILABLE"))
 
 
 if __name__ == "__main__":
@@ -472,16 +861,60 @@ class TestUiContracts(unittest.TestCase):
         self.assertEqual(view.bars, [])
         self.assertEqual(view.zones, [])
 
-    def test_the_ui_never_reaches_into_engine_privates(self):
-        """The UI reads only what the engine offers publicly."""
-        import re
+    def test_only_scan_worker_can_import_or_hold_live_state(self):
+        """Public engine methods are still engine access; forbid the object."""
+        import ast
 
         root = pathlib.Path(__file__).resolve().parent.parent / "alikhande" / "ui"
         offenders = []
+        forbidden_imports = (
+            "alikhande.app.engine",
+            "alikhande.adapters.mt5",
+            "alikhande.adapters.sqlite",
+        )
         for path in root.rglob("*.py"):
-            for match in re.finditer(r"_engine\.(_\w+)", path.read_text(encoding="utf-8")):
-                offenders.append(f"{path.name}: _engine.{match.group(1)}")
-        self.assertEqual(offenders, [], f"UI reached into engine privates: {offenders}")
+            relative = path.relative_to(root).as_posix()
+            if relative == "worker.py":
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    module = node.module or ""
+                    # Resolve the relative imports used by this package by
+                    # checking the meaningful suffix as well as absolute form.
+                    if any(
+                        module == target or module.endswith(target.split("alikhande.", 1)[-1])
+                        for target in forbidden_imports
+                    ):
+                        offenders.append(f"{relative}: import {module}")
+                if isinstance(node, ast.Attribute) and node.attr in ("_engine", "_repo"):
+                    offenders.append(f"{relative}: owns {node.attr}")
+        self.assertEqual(offenders, [], f"live state escaped ScanWorker: {offenders}")
+
+    def test_live_composition_does_not_probe_or_fall_back_to_synthetic(self):
+        source = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "alikhande" / "ui" / "main_window.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("probe_terminal", source)
+        self.assertNotIn("MT5Gateway", source)
+        self.assertNotIn("OfflineGateway", source)
+
+    def test_worker_cannot_accept_a_prebuilt_engine(self):
+        source = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "alikhande" / "ui" / "worker.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("WorkerBootstrap | ScanEngine", source)
+        self.assertNotIn("isinstance(bootstrap, ScanEngine)", source)
+        self.assertIn("bootstrap: WorkerBootstrap", source)
+
+    def test_ui_diagnostics_does_not_import_the_mt5_module(self):
+        source = (
+            pathlib.Path(__file__).resolve().parent.parent
+            / "alikhande" / "app" / "maintenance.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("import MetaTrader5", source)
 
 
 if __name__ == "__main__":

@@ -47,7 +47,7 @@ PLANNED_ENTRY = 1.10000
 ACTUAL_FILL = 1.10025
 
 
-class TestTheFillPriceIsTheBrokersNotThePlans(unittest.TestCase):
+class TestTheEntryPriceComesFromExactBrokerDeals(unittest.TestCase):
     def setUp(self):
         self.gateway = StubGateway()
         self.engine = ScanEngine(
@@ -65,14 +65,19 @@ class TestTheFillPriceIsTheBrokersNotThePlans(unittest.TestCase):
             now=1000,
         )
 
-    def test_a_synchronous_fill_records_the_executed_price(self):
+    def test_a_synchronous_reply_does_not_become_final_fill_evidence(self):
         self.gateway.result = OrderResult(
             ok=True, retcode=10009, order=11, deal=22, request_id=33,
             volume=0.10, price=ACTUAL_FILL,
         )
         ok, _ = self._submit()
         self.assertTrue(ok)
-        self.assertAlmostEqual(self.engine.execution.current.fill_price, ACTUAL_FILL)
+        record = self.engine.execution.current
+        self.assertEqual(record.filled_volume, 0.0)
+        self.assertFalse(
+            hasattr(record, "fill_price"),
+            "an uncorroborated send reply must not become outcome price evidence",
+        )
 
     def test_the_send_result_does_not_set_filled_volume(self):
         """Volume is owned by the deal ledger, which is where idempotency lives.
@@ -87,34 +92,33 @@ class TestTheFillPriceIsTheBrokersNotThePlans(unittest.TestCase):
         self._submit()
         self.assertEqual(self.engine.execution.current.filled_volume, 0.0)
 
-    def test_deals_set_the_price_volume_weighted(self):
+    def test_exact_deals_set_the_entry_price_volume_weighted(self):
         """A partial fill arrives as several deals at several prices. The entry
         that matters is what the position holds, not its first tick."""
         self._submit()
-        engine = self.engine.execution
-        engine.apply_deal(
+        self.gateway.history_deals_list = [
             DealInfo(ticket=1, order=11, symbol="EURUSD", entry=0,
-                     volume=0.05, price=1.10000, time=1000), 1000
-        )
-        engine.apply_deal(
+                     position_id=99, volume=0.05, price=1.10000, time=1000),
             DealInfo(ticket=2, order=11, symbol="EURUSD", entry=0,
-                     volume=0.05, price=1.10100, time=1001), 1001
-        )
-        self.assertAlmostEqual(engine.current.filled_volume, 0.10)
-        self.assertAlmostEqual(engine.current.fill_price, 1.10050, places=6)
+                     position_id=99, volume=0.05, price=1.10100, time=1001),
+        ]
+        truth = self.engine.execution.resolve_from_broker(self.gateway, 1005)
+        self.assertTrue(truth.resolved)
+        self.assertAlmostEqual(truth.filled_volume, 0.10)
+        self.assertAlmostEqual(truth.entry_price, 1.10050, places=6)
 
-    def test_a_replayed_deal_does_not_move_the_price_either(self):
+    def test_a_replayed_history_row_does_not_move_the_price_or_volume(self):
         self._submit()
-        engine = self.engine.execution
         deal = DealInfo(ticket=1, order=11, symbol="EURUSD", entry=0,
-                        volume=0.10, price=ACTUAL_FILL, time=1000)
-        engine.apply_deal(deal, 1000)
-        engine.apply_deal(deal, 1001)
-        self.assertAlmostEqual(engine.current.filled_volume, 0.10)
-        self.assertAlmostEqual(engine.current.fill_price, ACTUAL_FILL)
+                        position_id=99, volume=0.10, price=ACTUAL_FILL, time=1000)
+        self.gateway.history_deals_list = [deal, deal]
+        truth = self.engine.execution.resolve_from_broker(self.gateway, 1005)
+        self.assertAlmostEqual(truth.filled_volume, 0.10)
+        self.assertAlmostEqual(truth.entry_price, ACTUAL_FILL)
+        self.assertEqual(len(truth.deals), 1)
 
-    def test_a_live_position_is_authoritative_over_the_request(self):
-        """Reconciliation from a position knows what the broker opened at."""
+    def test_a_same_symbol_position_is_not_stolen_as_fill_truth(self):
+        """A symbol match is not execution identity, even at a plausible price."""
         self.gateway.result = OrderResult(ok=True, retcode=10009, order=11, deal=0)
         self._submit()
         self.gateway.positions_list = [
@@ -124,8 +128,8 @@ class TestTheFillPriceIsTheBrokersNotThePlans(unittest.TestCase):
                 price_open=1.10077, time=1000,
             )
         ]
-        self.engine.execution.reconcile(self.gateway, 1005)
-        self.assertAlmostEqual(self.engine.execution.current.fill_price, 1.10077)
+        truth = self.engine.execution.resolve_from_broker(self.gateway, 1005)
+        self.assertFalse(truth.resolved)
 
 
 class TestOutcomesReachTheDatabase(unittest.TestCase):
@@ -221,8 +225,9 @@ class TestTheEngineOpensOutcomesOnlyOnAFill(unittest.TestCase):
         that was never filled is an outcome about nothing."""
         self.assertEqual(self.engine.outcomes.tracked, {})
 
-    def test_the_pending_set_exists_and_starts_empty(self):
-        self.assertEqual(self.engine._pending_outcomes, {})
+    def test_no_bar_based_pending_outcome_path_exists(self):
+        """Demo closes from broker deals, not a later bar touching plan TP/SL."""
+        self.assertFalse(hasattr(self.engine, "_pending_outcomes"))
 
 
 if __name__ == "__main__":

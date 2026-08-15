@@ -408,10 +408,12 @@ def diagnostics(
 
     if sys.platform == "win32":
         try:
-            import MetaTrader5 as mt5
+            from importlib.metadata import version
 
-            bundle["machine"]["metatrader5"] = mt5.__version__
-        except ImportError:
+            # Package metadata loads no broker module and therefore cannot
+            # touch its process-global terminal connection from the GUI thread.
+            bundle["machine"]["metatrader5"] = version("MetaTrader5")
+        except Exception:
             bundle["machine"]["metatrader5"] = "not installed"
     else:
         bundle["machine"]["metatrader5"] = "unavailable (Windows only)"

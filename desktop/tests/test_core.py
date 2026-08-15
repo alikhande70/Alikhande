@@ -25,6 +25,7 @@ from alikhande.core.lifecycle import is_scorable, is_terminal, transition_allowe
 from alikhande.core.models import Bar, SignalCandidate, SymbolSnapshot, Zone
 from alikhande.core.spread import SpreadTracker
 from alikhande.core.statistics import Statistics, wilson
+from alikhande.core.signals import evidence_signal_id
 from alikhande.core.trend import TrendEngine, directional_bonus
 from alikhande.core.zones import (
     ZoneEngine,
@@ -66,6 +67,24 @@ class TestHashing(unittest.TestCase):
 
     def test_handles_non_ascii(self):
         self.assertEqual(len(fnv1a64("طلا")), 16)
+
+    def test_evidence_identity_changes_with_parameters_and_broker_spec(self):
+        signal = SignalCandidate(
+            signal_id="LEGACY",
+            symbol="EURUSD",
+            direction=Direction.LONG,
+            setup=SetupType.TREND_PULLBACK,
+            confirmation_bar_time=100,
+            rule_version="R",
+            scoring_version="S",
+            parameter_hash="P1",
+        )
+        first = evidence_signal_id(signal, "B1")
+        signal.parameter_hash = "P2"
+        self.assertNotEqual(first, evidence_signal_id(signal, "B1"))
+        signal.parameter_hash = "P1"
+        self.assertNotEqual(first, evidence_signal_id(signal, "B2"))
+        self.assertNotEqual(first, evidence_signal_id(signal, "B1", namespace="RUN2"))
 
 
 class TestIndicators(unittest.TestCase):

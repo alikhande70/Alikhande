@@ -16,7 +16,9 @@ from __future__ import annotations
 import argparse
 import io
 import contextlib
+import os
 import platform
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -30,6 +32,16 @@ class DoctorTestCase(unittest.TestCase):
     """Drives the Windows branch on whatever machine the suite runs on."""
 
     def setUp(self):
+        self._data = tempfile.TemporaryDirectory()
+        self._xdg = os.environ.get("XDG_DATA_HOME")
+        os.environ["XDG_DATA_HOME"] = self._data.name
+        calendar = Path(self._data.name) / "AlikhandeScanner" / "calendar.csv"
+        calendar.parent.mkdir(parents=True, exist_ok=True)
+        calendar.write_text(
+            "time,currency,name,importance,coverage_until\n"
+            "1700000000,USD,Fixture,LOW,4102444800\n",
+            encoding="utf-8",
+        )
         self.mt5 = install(FakeMT5())
         for symbol in list(self.mt5.symbols_map):
             self.mt5.load_rates(symbol, self.mt5.TIMEFRAME_M5, 400)
@@ -42,6 +54,11 @@ class DoctorTestCase(unittest.TestCase):
         platform.system = self._system
         platform.release = self._release
         uninstall()
+        if self._xdg is None:
+            os.environ.pop("XDG_DATA_HOME", None)
+        else:
+            os.environ["XDG_DATA_HOME"] = self._xdg
+        self._data.cleanup()
 
     def run_doctor(self) -> tuple[int, str]:
         from alikhande.__main__ import _cmd_doctor
@@ -95,7 +112,8 @@ class TestDoctorReportsTheFix(DoctorTestCase):
 
     def test_a_real_account_is_reported_and_explained(self):
         self.mt5.account = FakeAccount(trade_mode=1)
-        _code, output = self.run_doctor()
+        code, output = self.run_doctor()
+        self.assertEqual(code, 1)
         self.assertIn("[REAL]", output)
         self.assertIn("never sends an order on a non-demo account", output)
 
@@ -105,7 +123,7 @@ class TestDoctorReportsTheFix(DoctorTestCase):
         _code, output = self.run_doctor()
         self.assertIn("GBPUSD -> GBPUSD.m", output)
 
-    def test_a_fully_ready_machine_exits_zero(self):
+    def test_a_machine_with_all_inspected_prerequisites_exits_zero(self):
         from alikhande.config import AppConfig
 
         self.mt5.symbols_map = {}
@@ -114,9 +132,23 @@ class TestDoctorReportsTheFix(DoctorTestCase):
             self.mt5.load_rates(requested, self.mt5.TIMEFRAME_M5, 400)
 
         code, output = self.run_doctor()
-        self.assertIn("READY", output)
-        self.assertNotIn("NOT READY", output)
+        self.assertIn("MACHINE GATE PASS", output)
+        self.assertNotIn("MACHINE GATE BLOCKED", output)
         self.assertEqual(code, 0)
+
+    def test_a_missing_calendar_blocks_live_demo_readiness(self):
+        from alikhande.app.paths import data_directory
+        from alikhande.config import AppConfig
+
+        (data_directory() / "calendar.csv").unlink()
+        self.mt5.symbols_map = {}
+        for requested in AppConfig().symbols:
+            self.mt5.symbols_map[requested] = _symbol_for(requested)
+            self.mt5.load_rates(requested, self.mt5.TIMEFRAME_M5, 400)
+        code, output = self.run_doctor()
+        self.assertEqual(code, 1)
+        self.assertIn("calendar", output)
+        self.assertIn("MISSING", output)
 
     def test_doctor_leaves_no_connection_behind(self):
         """It runs on the main thread. A connection left attached here would be

@@ -1,5 +1,10 @@
 # Architecture
 
+Scope: the `MQL5/` EA build. The standalone Desktop build has a different
+Worker-owned MT5/SQLite boundary and exact-correlation policy; its current
+architecture and end-to-end evidence are documented in
+[`desktop/docs/E2E_FINAL_AUDIT_PR6.md`](../desktop/docs/E2E_FINAL_AUDIT_PR6.md).
+
 ## Pipeline
 
 ```

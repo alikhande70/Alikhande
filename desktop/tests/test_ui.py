@@ -170,6 +170,24 @@ class TestWindowBuilds(unittest.TestCase):
         meter.set(0.5, 1.0, unbounded=True)
         self.assertFalse(meter.grab().isNull())
 
+    def test_unreadable_positions_render_unknown_not_zero(self):
+        from alikhande.app.engine import EngineSnapshot
+        from alikhande.config import AppConfig
+        from alikhande.i18n import t
+        from alikhande.ui.views.risk import RiskView
+
+        view = RiskView(AppConfig())
+        view.update_view(
+            EngineSnapshot(
+                positions_known=False,
+                may_trade=False,
+                guard_codes=["BROKER_POSITIONS_UNAVAILABLE"],
+            )
+        )
+        self.assertEqual(view._tile_risk._value.text(), "?")
+        self.assertEqual(view._tile_positions._value.text(), "?")
+        self.assertEqual(view._unbounded._text.text(), t("risk.exposure.unknown"))
+
 
 @unittest.skipUnless(HAS_QT, "PySide6 is not installed")
 class TestScannerView(unittest.TestCase):

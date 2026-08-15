@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import sqlite3
 from pathlib import Path
 
-from alikhande.adapters.sqlite.database import Database, SchemaTooNew
+from alikhande.adapters.sqlite.database import Database, SchemaTooNew, _V1_STATEMENTS
 from alikhande.adapters.sqlite.repositories import Repositories
-from alikhande.core.enums import Direction, ExecState, SetupType, SignalState
+from alikhande.core.enums import Direction, ExecState, RuntimeKind, SetupType, SignalState
 from alikhande.core.journal import Event, Journal, Level
 from alikhande.core.models import (
     ExecutionRecord,
@@ -82,6 +83,40 @@ class TestSchema(DatabaseCase):
         self.assertTrue(again.open(self.path))
         again.close()
 
+    def test_v1_migration_preserves_previously_valid_outcome(self):
+        path = str(Path(self._dir.name) / "legacy.sqlite")
+        connection = sqlite3.connect(path)
+        connection.execute(
+            "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        for statement in _V1_STATEMENTS:
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_meta VALUES('schema_version','1')"
+        )
+        connection.execute(
+            "INSERT INTO signals(signal_id,symbol,direction,setup,state,created_at,"
+            " rule_version,scoring_version,parameter_hash,broker_spec_hash)"
+            " VALUES('LEGACY','EURUSD',1,1,'TP',1,'RULE-TEST','S','P','B')"
+        )
+        connection.execute(
+            "INSERT INTO outcomes(signal_id,result,realized_r,closed_at)"
+            " VALUES('LEGACY','TP',2.0,2)"
+        )
+        connection.commit()
+        connection.close()
+
+        migrated = Database()
+        migrated.open(path)
+        repo = Repositories(migrated)
+        self.assertEqual(repo.outcome_counts("EURUSD", 1, "RULE-TEST"), (1, 1))
+        row = migrated.execute(
+            "SELECT source, valid_for_statistics FROM outcomes WHERE signal_id='LEGACY'"
+        ).fetchone()
+        self.assertEqual(row["source"], "LEGACY")
+        self.assertEqual(row["valid_for_statistics"], 1)
+        migrated.close()
+
 
 class TestSignals(DatabaseCase):
     def test_saves_and_finds_a_signal(self):
@@ -99,10 +134,47 @@ class TestSignals(DatabaseCase):
         row = self.db.execute("SELECT created_at FROM signals WHERE signal_id='S1'").fetchone()
         self.assertEqual(row["created_at"], 1000)
 
+    def test_hash_collision_is_refused_without_overwriting_evidence(self):
+        from alikhande.adapters.sqlite.repositories import SignalIdentityCollision
+
+        original = self.signal(signal_id="COLLISION", symbol="EURUSD")
+        original.confirmation_bar_time = 100
+        self.repo.save_signal(original, "RUN1")
+        different = self.signal(signal_id="COLLISION", symbol="GBPUSD")
+        different.confirmation_bar_time = 200
+        with self.assertRaises(SignalIdentityCollision):
+            self.repo.save_signal(different, "RUN2")
+        row = self.db.execute(
+            "SELECT symbol, confirmation_bar_time FROM signals WHERE signal_id='COLLISION'"
+        ).fetchone()
+        self.assertEqual((row["symbol"], row["confirmation_bar_time"]), ("EURUSD", 100))
+
+    def test_same_structure_with_different_experiment_metadata_is_a_collision(self):
+        from alikhande.adapters.sqlite.repositories import SignalIdentityCollision
+
+        original = self.signal(signal_id="EXPERIMENT")
+        self.repo.save_signal(original, "RUN1")
+        changed = self.signal(signal_id="EXPERIMENT")
+        changed.parameter_hash = "OTHER-PARAMETERS"
+        with self.assertRaises(SignalIdentityCollision):
+            self.repo.save_signal(changed, "RUN2")
+        changed = self.signal(signal_id="EXPERIMENT")
+        changed.broker_spec_hash = "OTHER-CONTRACT"
+        with self.assertRaises(SignalIdentityCollision):
+            self.repo.save_signal(changed, "RUN3")
+
     def test_state_transitions_are_stored(self):
         self.repo.save_signal(self.signal(), "RUN1")
         self.repo.update_signal_state("S1", SignalState.PREVIEWED)
         self.assertEqual(self.repo.signal_state("S1"), SignalState.PREVIEWED)
+
+    def test_terminal_signal_cannot_be_reopened_or_relabelled(self):
+        self.repo.save_signal(self.signal(), "RUN1")
+        self.assertTrue(self.repo.update_signal_state("S1", SignalState.PREVIEWED))
+        self.assertTrue(self.repo.update_signal_state("S1", SignalState.NOT_FILLED))
+        self.assertFalse(self.repo.update_signal_state("S1", SignalState.PREVIEWED))
+        self.assertFalse(self.repo.update_signal_state("S1", SignalState.TP))
+        self.assertEqual(self.repo.signal_state("S1"), SignalState.NOT_FILLED)
 
     def test_features_are_stored_and_replaced(self):
         self.repo.save_signal(self.signal(), "RUN1")
@@ -132,6 +204,12 @@ class TestExecutions(DatabaseCase):
     def test_a_resolved_execution_is_not_recovered(self):
         self.repo.save_execution(self.record(terminal=True, state=ExecState.COMPLETED))
         self.assertIsNone(self.repo.load_unresolved_execution())
+
+    def test_terminal_rejection_without_outcome_is_recovered_for_evidence(self):
+        self.repo.save_execution(self.record(terminal=True, state=ExecState.REJECTED))
+        loaded = self.repo.load_execution_awaiting_outcome()
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.state, ExecState.REJECTED)
 
     def test_an_unparseable_stored_state_becomes_unknown_not_finished(self):
         """A corrupt row must keep the gate shut, not open it."""
@@ -171,6 +249,49 @@ class TestDealIdempotency(DatabaseCase):
 
 
 class TestOutcomes(DatabaseCase):
+    def test_outcome_and_terminal_state_commit_as_one_unit(self):
+        self.repo.save_signal(self.signal(), "RUN1")
+        self.repo.update_signal_state("S1", SignalState.PREVIEWED)
+        self.repo.update_signal_state("S1", SignalState.ACTIVE)
+        outcome = Outcome(
+            signal_id="S1", result="TP", execution_id="E1", source="LIVE_DEMO",
+            evidence_quality="BROKER_DEALS", valid_for_statistics=True, closed_at=2,
+        )
+        self.assertTrue(self.repo.save_outcome_with_state(outcome, SignalState.TP))
+        self.assertEqual(self.repo.signal_state("S1"), SignalState.TP)
+        self.assertEqual(self.repo.outcome_for_execution("E1").result, "TP")
+
+    def test_illegal_terminal_commit_writes_neither_half(self):
+        self.repo.save_signal(self.signal(), "RUN1")
+        outcome = Outcome(
+            signal_id="S1", result="TP", execution_id="E1", source="LIVE_DEMO",
+            evidence_quality="BROKER_DEALS", valid_for_statistics=True, closed_at=2,
+        )
+        self.assertFalse(self.repo.save_outcome_with_state(outcome, SignalState.TP))
+        self.assertEqual(self.repo.signal_state("S1"), SignalState.CONFIRMED)
+        self.assertIsNone(self.repo.outcome_for_execution("E1"))
+
+    def test_a_duplicate_cannot_overwrite_previous_valid_evidence(self):
+        self.repo.save_signal(self.signal(), "RUN1")
+        first = Outcome(
+            signal_id="S1", result="TP", realized_r=2.0,
+            execution_id="E1", source="LIVE_DEMO", evidence_quality="BROKER_DEALS",
+            valid_for_statistics=True, closed_at=1000,
+        )
+        self.assertTrue(self.repo.save_outcome(first))
+        self.assertFalse(
+            self.repo.save_outcome(
+                Outcome(
+                    signal_id="S1", result="SL", realized_r=-1.0,
+                    execution_id="E1", source="ERROR", valid_for_statistics=False,
+                    closed_at=2000,
+                )
+            )
+        )
+        stored = self.repo.outcome_for_execution("E1")
+        self.assertEqual(stored.result, "TP")
+        self.assertTrue(stored.valid_for_statistics)
+
     def test_counts_are_scoped_by_rule_version(self):
         """Mixing versions describes a system that never ran."""
         for i in range(4):
@@ -252,6 +373,153 @@ class TestRiskStateAndSpecs(DatabaseCase):
         self.repo.save_spec(spec, 2000)
         self.assertEqual(self.repo.spec_fingerprint("EURUSD"), "BBB")
         self.assertIsNone(self.repo.spec_fingerprint("GBPUSD"))
+
+
+class TestEvidenceReplacement(DatabaseCase):
+    def _seed_previous(self) -> None:
+        self.repo.start_run(
+            "OLD", RuntimeKind.REPLAY.name, False, "1", "RULE-TEST", "SCORE",
+            "PARAM", "EURUSD", 1,
+        )
+        self.repo.save_signal(self.signal("OLD-SIGNAL"), "OLD")
+        self.repo.save_outcome(
+            Outcome(signal_id="OLD-SIGNAL", result="TP", realized_r=2.0, closed_at=2)
+        )
+        self.repo.finish_run("OLD", 3)
+
+    def test_unfinished_staging_cannot_delete_previous_evidence(self):
+        self._seed_previous()
+        with tempfile.TemporaryDirectory() as folder:
+            staged = Database()
+            staged.open(str(Path(folder) / "stage.sqlite"))
+            stage_repo = Repositories(staged)
+            stage_repo.start_run(
+                "NEW", RuntimeKind.REPLAY.name, False, "1", "RULE-TEST", "SCORE",
+                "PARAM", "EURUSD", 10,
+            )
+            staged.close()
+            with self.assertRaises(ValueError):
+                self.repo.replace_runs_of_kind_from(
+                    str(Path(folder) / "stage.sqlite"), RuntimeKind.REPLAY.name
+                )
+        self.assertEqual(self.repo.outcome_summary()["total"], 1)
+        self.assertTrue(self.repo.signal_exists("OLD-SIGNAL"))
+
+    def test_complete_staging_replaces_replay_in_one_commit(self):
+        self._seed_previous()
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / "stage.sqlite")
+            staged = Database()
+            staged.open(path)
+            stage_repo = Repositories(staged)
+            stage_repo.start_run(
+                "NEW", RuntimeKind.REPLAY.name, False, "1", "RULE-TEST", "SCORE",
+                "PARAM", "EURUSD", 10,
+            )
+            stage_repo.save_signal(self.signal("NEW-SIGNAL"), "NEW")
+            stage_repo.save_outcome(
+                Outcome(signal_id="NEW-SIGNAL", result="SL", realized_r=-1.0, closed_at=11)
+            )
+            stage_repo.finish_run("NEW", 12)
+            staged.close()
+            self.assertEqual(
+                self.repo.replace_runs_of_kind_from(path, RuntimeKind.REPLAY.name), 1
+            )
+        self.assertFalse(self.repo.signal_exists("OLD-SIGNAL"))
+        self.assertTrue(self.repo.signal_exists("NEW-SIGNAL"))
+        self.assertEqual(self.repo.outcome_summary()["losses"], 1)
+
+    def test_copy_failure_rolls_back_the_replay_purge(self):
+        self._seed_previous()
+        self.repo.start_run(
+            "LIVE", RuntimeKind.LIVE.name, True, "1", "RULE-TEST", "SCORE",
+            "PARAM", "EURUSD", 20,
+        )
+        self.repo.save_signal(self.signal("COLLIDE"), "LIVE")
+        self.repo.finish_run("LIVE", 21)
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = str(Path(folder) / "stage.sqlite")
+            staged = Database()
+            staged.open(path)
+            stage_repo = Repositories(staged)
+            stage_repo.start_run(
+                "NEW", RuntimeKind.REPLAY.name, False, "1", "RULE-TEST", "SCORE",
+                "PARAM", "EURUSD", 10,
+            )
+            # Collides only after the target transaction has begun and its old
+            # replay rows have been deleted. The rollback must restore them.
+            stage_repo.save_signal(self.signal("COLLIDE"), "NEW")
+            stage_repo.finish_run("NEW", 12)
+            staged.close()
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.repo.replace_runs_of_kind_from(path, RuntimeKind.REPLAY.name)
+
+        self.assertTrue(self.repo.run_exists("OLD"))
+        self.assertTrue(self.repo.signal_exists("OLD-SIGNAL"))
+        self.assertTrue(self.repo.run_exists("LIVE"))
+        self.assertTrue(self.repo.signal_exists("COLLIDE"))
+        self.assertEqual(self.repo.outcome_summary()["total"], 1)
+
+    def test_cancelled_atomic_backtest_preserves_previous_evidence(self):
+        from alikhande.adapters.offline.gateway import OfflineGateway
+        from alikhande.app.backtest import (
+            BACKTEST_TIMEFRAMES,
+            Backtester,
+            run_with_atomic_persistence,
+        )
+
+        self._seed_previous()
+        gateway = OfflineGateway()
+        gateway.load_synthetic(("EURUSD",), BACKTEST_TIMEFRAMES, 260, seed=7)
+        result = run_with_atomic_persistence(
+            Backtester(),
+            gateway,
+            ("EURUSD",),
+            target_database=self.path,
+            warmup_bars=9_000,
+            progress=lambda *_: False,
+        )
+        self.assertTrue(result.cancelled)
+        self.assertFalse(result.evidence_committed)
+        self.assertEqual(self.repo.outcome_summary()["total"], 1)
+        self.assertTrue(self.repo.signal_exists("OLD-SIGNAL"))
+
+    def test_backtest_error_never_opens_the_target_database(self):
+        from alikhande.adapters.offline.gateway import OfflineGateway
+        from alikhande.app.backtest import run_with_atomic_persistence
+
+        self._seed_previous()
+
+        class ExplodingBacktester:
+            def run(self, *_args, **_kwargs):
+                raise RuntimeError("injected replay failure")
+
+        with self.assertRaisesRegex(RuntimeError, "injected"):
+            run_with_atomic_persistence(
+                ExplodingBacktester(),
+                OfflineGateway(),
+                ("EURUSD",),
+                target_database=self.path,
+            )
+        self.assertEqual(self.repo.outcome_summary()["total"], 1)
+        self.assertTrue(self.repo.signal_exists("OLD-SIGNAL"))
+
+    def test_duplicate_run_id_is_refused_without_deleting_previous_run(self):
+        from alikhande.adapters.offline.gateway import OfflineGateway
+        from alikhande.app.backtest import Backtester
+
+        self._seed_previous()
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            Backtester().run(
+                OfflineGateway(),
+                ("EURUSD",),
+                repositories=self.repo,
+                run_id="OLD",
+            )
+        self.assertTrue(self.repo.run_exists("OLD"))
+        self.assertTrue(self.repo.signal_exists("OLD-SIGNAL"))
+        self.assertEqual(self.repo.outcome_summary()["total"], 1)
 
 
 class TestEventJournal(DatabaseCase):

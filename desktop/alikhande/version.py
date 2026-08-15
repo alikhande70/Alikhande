@@ -26,7 +26,7 @@ STATS_VERSION = "STATS-2.0.0-PY"
 
 # SQLite schema version. Migrations in adapters/sqlite/database.py key off this;
 # bumping it without adding a migration step is a release blocker.
-DB_SCHEMA_VERSION = 1
+DB_SCHEMA_VERSION = 4
 
 # CSV export schema, independent of the SQLite schema.
 EXPORT_SCHEMA_VERSION = "3"

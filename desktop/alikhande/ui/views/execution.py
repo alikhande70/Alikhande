@@ -194,8 +194,14 @@ class ExecutionView(QWidget):
 
         self._render_policy(snapshot)
 
-        self._orders_empty.setVisible(not orders)
-        self._table.setVisible(bool(orders))
+        orders_known = getattr(snapshot, "orders_known", True)
+        self._orders_empty.set(
+            "○" if orders_known else "?",
+            t("exec.no_orders") if orders_known else t("exec.orders.unknown"),
+            "" if orders_known else t("exec.orders.unknown.detail"),
+        )
+        self._orders_empty.setVisible(not orders or not orders_known)
+        self._table.setVisible(bool(orders) and orders_known)
         self._table.setRowCount(len(orders))
         for row, order in enumerate(orders):
             values = [
