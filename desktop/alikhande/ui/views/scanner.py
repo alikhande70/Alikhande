@@ -489,14 +489,16 @@ class ScannerView(QWidget):
         return panel
 
     # ----------------------------------------------------------------- update
-    def update_snapshot(self, snapshot, repositories=None) -> None:
+    def update_snapshot(self, snapshot) -> None:
         """Rebuild the ranking from a fresh engine snapshot.
 
         The ranking itself lives in ``app.scanner``; this method only renders
         what that returns. Keeping the ordering out of the widget is what makes
         it testable without a display server.
         """
-        ranked = scanner_app.build(snapshot, self._config, repositories)
+        ranked = list(snapshot.opportunities) or scanner_app.build(
+            snapshot, self._config, None
+        )
         self._views = {view.symbol or view.requested: view for view in snapshot.symbols}
 
         # One row per symbol, and the first occurrence wins. The engine holds a

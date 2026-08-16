@@ -1,338 +1,71 @@
 # Verification status — Desktop 2.2.0
 
-Being precise about what has and has not been established matters more here than
-anywhere else in the project: this is a system whose entire purpose is to stop
-people trusting unverified claims. Applying that to its own build is the minimum
-consistency requirement.
-
-## What changed from the MQL5 build
-
-The MQL5 tree was **statically verified and runtime unproven** — no MetaEditor
-and no terminal existed where it was written, so nothing had ever executed. A
-purpose-built MQL5 static analyser stood in for a compiler.
-
-The desktop port removes that limitation for everything except live broker
-access, because the pure core imports nothing external. The analysis engines,
-the risk model, the execution state machine, the persistence layer and the
-backtest all **run**, and 180 tests assert their behaviour.
-
-That change is not free. It introduces one new unverified claim of its own —
-indicator agreement — which is recorded below rather than glossed over.
-
-## VERIFIED — executed in this environment
-
-### The test suite
-503 tests, stdlib `unittest`, no external dependency beyond PySide6 for the UI
-subset:
-
-```
-python -m unittest discover -s tests -t .
-Ran 503 tests — OK
-```
-
-Covering:
-
-- **Indicators.** EMA seeding, ATR as a simple average of True Range, ADX range
-  and warm-up index, median semantics, `None` propagation for unwarmed values.
-- **Trend.** Refusal on short history, bullish/bearish scoring, the forming bar
-  being dropped, `available_information_time` landing on the bar close, and the
-  two-sided-strength bug staying fixed.
-- **Zones.** The three-way relation including `UNAVAILABLE`, type-correct
-  anchoring, a zone price is *inside* remaining findable, confirmation lag.
-- **Risk.** Refusal below the broker minimum lot rather than rounding up,
-  round-down normalisation, refusal when the broker cannot price the stop,
-  policy ceilings, aggregate and per-currency caps.
-- **Unbounded risk.** A stopless position is reported unbounded and blocks all
-  new risk *before* any cap is consulted.
-- **Execution.** Every reconciliation source, and the P0 below.
-- **Idempotency.** A replayed deal ticket does not inflate filled volume, in
-  memory and across a database reopen.
-- **Arming.** Confirm-without-arm, expiry, superseded plan, and a re-planned
-  plan with an unchanged id.
-- **Calendar.** `UNKNOWN` never reads as `CLEAR`; blocks in production, does not
-  block in replay but is flagged NEWS-BLIND.
-- **Persistence.** Real sqlite3: migration, idempotent re-migration, refusal of
-  a newer schema, deal admission surviving a reopen, outcome scoping by rule
-  version, and a corrupt execution state loading as `UNKNOWN` (gate shut) rather
-  than as finished.
-- **Outcomes.** ±R scoring, MFE/MAE, and the conservative both-touched rule.
-
-### The dependency-free core, asserted rather than assumed
-
-``alikhande.core`` importing nothing outside the standard library is the
-property the whole test strategy rests on: it is why the analysis engines, the
-risk model, the execution state machine and the outcome loop can all be
-exercised on a machine with no MetaTrader, no Qt and no database.
-
-**Nothing checked it until now.** The dependency-free CI job runs the suite with
-PySide6 blocked, which is weaker evidence than it looks — it proves core does
-not need *Qt*. It would not have noticed ``import numpy``, or the more likely
-mistake, a core module reaching sideways into ``alikhande.adapters`` for
-something convenient.
-
-``tests/test_architecture.py`` walks the source with ``ast`` and asserts three
-things: core imports only from a short stdlib allowlist; core never imports from
-``adapters``, ``app`` or ``ui`` (it is the innermost ring, and that direction is
-invisible to any runtime test); and exactly one module in the package imports
-``MetaTrader5``.
-
-That last one failed when first written. ``doctor`` and the diagnostics bundle
-both imported the package to read its version, so "only the adapter talks to
-MetaTrader" was true of the API and false of the import graph — and the import
-graph is what a reader checks. Both now ask the adapter, which gained a
-``package_version()`` helper.
-
-### Coupling guards read source from disk, not via ``inspect``
-
-Several guards check that one module actually reads what another produces —
-every field of ``RobotDecision``, every notification subject having a title, the
-backtest purging after the replay rather than before. Those are written against
-the text of the calling module, and the obvious way to get it, ``inspect
-.getsource``, needs the module imported. Every one of them lives under
-``alikhande.ui``.
-
-Importing them anyway is what turned a green suite into four errors in the
-dependency-free job. Moving them into ``test_ui.py`` would have worked and would
-have been worse: that file is skipped when Qt is absent, so the guards would
-only protect the contract on the machine that least needs protecting. They read
-the file instead, and now run in **both** jobs.
-
-### The single-order-boundary property
-Asserted mechanically, not by convention: a test walks every `.py` file in the
-package and fails if `send_order` is referenced outside `core/execution.py`,
-`core/ports.py` and the adapters.
-
-### The P0: an unresolved execution never releases the gate
-Directly tested. An order whose retcode is unrecognised becomes `UNKNOWN`; with
-every broker source silent past the grace period it stays **non-terminal**;
-`has_unresolved()` stays true; the next submit is refused; a fresh engine
-restoring the stored record is still blocked; and only a non-empty operator note
-clears it. A resolver that raises is treated as *no answer*, not as absence.
-
-### The UI
-Constructed, shown, run through its event loop and rendered to images headlessly
-(`QT_QPA_PLATFORM=offscreen`). Five tabs build, the worker thread runs scan
-passes, and snapshots render. **Not** verified: appearance on a real Windows
-desktop, high-DPI scaling, or any user interaction.
-
-### The backtest
-95,600 bars across EURUSD and XAUUSD replayed end to end. 1,247 trades resolved;
-`2 × wins − losses` reconciles exactly with total R; 1,247 outcome rows written
-and read back through the statistics layer.
-
-### The outcome loop is closed
-`core/outcomes.py` tracks an ACTIVE signal to TP or SL and writes realised R,
-MFE and MAE. `outcome_counts` returns real samples, and above the 30-sample
-floor `has_historical_estimate` becomes true and a Wilson interval is rendered.
-In the MQL5 build this was permanently false.
-
-## NOT VERIFIED
-
-### Live broker access — PARTIALLY VERIFIED
-
-This entry used to read "has never executed", and that sentence was the single
-most expensive line in this document. Because nothing ran the adapter, a defect
-that broke **every live pass** survived a green suite, a static gate and two
-reviews: `build_application` attached the gateway on the UI thread, the scan
-worker ran on another, and the MetaTrader5 package's owner-thread guard then
-refused every call. The engine swallows gateway errors by design, so the window
-reported "disconnected" against a healthy, logged-in terminal — permanently,
-and pointing at the wrong cause.
-
-**Now executed** against `tests/fake_mt5.py`, a double for the subset of the
-MetaTrader5 module surface the adapter touches, installed into `sys.modules` so
-the code under test is the real code. 34 tests in `tests/test_mt5_gateway.py`
-cover: thread ownership and the refusal to migrate an owner, attach failure not
-leaving the gateway looking connected, reconnect shutting down first, the probe
-leaving nothing attached, symbol resolution against broker decoration,
-specification mapping, request construction, filling-mode selection including
-the neither-FOK-nor-IOC case, retcode interpretation, and the adapter's own
-independent real-account refusal.
-
-Writing those tests found three further defects in code that had never run —
-see "Defects found by running the code" below.
-
-**Still not established:** that MetaQuotes' package behaves as the double models
-it. The constants, field names and semantics come from published documentation,
-and a double built from documentation inherits every misunderstanding in it.
-Specifically still unproven against a real terminal: `order_send` on a demo
-server, `order_calc_profit` on cross-currency pairs, real broker symbol
-decoration, and whether `filling_mode` reports what the documentation says.
-
-That gap closes on Windows with a running terminal and nowhere else.
-
-### Indicator agreement with MetaTrader — NOT VERIFIED
-This is the desktop build's own new risk, and it did not exist in the EA.
-
-The EA read MetaTrader's indicator buffers. This computes EMA, ATR and ADX in
-Python, following MetaTrader's published indicator sources — including the
-detail that **MT5's ATR is a simple moving average of True Range**, not the
-Wilder smoothing MT4 used. That reading is from documentation. It has not been
-compared against a running terminal.
-
-The mitigation is structural rather than hopeful: the desktop build stamps
-`RULE-2.0.0-PY`, and the statistics layer scopes every sample by rule version,
-so desktop and EA outcomes can never be pooled even if someone points both at
-one database.
-
-Verifying it needs one afternoon on a Windows box: export bars, run the same
-periods through `iMA`/`iATR`/`iADX`, and diff.
-
-### PyInstaller packaging — NOT VERIFIED
-`packaging/alikhande.spec` and `build_windows.ps1` have not been run. PyInstaller
-does not cross-compile, so a Windows executable cannot be produced or tested
-from Linux. The spec is written from PyInstaller's documented behaviour.
-
-Two invariants the spec *can* be checked against without building, and now are
-(`tests/test_readiness.py`): `MetaTrader5` stays a hidden import, since it is
-imported inside a `try`/`except` and the dependency graph cannot see it; and
-**numpy is not excluded**. The spec used to exclude numpy — the pure core never
-touches it, so it looked like free weight — but the MetaTrader5 wheel depends on
-numpy and `copy_rates_from_pos` returns a numpy structured array the gateway
-reads by field name. That exclusion would have produced an executable which ran
-perfectly offline and failed the instant it touched a terminal.
-
-### Strategy edge — NOT VERIFIED, AND NOT CLAIMED
-There is no out-of-sample result, no walk-forward and no live record on real
-data.
-
-The synthetic backtest reports a 74.1% win rate. **This is not evidence of
-anything.** The generator's trend component is a sum of sine waves, so the
-series is autocorrelated by construction and a trend-pullback strategy will
-exploit it trivially. The number measures the generator, not the market. The
-report says so on every run, in those words.
-
-**Nothing in this repository constitutes evidence that the strategy is
-profitable.** The persistence layer exists precisely so that this can eventually
-be answered with data instead of opinion — and now, unlike in the MQL5 build,
-the machinery to collect that data actually works.
-
-## Defects found by running the code
-
-Worth recording, because between them they are the clearest argument for
-executing things rather than reviewing them.
-
-### The UI thread was still reaching the broker
-
-The first thread-ownership fix moved the *attachment* to the scan worker. It did
-not stop the UI thread from making calls. `_on_snapshot` — a queued Qt slot, so
-UI thread by construction — asked the engine for `own_positions()`,
-`working_orders()` and `exposure_summary()`, and all three reached the gateway.
-
-On MetaTrader those raise. The engine's `_safe_*` wrappers swallow gateway
-exceptions by design, so the Risk view would have shown **zero open positions
-and zero exposure on an account that had both**, permanently and without a
-single error on screen. The submit gate was never at risk — the engine computes
-its own exposure inside the pass, on the worker thread — but the number the
-operator reads to decide whether to take another trade was wrong.
-
-Found by attaching a gateway that enforces MetaTrader's owner-thread rule to the
-real window and watching who called it. `tests/test_thread_discipline.py`
-automates exactly that, and the three accessors are **removed** rather than
-deprecated: the snapshot carries positions, orders and exposure now, and leaving
-the accessors available meant the next view that needed positions would
-reintroduce the defect.
-
-### The outcome was recorded at a price nobody traded
-
-`confirm()` opened the outcome tracker at `plan.entry` the instant the submit
-was accepted — before the broker had said anything about the fill. Realised R
-was therefore measured from the *planned* entry, which differs from the real one
-by the slippage, in the direction that flatters the result.
-
-The execution record now carries `fill_price`, volume-weighted across entry
-deals and overridden by a live position's `price_open` when reconciliation finds
-one, and the outcome opens on that price and only once a fill is confirmed.
-
-Filled *volume* is deliberately still owned by the deal ledger. Taking it from
-the send result as well double-counted the deal that followed and drove a
-partial fill to FILLED — the existing idempotency tests caught that within a
-minute of the change.
-
-### The outcome loop was closed in the backtest and open everywhere else
-
-`save_outcome` had exactly one caller: `app/backtest.py`. A live or demo session
-persisted signals, plans, executions and deals, tracked nothing, and wrote no
-outcomes at all — so the evidence base could only ever be filled by a replay.
-The claim that "the outcome loop is closed" was true of the half that describes
-a synthetic generator and false of the half that describes a broker.
-
-The engine now resolves tracked signals against each new closed bar and persists
-what resolves, every pass, in every environment that has a database.
-
-### A cancelled replay destroyed the evidence it failed to replace
-
-Both the calibration command and the Backtest view purged the previous replay
-*before* starting the new one. Press Stop, or hit an exception, or Ctrl-C, and
-the operator was left with no calibration and nothing to restore it from.
-
-The order is now: write the new run under its own id, and replace the others
-only once it has finished. A cancelled run is discarded rather than kept — a
-truncated sample stored under the same label as a complete one is
-indistinguishable from it afterwards. `purge_runs_of_kind` gained
-`keep_run_id`; `purge_run` is the undo.
-
-### The subsystems that were built, tested and connected to nothing
-
-Four modules had complete, passing unit tests and no consumers: the order-error
-taxonomy was fed by nothing, the robot's `reconnect` and `disarm` decisions were
-returned and discarded, notifications were routed into a deque nobody read, and
-the crash-recovery verdict was computed at startup and thrown away.
-
-Unit tests cannot catch this by construction — a module with no consumers passes
-its own tests perfectly. `tests/test_wiring.py` now asserts the couplings
-instead: 17 tests checking that a decision made in one place produces an effect
-in another, including one that walks every field of `RobotDecision` and fails if
-the window does not read it.
-
-### The adapter defects, found by executing it for the first time
-
-- `connect()` assigned the module handle *before* `initialize()` succeeded, so a
-  refused connection reported itself as attached and was never retried.
-- Filling mode fell back to IOC when the symbol's bitmask reported support for
-  neither FOK nor IOC — asking for the one policy the symbol had just refused,
-  and guaranteeing retcode 10030 on brokers that configure symbols that way.
-- Order comments were not truncated to MetaTrader's 32-byte field, so
-  reconciliation would compare a recorded comment against the broker's truncated
-  copy of it and report a mismatch that was purely an artefact of field width.
-
-### The inverted stop
-
-The backtest's first run reported 1,197 wins, 8,444 losses and a total of
-**+8,130 R**. With a 2R target those numbers cannot coexist: 1,197 × 2 − 8,444 =
-−6,050. The contradiction was in the data, not the arithmetic — 76 trades
-labelled `SL` had returned **+1.0 R**.
-
-The cause: `find_nearest_zone` deliberately does not require a zone to sit on one
-side of price (that was the v1.1.0 fix which made the INSIDE case findable). So
-when price traded *below* a demand zone, a LONG took `stop = zone.low - buffer`,
-which is **above** its entry — an inverted trade whose stop and target both sit
-in the same direction. `abs(entry - stop)` then hid it from the distance check,
-and every downstream gate passed it.
-
-**The identical defect exists in the MQL5 build** and has been fixed there too
-(`STOP_ON_WRONG_SIDE_OF_ENTRY`, plus relation-aware zone anchoring). The static
-analyser could never have found it: the code is well-formed, every identifier
-resolves, and nothing is unreachable. It took executing it and checking that the
-results were arithmetically possible.
-
-## Required next steps
-
-1. On Windows with MT5 running: `python -m alikhande doctor`. It walks the real
-   path in the order the application does — package, terminal, account, algo
-   trading, symbol resolution, history depth — and stops at the first thing that
-   would stop the app, reporting the *fix* rather than the symptom. Exit code 0
-   means the machine could run a demo session today. Its Windows branch is
-   itself tested against the fake terminal (`tests/test_readiness.py`), so the
-   command that certifies the machine is not itself unexercised.
-
-   Gate: exit code 0, account reported DEMO.
-2. Run `python -m alikhande ui` against a demo account in **Alert-only** mode.
-   Confirm symbols resolve, spreads warm up and signals appear.
-3. Verify the indicators: export bars, compare EMA/ATR/ADX against the terminal.
-4. Export real history and re-run the backtest on it, holding back an
-   out-of-sample window.
-5. Only then Shadow mode, and only after that, demo execution.
-
-Steps 1–2 are blocking. Until they pass, the live path is a design that has not
-been shown to run.
+Current source status: `STATIC_CANDIDATE`
+Acceptance status: `BLOCKED` pending Windows + a real MetaTrader 5 terminal
+Strategy status: `STRATEGY_EDGE_NOT_PROVEN`
+
+The detailed final review for PR 6 is
+[`E2E_FINAL_AUDIT_PR6.md`](E2E_FINAL_AUDIT_PR6.md). It is the authority for the
+Worker boundary, exact broker attribution, Demo Fill → Outcome → Evidence
+cycle, Shadow provenance, restart reconstruction and atomic backtest evidence.
+
+## Executed locally
+
+- The complete Python test suite passes under Linux, including the headless Qt
+  subset.
+- `tools/static_validate.py` combines the maintained MQL5 static gate with
+  desktop compilation, sole-send-boundary, Worker ownership, exact
+  reconciliation and atomic evidence checks.
+- `tools/test_static_gate.py` exercises the MQL static analyser itself.
+- The real MT5 adapter module executes against `tests/fake_mt5.py`, a double of
+  the documented MetaTrader5 surface. This tests this repository's mapping and
+  ownership logic, not MetaQuotes' real runtime behaviour.
+- SQLite tests use real `sqlite3`: fresh schema v4, migrations, newer-schema
+  refusal, deal idempotency, terminal-outcome crash recovery, transactional
+  outcome/state/risk commits and rollback of a failed replay replacement.
+- The UI is constructed and driven with Qt's offscreen platform. The live GUI
+  receives only deep-copied snapshots and queued action results. Failed broker
+  position/order reads render as unknown and halt arming rather than appearing
+  as zero exposure.
+- Reconnect rebuilds broker-derived symbol/spec metadata without rebuilding or
+  losing execution state. Backtest cancellation is checked on every replay step
+  and the UI refuses to destroy a still-running replay thread.
+- Persisted signal identity includes parameter and broker-spec fingerprints;
+  exact Deal identifiers are propagated into same-pass Position/Order reads,
+  and duplicate/conflicting broker facts have adversarial coverage.
+- Backtests run through the shared signal/risk/outcome pipeline. Synthetic bars
+  prove mechanics only and are never market evidence.
+
+The exact final test count and commit SHA belong in the PR handoff produced from
+the final clean-tree run; they must not be copied from an earlier checkpoint.
+
+## Not established here
+
+The following are runtime gates, not source-review questions:
+
+- real MetaTrader5 IPC and field semantics on Windows;
+- controlled Demo fill, partial fill, close reason and restart behaviour;
+- Python indicator parity with MT5 buffers;
+- Windows packaging, high-DPI rendering and manual operator workflow;
+- any out-of-sample strategy edge.
+
+The fake terminal cannot close these gaps because it is built from the same
+documentation as the adapter. A real Windows run must save the terminal,
+compiler, database and screenshot evidence required by
+[`docs/CODEX_ACCEPTANCE_CONTRACT.md`](../../docs/CODEX_ACCEPTANCE_CONTRACT.md).
+
+## Required next sequence
+
+1. Create a covered `calendar.csv` as documented in
+   [`WINDOWS_INSTALL.md`](WINDOWS_INSTALL.md).
+2. Run `python -m alikhande doctor`; require a Demo account and machine-gate
+   success.
+3. Run Alert-only and Shadow on the real terminal, saving logs and database
+   rows.
+4. Compare EMA/ATR/ADX output with MT5 on identical bars.
+5. Only after those gates, run one controlled minimum-volume Demo Confirm and
+   capture request → order → deal → position → close → outcome, including the
+   prescribed restart case.
+
+No real-account execution was performed. Nothing in this repository establishes
+that the strategy is profitable.

@@ -13,6 +13,7 @@ it fails against the code as it was.
 from __future__ import annotations
 
 import threading
+import types
 import unittest
 
 from alikhande.core.enums import Direction, Timeframe
@@ -80,6 +81,7 @@ class TestThreadOwnership(MT5TestCase):
             try:
                 self.gateway.ensure_connected()
                 captured["symbols"] = self.gateway.symbols()
+                self.gateway.shutdown()
             except Exception as error:  # pragma: no cover - failure path
                 captured["error"] = f"{type(error).__name__}: {error}"
 
@@ -225,6 +227,51 @@ class TestMarketData(MT5TestCase):
     def test_a_real_account_maps_the_flag_as_false(self):
         self.mt5.account = FakeAccount(trade_mode=1)
         self.assertFalse(self.gateway.account().is_demo)
+
+    def test_empty_broker_state_is_an_authoritative_empty_list(self):
+        self.assertEqual(self.gateway.positions(), [])
+        self.assertEqual(self.gateway.orders(), [])
+        self.assertEqual(self.gateway.history_orders(1, 2), [])
+        self.assertEqual(self.gateway.history_deals(1, 2), [])
+
+    def test_none_broker_state_is_failure_not_proof_of_absence(self):
+        for attribute, call in (
+            ("positions_get", lambda: self.gateway.positions()),
+            ("orders_get", lambda: self.gateway.orders()),
+            ("history_orders_get", lambda: self.gateway.history_orders(1, 2)),
+            ("history_deals_get", lambda: self.gateway.history_deals(1, 2)),
+        ):
+            original = getattr(self.mt5, attribute)
+            setattr(self.mt5, attribute, lambda *_args, **_kwargs: None)
+            try:
+                with self.assertRaisesRegex(GatewayError, "failed"):
+                    call()
+            finally:
+                setattr(self.mt5, attribute, original)
+
+    def test_deal_net_profit_includes_the_broker_fee_field(self):
+        self.mt5.history_deals_get = lambda *_args, **_kwargs: [
+            types.SimpleNamespace(
+                ticket=1,
+                order=2,
+                position_id=3,
+                symbol="EURUSD",
+                magic=0,
+                entry=1,
+                volume=0.1,
+                price=1.1,
+                profit=12.0,
+                commission=-0.7,
+                swap=-0.2,
+                fee=-0.1,
+                time=1000,
+                comment="",
+                reason=5,
+            )
+        ]
+        deal = self.gateway.history_deals(1, 2)[0]
+        self.assertAlmostEqual(deal.net_profit, 11.0)
+        self.assertEqual(deal.reason, "TP")
 
 
 # ===========================================================================

@@ -11,12 +11,19 @@ open only on a deliberate, recorded human acknowledgement.
 
 from __future__ import annotations
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from alikhande.adapters.offline.gateway import OfflineGateway, default_spec
 from alikhande.config import AppConfig
 from alikhande.core.arming import IntentArming
-from alikhande.core.calendar_gate import CalendarEvent, CalendarGate, StaticCalendar
+from alikhande.core.calendar_gate import (
+    CalendarEvent,
+    CalendarGate,
+    CsvCalendar,
+    StaticCalendar,
+)
 from alikhande.core.enums import (
     Direction,
     ExecState,
@@ -83,6 +90,7 @@ class StubGateway:
         self.orders_list: list = []
         self.history_orders_list: list = []
         self.history_deals_list: list[DealInfo] = []
+        self.history_deal_magic_args: list[int | None] = []
         self.tick_time = tick_time
         self.check_ok = True
 
@@ -101,7 +109,9 @@ class StubGateway:
     def positions(self, magic=None): return list(self.positions_list)
     def orders(self, magic=None): return list(self.orders_list)
     def history_orders(self, since, until, magic=None): return list(self.history_orders_list)
-    def history_deals(self, since, until, magic=None): return list(self.history_deals_list)
+    def history_deals(self, since, until, magic=None):
+        self.history_deal_magic_args.append(magic)
+        return list(self.history_deals_list)
     def calc_profit(self, symbol, direction, volume, price_open, price_close): return -20.0
     def calc_margin(self, symbol, direction, volume, price): return 110.0
     def check_order(self, request): return (self.check_ok, 0, "ok")
@@ -168,6 +178,17 @@ class TestRealAccountBlock(unittest.TestCase):
         self.assertEqual(gateway.sent, [])
         self.assertEqual(engine.current.message, "SHADOW_NOT_SENT")
         self.assertTrue(engine.current.terminal)
+
+    def test_shadow_can_rehearse_a_real_account_without_sending(self):
+        gateway = StubGateway(real_account())
+        engine = ExecutionEngine(AppConfig(), Journal(), environment="PRODUCTION")
+        ok, reason = engine.submit(
+            valid_plan(), RunMode.SHADOW, gateway=gateway,
+            account=real_account(), spec=default_spec("EURUSD"), now=1000,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "SHADOW_MODE")
+        self.assertEqual(gateway.sent, [])
 
     def test_offline_gateway_refuses_independently_of_the_engine(self):
         """Defence in depth: the gateway refuses even if the engine is bypassed."""
@@ -250,6 +271,39 @@ class TestUnresolvedExecution(unittest.TestCase):
         self.assertFalse(engine.current.terminal)
         self.assertTrue(engine.has_unresolved())
 
+    def test_an_unrecognised_negative_result_is_also_unknown(self):
+        gateway = StubGateway()
+        from alikhande.core.models import OrderResult
+
+        gateway.result = OrderResult(ok=False, retcode=77777, comment="custom broker code")
+        engine = ExecutionEngine(AppConfig(), Journal())
+        accepted, _ = engine.submit(
+            valid_plan(), RunMode.DEMO_CONFIRM, gateway=gateway,
+            account=demo_account(), spec=default_spec("EURUSD"), now=1000,
+        )
+        self.assertFalse(accepted)
+        self.assertEqual(engine.current.state, ExecState.UNKNOWN)
+        self.assertFalse(engine.current.terminal)
+
+    def test_send_transport_exception_is_uncertain_not_rejected(self):
+        gateway = StubGateway()
+
+        def transport_failed(_request):
+            raise RuntimeError("IPC reply lost")
+
+        gateway.send_order = transport_failed
+        engine = ExecutionEngine(AppConfig(), Journal())
+        accepted, reason = engine.submit(
+            valid_plan(), RunMode.DEMO_CONFIRM, gateway=gateway,
+            account=demo_account(), spec=default_spec("EURUSD"), now=1000,
+        )
+        self.assertFalse(accepted)
+        self.assertIn("ORDER_SEND_UNCERTAIN", reason)
+        self.assertEqual(engine.current.state, ExecState.UNKNOWN)
+        self.assertFalse(engine.current.terminal)
+        self.assertTrue(engine.has_unresolved())
+        self.assertTrue(engine.current.correlation_key)
+
     def test_reconcile_leaves_a_silent_broker_unresolved_and_non_terminal(self):
         engine, gateway = self._wedged_engine()
         # Well past the grace period, every source still silent.
@@ -308,7 +362,8 @@ class TestUnresolvedExecution(unittest.TestCase):
         engine, gateway = self._wedged_engine()
         gateway.positions_list = [
             PositionInfo(ticket=5, symbol="EURUSD", magic=AppConfig().execution.magic,
-                         position_id=5, direction=Direction.LONG, volume=0.1)
+                         position_id=5, direction=Direction.LONG, volume=0.1,
+                         comment=engine.current.correlation_key)
         ]
         engine.reconcile(gateway, 1000 + 10_000)
         self.assertEqual(engine.current.state, ExecState.POSITION_ACTIVE)
@@ -320,7 +375,8 @@ class TestUnresolvedExecution(unittest.TestCase):
 
         engine, gateway = self._wedged_engine()
         gateway.orders_list = [
-            OrderInfo(ticket=11, symbol="EURUSD", magic=AppConfig().execution.magic, state="PLACED")
+            OrderInfo(ticket=11, symbol="EURUSD", magic=AppConfig().execution.magic,
+                      state="PLACED", comment=engine.current.correlation_key)
         ]
         engine.reconcile(gateway, 1000 + 10_000)
         self.assertEqual(engine.current.state, ExecState.ACCEPTED)
@@ -331,25 +387,31 @@ class TestUnresolvedExecution(unittest.TestCase):
         magic = AppConfig().execution.magic
         gateway.history_deals_list = [
             DealInfo(ticket=1, order=11, position_id=7, symbol="EURUSD", magic=magic,
-                     entry=0, volume=0.10, price=1.10, time=1100),
-            DealInfo(ticket=2, order=12, position_id=7, symbol="EURUSD", magic=magic,
+                     entry=0, volume=0.10, price=1.10, time=1100,
+                     comment=engine.current.correlation_key),
+            # A manual/SL/TP exit may not inherit the opener's magic. Exact
+            # position identity must still close this execution.
+            DealInfo(ticket=2, order=12, position_id=7, symbol="EURUSD", magic=0,
                      entry=1, volume=0.10, price=1.10400, time=1200),
         ]
         engine.reconcile(gateway, 1000 + 10_000)
         self.assertEqual(engine.current.state, ExecState.COMPLETED)
         self.assertTrue(engine.current.terminal)
         self.assertFalse(engine.has_unresolved())
+        self.assertIsNone(gateway.history_deal_magic_args[-1])
 
-    def test_history_deals_with_only_an_entry_stay_non_terminal(self):
+    def test_historical_entry_without_current_or_exit_truth_needs_review(self):
         engine, gateway = self._wedged_engine()
         gateway.history_deals_list = [
             DealInfo(ticket=1, order=11, position_id=7, symbol="EURUSD",
                      magic=AppConfig().execution.magic, entry=0, volume=0.10,
-                     price=1.10, time=1100),
+                     price=1.10, time=1100, comment=engine.current.correlation_key),
         ]
         engine.reconcile(gateway, 1000 + 10_000)
-        self.assertEqual(engine.current.state, ExecState.FILLED)
+        self.assertEqual(engine.current.state, ExecState.UNKNOWN)
         self.assertFalse(engine.current.terminal)
+        self.assertTrue(engine.requires_manual_review())
+        self.assertAlmostEqual(engine.current.filled_volume, 0.10)
 
     def test_a_raising_source_does_not_count_as_an_answer(self):
         engine, gateway = self._wedged_engine()
@@ -364,6 +426,267 @@ class TestUnresolvedExecution(unittest.TestCase):
         engine.reconcile(gateway, 1000 + 10_000)
         self.assertEqual(engine.current.state, ExecState.UNKNOWN)
         self.assertFalse(engine.current.terminal)
+
+    def test_same_symbol_is_never_a_transaction_identity(self):
+        """An older scanner trade on EURUSD must not be stolen by this intent."""
+        engine, gateway = self._wedged_engine()
+        gateway.positions_list = [
+            PositionInfo(
+                ticket=77,
+                position_id=77,
+                symbol="EURUSD",
+                magic=AppConfig().execution.magic,
+                direction=Direction.LONG,
+                volume=0.1,
+                comment="AK-OLDER-EXECUTION",
+            )
+        ]
+        engine.reconcile(gateway, 1000 + 10_000)
+        self.assertEqual(engine.current.state, ExecState.UNKNOWN)
+        self.assertNotEqual(engine.current.position_id, 77)
+
+    def test_exact_comment_recovers_when_send_response_tickets_were_lost(self):
+        engine, gateway = self._wedged_engine()
+        self.assertEqual(engine.current.order_ticket, 0)
+        gateway.history_deals_list = [
+            DealInfo(
+                ticket=90,
+                order=80,
+                position_id=70,
+                symbol="EURUSD",
+                magic=AppConfig().execution.magic,
+                entry=0,
+                volume=0.1,
+                price=1.1,
+                time=1001,
+                comment=engine.current.correlation_key,
+            )
+        ]
+        engine.reconcile(gateway, 1001)
+        self.assertEqual(engine.current.state, ExecState.FILLED)
+        self.assertEqual(engine.current.position_id, 70)
+        self.assertEqual(engine.current.order_ticket, 80)
+
+    def test_deal_learned_position_id_finds_a_position_without_a_comment(self):
+        engine, gateway = self._wedged_engine()
+        key = engine.current.correlation_key
+        gateway.history_deals_list = [
+            DealInfo(
+                ticket=90,
+                order=80,
+                position_id=70,
+                symbol="EURUSD",
+                magic=AppConfig().execution.magic,
+                entry=0,
+                volume=0.1,
+                price=1.1,
+                time=1001,
+                comment=key,
+            )
+        ]
+        # Some brokers do not copy the opening order comment onto a position.
+        # The exact position id learned above must bridge that gap in this pass.
+        gateway.positions_list = [
+            PositionInfo(
+                ticket=70,
+                position_id=70,
+                symbol="EURUSD",
+                magic=AppConfig().execution.magic,
+                direction=Direction.LONG,
+                volume=0.1,
+                comment="",
+            )
+        ]
+        engine.reconcile(gateway, 1000 + 10_000)
+        self.assertEqual(engine.current.state, ExecState.POSITION_ACTIVE)
+        self.assertFalse(engine.requires_manual_review())
+
+    def test_closed_observed_partial_fill_stays_unknown_if_live_reads_fail(self):
+        engine, gateway = self._wedged_engine()
+        key = engine.current.correlation_key
+        gateway.history_deals_list = [
+            DealInfo(ticket=1, order=11, position_id=7, symbol="EURUSD",
+                     entry=0, volume=0.05, price=1.1, time=1001, comment=key),
+            DealInfo(ticket=2, order=12, position_id=7, symbol="EURUSD",
+                     entry=1, volume=0.05, price=1.101, time=1002, reason="CLIENT"),
+        ]
+        gateway.orders = lambda *_a, **_k: (_ for _ in ()).throw(
+            RuntimeError("orders unavailable")
+        )
+        engine.reconcile(gateway, 1002)
+        self.assertEqual(engine.current.state, ExecState.UNKNOWN)
+        self.assertFalse(engine.current.terminal)
+
+        restarted = ExecutionEngine(AppConfig(), Journal())
+        restarted.recover_after_restart(engine.current, 1003)
+        persisted = restarted.truth_from_persisted_deals(
+            list(gateway.history_deals_list)
+        )
+        self.assertEqual(persisted.state, ExecState.UNKNOWN)
+        self.assertFalse(persisted.terminal)
+
+    def test_duplicate_history_deal_ticket_is_counted_once(self):
+        engine, gateway = self._wedged_engine()
+        key = engine.current.correlation_key
+        entry = DealInfo(
+            ticket=1, order=11, position_id=7, symbol="EURUSD", entry=0,
+            volume=0.1, price=1.1, time=1001, comment=key,
+        )
+        gateway.history_deals_list = [
+            entry,
+            entry,
+            DealInfo(ticket=2, order=12, position_id=7, symbol="EURUSD",
+                     entry=1, volume=0.1, price=1.104, time=1002, reason="TP"),
+        ]
+        truth = engine.reconcile(gateway, 1002)
+        self.assertTrue(truth.terminal)
+        self.assertAlmostEqual(truth.filled_volume, 0.1)
+
+    def test_history_deals_outrank_a_filled_history_order(self):
+        """A closed round trip may not stick forever at FILLED."""
+        from alikhande.core.models import OrderInfo
+
+        engine, gateway = self._wedged_engine()
+        key = engine.current.correlation_key
+        magic = AppConfig().execution.magic
+        gateway.history_orders_list = [
+            OrderInfo(
+                ticket=11,
+                symbol="EURUSD",
+                magic=magic,
+                state="FILLED",
+                volume_initial=0.1,
+                comment=key,
+            )
+        ]
+        gateway.history_deals_list = [
+            DealInfo(ticket=1, order=11, position_id=7, symbol="EURUSD", magic=magic,
+                     entry=0, volume=0.1, price=1.1, time=1100, comment=key),
+            DealInfo(ticket=2, order=12, position_id=7, symbol="EURUSD", magic=magic,
+                     entry=1, volume=0.1, price=1.104, time=1200, reason="TP"),
+        ]
+        engine.reconcile(gateway, 2000)
+        self.assertEqual(engine.current.state, ExecState.COMPLETED)
+        self.assertTrue(engine.current.terminal)
+
+    def test_unlinked_entry_into_same_netting_position_is_ambiguous(self):
+        engine, gateway = self._wedged_engine()
+        key = engine.current.correlation_key
+        magic = AppConfig().execution.magic
+        gateway.history_deals_list = [
+            DealInfo(ticket=1, order=11, position_id=7, symbol="EURUSD", magic=magic,
+                     entry=0, volume=0.1, price=1.1, time=1001, comment=key),
+            DealInfo(ticket=2, order=22, position_id=7, symbol="EURUSD", magic=0,
+                     entry=0, volume=0.1, price=1.101, time=1002, comment="manual"),
+        ]
+        engine.reconcile(gateway, 1002)
+        self.assertEqual(engine.current.state, ExecState.UNKNOWN)
+        self.assertTrue(engine.requires_manual_review())
+
+    def test_mixed_or_missing_exit_reason_is_not_promoted_to_tp(self):
+        engine, gateway = self._wedged_engine()
+        key = engine.current.correlation_key
+        magic = AppConfig().execution.magic
+        gateway.history_deals_list = [
+            DealInfo(ticket=1, order=11, position_id=7, symbol="EURUSD", magic=magic,
+                     entry=0, volume=0.1, price=1.1, time=1001, comment=key),
+            DealInfo(ticket=2, order=12, position_id=7, symbol="EURUSD", magic=magic,
+                     entry=1, volume=0.05, price=1.104, time=1002, reason=""),
+            DealInfo(ticket=3, order=13, position_id=7, symbol="EURUSD", magic=magic,
+                     entry=1, volume=0.05, price=1.104, time=1003, reason="TP"),
+        ]
+        truth = engine.reconcile(gateway, 1003)
+        self.assertTrue(truth.terminal)
+        self.assertEqual(truth.close_reason, "MIXED")
+
+    def test_exact_entry_volume_above_request_is_ambiguous(self):
+        engine, gateway = self._wedged_engine()
+        key = engine.current.correlation_key
+        magic = AppConfig().execution.magic
+        gateway.history_deals_list = [
+            DealInfo(ticket=1, order=11, position_id=7, symbol="EURUSD", magic=magic,
+                     entry=0, volume=0.06, price=1.1, time=1001, comment=key),
+            DealInfo(ticket=2, order=11, position_id=7, symbol="EURUSD", magic=magic,
+                     entry=0, volume=0.06, price=1.1, time=1002, comment=key),
+        ]
+        engine.reconcile(gateway, 1002)
+        self.assertEqual(engine.current.state, ExecState.UNKNOWN)
+        self.assertTrue(engine.requires_manual_review())
+
+    def test_transaction_event_cannot_claim_a_foreign_netting_entry(self):
+        engine, _ = self._wedged_engine()
+        engine.current.position_id = 7
+        engine.current.filled_volume = 0.1
+        engine.current.state = ExecState.POSITION_ACTIVE
+        admitted = engine.apply_deal(
+            DealInfo(
+                ticket=99,
+                order=88,
+                position_id=7,
+                symbol="EURUSD",
+                magic=0,
+                entry=0,
+                volume=0.1,
+                price=1.101,
+                time=1100,
+                comment="manual",
+            ),
+            1100,
+        )
+        self.assertFalse(admitted)
+        self.assertEqual(engine.current.state, ExecState.UNKNOWN)
+        self.assertEqual(engine.current.filled_volume, 0.1)
+        self.assertTrue(engine.requires_manual_review())
+
+    def test_live_position_volume_mismatch_is_ambiguous_after_grace(self):
+        engine, gateway = self._wedged_engine()
+        key = engine.current.correlation_key
+        magic = AppConfig().execution.magic
+        gateway.positions_list = [
+            PositionInfo(
+                ticket=7, position_id=7, symbol="EURUSD", magic=magic,
+                direction=Direction.LONG, volume=0.2, comment=key,
+            )
+        ]
+        gateway.history_deals_list = [
+            DealInfo(
+                ticket=1, order=11, position_id=7, symbol="EURUSD", magic=magic,
+                entry=0, volume=0.1, price=1.1, time=1001, comment=key,
+            )
+        ]
+        engine.reconcile(gateway, 1000 + 10_000)
+        self.assertEqual(engine.current.state, ExecState.UNKNOWN)
+        self.assertTrue(engine.requires_manual_review())
+
+    def test_exact_sources_disagreeing_on_position_id_are_ambiguous(self):
+        engine, gateway = self._wedged_engine()
+        key = engine.current.correlation_key
+        magic = AppConfig().execution.magic
+        gateway.positions_list = [
+            PositionInfo(
+                ticket=8, position_id=8, symbol="EURUSD", magic=magic,
+                direction=Direction.LONG, volume=0.1, comment=key,
+            )
+        ]
+        gateway.history_deals_list = [
+            DealInfo(
+                ticket=22, order=11, position_id=7, symbol="EURUSD", magic=magic,
+                entry=0, volume=0.1, price=1.1, time=1001, comment=key,
+            )
+        ]
+        engine.reconcile(gateway, 1001)
+        self.assertEqual(engine.current.state, ExecState.UNKNOWN)
+        self.assertTrue(engine.requires_manual_review())
+
+    def test_polling_does_not_renew_the_reconciliation_grace_period(self):
+        engine, gateway = self._wedged_engine()
+        grace = AppConfig().execution.reconcile_grace_seconds
+        engine.reconcile(gateway, 1001)
+        self.assertEqual(engine.current.state, ExecState.RECONCILING)
+        # _persist changed updated_at above; the fixed deadline is created_at.
+        engine.reconcile(gateway, 1000 + grace + 1)
+        self.assertEqual(engine.current.state, ExecState.UNKNOWN)
+        self.assertTrue(engine.requires_manual_review())
 
 
 # ---------------------------------------------------------------------------
@@ -406,10 +729,12 @@ class TestDealIdempotency(unittest.TestCase):
         )
         magic = AppConfig().execution.magic
         engine.apply_deal(DealInfo(ticket=1, symbol="EURUSD", magic=magic, entry=0,
-                                   volume=0.05, time=1100), 1100)
+                                   volume=0.05, time=1100,
+                                   comment=engine.current.correlation_key), 1100)
         self.assertEqual(engine.current.state, ExecState.PARTIALLY_FILLED)
         engine.apply_deal(DealInfo(ticket=2, symbol="EURUSD", magic=magic, entry=0,
-                                   volume=0.05, time=1101), 1101)
+                                   volume=0.05, time=1101,
+                                   comment=engine.current.correlation_key), 1101)
         self.assertEqual(engine.current.state, ExecState.FILLED)
 
 
@@ -663,6 +988,49 @@ class TestCalendarGate(unittest.TestCase):
         verdict = gate.evaluate("EURUSD", detect_runtime(connected=True, replay=False), 1000)
         self.assertEqual(verdict.state, NewsState.UNKNOWN)
 
+    def test_operator_csv_is_a_wired_live_source(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "calendar.csv"
+            path.write_text(
+                "time,currency,name,importance,coverage_until\n"
+                "1000,USD,NFP,HIGH,2000\n",
+                encoding="utf-8",
+            )
+            gate = CalendarGate(CsvCalendar(path), journal=Journal())
+            gate.apply_runtime_policy(detect_runtime(connected=True, replay=False), 0)
+            verdict = gate.evaluate(
+                "EURUSD", detect_runtime(connected=True, replay=False), 1000
+            )
+            self.assertEqual(verdict.state, NewsState.BLOCKED)
+
+    def test_malformed_operator_csv_fails_closed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "calendar.csv"
+            path.write_text("when,currency\n1000,USD\n", encoding="utf-8")
+            gate = CalendarGate(CsvCalendar(path), journal=Journal())
+            gate.apply_runtime_policy(detect_runtime(connected=True, replay=False), 0)
+            verdict = gate.evaluate(
+                "EURUSD", detect_runtime(connected=True, replay=False), 1000
+            )
+            self.assertEqual(verdict.state, NewsState.UNKNOWN)
+            self.assertTrue(gate.blocks_trading(verdict))
+
+    def test_stale_calendar_coverage_fails_closed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "calendar.csv"
+            path.write_text(
+                "time,currency,name,importance,coverage_until\n"
+                "1000,USD,NFP,HIGH,1100\n",
+                encoding="utf-8",
+            )
+            gate = CalendarGate(CsvCalendar(path), journal=Journal())
+            gate.apply_runtime_policy(detect_runtime(connected=True, replay=False), 0)
+            verdict = gate.evaluate(
+                "EURUSD", detect_runtime(connected=True, replay=False), 2000
+            )
+            self.assertEqual(verdict.state, NewsState.UNKNOWN)
+            self.assertTrue(gate.blocks_trading(verdict))
+
 
 # ---------------------------------------------------------------------------
 class TestRuntimeAndPersistence(unittest.TestCase):
@@ -839,6 +1207,61 @@ class TestPreflight(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("ORDER_CHECK_FAILED", result.reason)
 
+    def test_an_order_check_transport_error_fails_closed(self):
+        from alikhande.core.preflight import Preflight
+
+        gateway = StubGateway()
+        gateway.check_order = lambda _request: (_ for _ in ()).throw(
+            RuntimeError("IPC failed")
+        )
+        result = Preflight(AppConfig()).validate(
+            valid_plan(), gateway=gateway, account=demo_account(),
+            spec=default_spec("EURUSD"), now=1000,
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("ORDER_CHECK_UNAVAILABLE", result.reason)
+
+    def test_exposure_that_appeared_after_preview_refuses_the_send(self):
+        from alikhande.core.preflight import Preflight
+
+        gateway = StubGateway()
+        gateway.positions_list = [PositionInfo(symbol="EURUSD")]
+        result = Preflight(AppConfig()).validate(
+            valid_plan(), gateway=gateway, account=demo_account(),
+            spec=default_spec("EURUSD"), now=1000,
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "ALREADY_EXPOSED")
+
+    def test_unreadable_exposure_is_not_treated_as_empty(self):
+        from alikhande.core.preflight import Preflight
+
+        gateway = StubGateway()
+        gateway.positions = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("IPC failed")
+        )
+        result = Preflight(AppConfig()).validate(
+            valid_plan(), gateway=gateway, account=demo_account(),
+            spec=default_spec("EURUSD"), now=1000,
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("BROKER_EXPOSURE_UNAVAILABLE", result.reason)
+
+    def test_spec_change_after_preview_requires_replanning(self):
+        from alikhande.core.preflight import Preflight
+
+        expected = default_spec("EURUSD")
+        changed = default_spec("EURUSD")
+        changed.fingerprint = "CHANGED"
+        gateway = StubGateway()
+        gateway.symbol_spec = lambda _symbol: changed
+        result = Preflight(AppConfig()).validate(
+            valid_plan(), gateway=gateway, account=demo_account(),
+            spec=expected, now=1000,
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "BROKER_SPEC_CHANGED_REPLAN")
+
     def test_a_clean_plan_produces_a_sendable_request(self):
         from alikhande.core.preflight import Preflight
 
@@ -849,6 +1272,19 @@ class TestPreflight(unittest.TestCase):
         self.assertTrue(result.ok, result.reason)
         self.assertIsNotNone(result.request)
         self.assertEqual(result.request.magic, AppConfig().execution.magic)
+        self.assertAlmostEqual(result.actual_risk_amount, 20.0)
+
+    def test_last_moment_cash_risk_above_the_plan_is_refused(self):
+        from alikhande.core.preflight import Preflight
+
+        gateway = StubGateway()
+        gateway.calc_profit = lambda *_args, **_kwargs: -30.0
+        result = Preflight(AppConfig()).validate(
+            valid_plan(), gateway=gateway, account=demo_account(),
+            spec=default_spec("EURUSD"), now=1000,
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("ACTUAL_RISK_EXCEEDS_PLAN", result.reason)
 
 
 if __name__ == "__main__":

@@ -34,8 +34,8 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
     single most confusing thing this application can say, because it has at
     least four unrelated causes and they need four different actions.
 
-    Exit code 0 means the machine could run a demo session today; 1 means
-    something named below has to be dealt with first.
+    Exit code 0 means the machine prerequisites inspected here passed; it is
+    not release qualification. A non-zero code names what must be fixed first.
     """
     import platform
 
@@ -90,6 +90,7 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
         kind = "DEMO" if probe.is_demo else "REAL"
         line("account", f"{probe.login} @ {probe.server} [{kind}]")
         if not probe.is_demo:
+            ok = False
             line("", "This build never sends an order on a non-demo account.",
                  "Declare the Production environment to rehearse everything\n"
                  "except the send, or log in to a demo account to trade.")
@@ -103,7 +104,33 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
 
     # ---- the real path, on one thread, exactly as the worker does it -------
     from .config import AppConfig
+    from .app.paths import data_directory
+    from .core.calendar_gate import CsvCalendar
     from .core.enums import Timeframe
+
+    calendar_path = data_directory() / "calendar.csv"
+    calendar = CsvCalendar(calendar_path)
+    if not calendar.available():
+        ok = False
+        line(
+            "calendar",
+            "MISSING",
+            f"Create {calendar_path} with columns: "
+            "time,currency,name,importance,coverage_until.\n"
+            "Live Demo fails closed without an operator-supplied news source.",
+        )
+    else:
+        try:
+            # Parsing every row is the validation; an empty event result is a
+            # legitimate clear calendar, not a skipped check.
+            import time
+
+            current = int(time.time())
+            calendar.events(current, current + 3600, ())
+            line("calendar", f"valid — {calendar_path}")
+        except Exception as error:
+            ok = False
+            line("calendar", f"INVALID — {error}")
 
     gateway = MT5Gateway()
     try:
@@ -149,8 +176,8 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
         gateway.shutdown()
 
     print()
-    print("READY — this machine can run a demo session." if ok
-          else "NOT READY — deal with the items marked above first.")
+    print("MACHINE GATE PASS — inspected prerequisites passed." if ok
+          else "MACHINE GATE BLOCKED — deal with the items marked above first.")
     return 0 if ok else 1
 
 
@@ -169,29 +196,31 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
         gateway.load_synthetic(symbols, BACKTEST_TIMEFRAMES, args.h4_bars, seed=args.seed)
         source = "synthetic"
 
-    repositories = None
-    database = None
     if args.database:
-        from .adapters.sqlite.database import Database
-        from .adapters.sqlite.repositories import Repositories
+        from .app.backtest import run_with_atomic_persistence
 
-        database = Database()
-        database.open(args.database)
-        repositories = Repositories(database)
-
-    result = Backtester(config).run(
-        gateway,
-        symbols,
-        warmup_bars=args.warmup,
-        max_steps=args.steps,
-        step=args.step,
-        data_source=source,
-        repositories=repositories,
-    )
+        result = run_with_atomic_persistence(
+            Backtester(config),
+            gateway,
+            symbols,
+            target_database=args.database,
+            warmup_bars=args.warmup,
+            max_steps=args.steps,
+            step=args.step,
+            data_source=source,
+        )
+    else:
+        result = Backtester(config).run(
+            gateway,
+            symbols,
+            warmup_bars=args.warmup,
+            max_steps=args.steps,
+            step=args.step,
+            data_source=source,
+        )
     print(result.report(min_sample=config.statistics.min_outcome_sample))
 
-    if database is not None:
-        database.close()
+    if args.database:
         print(f"\n  database written to {args.database}")
     return 0
 
@@ -217,18 +246,15 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
     Appending would double the sample behind every rate while describing the
     same trades twice, and the numbers would appear to be improving.
     """
-    import time
-
     from .adapters.offline.gateway import OfflineGateway
     from .adapters.sqlite.database import Database
     from .adapters.sqlite.repositories import Repositories
-    from .app.backtest import BACKTEST_TIMEFRAMES, Backtester
+    from .app.backtest import BACKTEST_TIMEFRAMES, Backtester, run_with_atomic_persistence
     from .config import AppConfig
     from .core.enums import RuntimeKind
-    from .core.hashing import fnv1a
     from .core.models import RuntimeContext
     from .core.runtime import persistence_plan
-    from .ui.main_window import data_directory
+    from .app.paths import data_directory
     from .version import RULE_VERSION
 
     symbols = tuple(s.strip() for s in args.symbols.split(",") if s.strip())
@@ -245,44 +271,23 @@ def _cmd_calibrate(args: argparse.Namespace) -> int:
     print(f"  database    {target}")
     print(f"  symbols     {', '.join(symbols)}")
 
-    database = Database()
-    database.open(target)
-    repositories = Repositories(database)
-
     gateway = OfflineGateway(equity=args.equity)
     gateway.load_synthetic(symbols, BACKTEST_TIMEFRAMES, args.h4_bars, seed=args.seed)
 
-    # Replay first, replace afterwards. This used to purge the previous
-    # calibration before running, so an interrupted replay — Ctrl-C, a raised
-    # exception, a full disk — left the operator with no calibration at all and
-    # nothing to restore it from. The previous evidence was destroyed by an
-    # action that produced none.
-    run_id = fnv1a(f"calibrate|{time.time()}")
-    result = None
-    try:
-        result = Backtester(config).run(
-            gateway,
-            symbols,
-            warmup_bars=args.warmup,
-            max_steps=args.steps,
-            data_source="synthetic",
-            repositories=repositories,
-            run_id=run_id,
-        )
-    except BaseException:
-        # BaseException, so a KeyboardInterrupt cleans up too — that is the
-        # interruption an operator is most likely to cause.
-        repositories.purge_run(run_id)
-        database.close()
-        print("\n  interrupted — the previous calibration was left untouched.")
-        raise
-
-    removed = repositories.purge_runs_of_kind(RuntimeKind.REPLAY.name, keep_run_id=run_id)
-    if removed:
-        print(f"  replaced    {removed:,} signals from the previous calibration")
-
+    result = run_with_atomic_persistence(
+        Backtester(config),
+        gateway,
+        symbols,
+        target_database=target,
+        warmup_bars=args.warmup,
+        max_steps=args.steps,
+        data_source="synthetic",
+    )
     print(result.report(min_sample=config.statistics.min_outcome_sample))
 
+    database = Database()
+    database.open(target)
+    repositories = Repositories(database)
     print("  per symbol and setup, as the scanner will read it:")
     floor = config.statistics.min_outcome_sample
     for symbol in symbols:

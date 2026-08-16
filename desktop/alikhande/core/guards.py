@@ -25,11 +25,12 @@ class TradeGuards:
     def has_exposure(
         self, symbol: str, positions: list[PositionInfo], orders: list[OrderInfo]
     ) -> bool:
-        """Any position or working order on this symbol from this app.
+        """Any position or working order in the caller-provided broker view.
 
-        Inputs must be magic-filtered by the caller: the scanner must not refuse
-        to trade because a human has a manual position open, and must not treat
-        somebody else's order as its own.
+        The last-moment preflight supplies the unfiltered account view because
+        netting would merge foreign same-symbol exposure and destroy exact
+        outcome attribution. Scanner previews may supply the app-only view so
+        they remain informative; Confirm is the authoritative refusal.
         """
         if any(p.symbol == symbol for p in positions):
             return True
@@ -149,7 +150,7 @@ class AccountRiskGuard:
         return True
 
     def register_closed_profit(self, net_profit: float, now: int) -> None:
-        """Called only for deals this app opened (magic-filtered upstream)."""
+        """Called only for an exact-correlated execution closed by the broker."""
         if net_profit < 0.0:
             self._state.consecutive_losses += 1
         elif net_profit > 0.0:

@@ -125,7 +125,11 @@ class ThreadBoundGateway(OfflineGateway):
 class TestOnlyTheWorkerTouchesTheBroker(unittest.TestCase):
     def setUp(self):
         from alikhande.app.backtest import BACKTEST_TIMEFRAMES
+        from alikhande.app.engine import ScanEngine
         from alikhande.config import AppConfig
+        from alikhande.core.environment import Environment
+        from alikhande.core.runtime import PersistencePlan, detect_runtime
+        from alikhande.ui.worker import ScanWorker, WorkerBootstrap
 
         self.config = AppConfig()
         self.gateway = ThreadBoundGateway()
@@ -134,32 +138,51 @@ class TestOnlyTheWorkerTouchesTheBroker(unittest.TestCase):
             self.gateway.series_length(self.config.symbols[0], BACKTEST_TIMEFRAMES[0])
         )
 
-        from alikhande.app.engine import ScanEngine
-        from alikhande.core.runtime import detect_runtime, environment_plan
         from alikhande.ui import main_window as mw
 
+        runtime = detect_runtime(connected=False, replay=False)
+        persistence = PersistencePlan(False, False, "", "thread harness")
+        bootstrap = WorkerBootstrap(
+            config=self.config,
+            runtime=runtime,
+            persistence=persistence,
+            environment=Environment.BACKTEST,
+            offline=True,
+        )
+        gateway = self.gateway
+
+        class InjectedWorker(ScanWorker):
+            """Build the real engine on its owner thread with our guarded gateway."""
+
+            def _build_engine(worker_self):
+                worker_self._gateway = gateway
+                worker_self._repositories = None
+                return ScanEngine(
+                    gateway,
+                    self.config,
+                    runtime=runtime,
+                    environment=Environment.BACKTEST,
+                )
+
+        worker = InjectedWorker(bootstrap, 50)
         self.application = QApplication.instance() or QApplication([])
         self.window = mw.MainWindow(
-            ScanEngine(self.gateway, self.config),
+            worker,
             self.config,
-            detect_runtime(connected=False, replay=False),
-            environment_plan("BACKTEST", mw.data_directory(), connected=False),
-            None,
+            runtime,
+            persistence,
+            Environment.BACKTEST,
         )
 
     def tearDown(self):
-        # Close the window rather than only stopping the worker.
-        #
-        # `closeEvent` is what saves preferences, closes the session ledger and
-        # shuts the thread down in the right order. Stopping the worker by hand
-        # left the QMainWindow alive holding a QThread, which Qt then destroyed
-        # at interpreter exit with "QThread: Destroyed while thread is still
-        # running" — harmless, and exactly the kind of line that makes a
-        # hardening-gate log look untrustworthy.
-        self.window.close()
+        self.window._worker.stop()
+        self.window._thread.quit()
+        self.assertTrue(
+            self.window._thread.wait(10_000),
+            "the owner worker did not stop after the guarded gateway test",
+        )
         self.window.deleteLater()
         self.application.processEvents()
-        self.window = None
 
     def _settle(self, passes: int = 4, timeout: float = 20.0) -> None:
         deadline = time.time() + timeout
@@ -186,7 +209,7 @@ class TestOnlyTheWorkerTouchesTheBroker(unittest.TestCase):
         self._settle()
         snapshot = self.window._last_snapshot
         self.assertIsNotNone(snapshot)
-        for field in ("positions", "orders", "exposure", "account"):
+        for field in ("positions", "working_orders", "exposure", "account"):
             self.assertTrue(
                 hasattr(snapshot, field), f"the snapshot has no `{field}`"
             )
@@ -211,6 +234,10 @@ class TestOnlyTheWorkerTouchesTheBroker(unittest.TestCase):
         next view that needs positions reintroduces the defect."""
         from alikhande.app.engine import ScanEngine
 
+        self.assertFalse(
+            hasattr(self.window, "_engine"),
+            "MainWindow must not retain the engine created inside ScanWorker",
+        )
         for removed in ("own_positions", "working_orders", "exposure_summary",
                         "account_snapshot"):
             self.assertFalse(

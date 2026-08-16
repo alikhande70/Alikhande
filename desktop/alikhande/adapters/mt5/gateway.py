@@ -95,10 +95,9 @@ def package_version() -> str:
 class TerminalProbe:
     """What a short attach-and-detach found out about the machine.
 
-    Used at startup to decide the environment and where evidence should live,
-    *before* the scan worker exists to own the real connection. It attaches,
-    reads, and detaches again — it deliberately does not leave a connection
-    behind, because that connection would belong to the wrong thread.
+    Used only by the separate ``doctor`` command. The GUI never probes MT5 on
+    its thread: this helper attaches, reads and detaches inside one short-lived
+    diagnostic process and deliberately leaves no connection behind.
     """
 
     available: bool = False
@@ -179,6 +178,11 @@ class MT5Gateway:
         the operator to have made the choice deliberately in MetaTrader rather
         than storing a password here.
         """
+        if self._mt5 is not None:
+            # A direct connect call may not silently migrate ownership of the
+            # process-global package to another thread.
+            self._require_owner_thread()
+            return
         mt5 = _import_mt5()
 
         kwargs: dict[str, Any] = {"timeout": timeout_ms}
@@ -261,7 +265,8 @@ class MT5Gateway:
 
     def shutdown(self) -> None:
         if self._mt5 is not None:
-            self._mt5.shutdown()
+            mt5 = self._require_owner_thread()
+            mt5.shutdown()
             self._mt5 = None
             self._owner_thread = None
 
@@ -282,8 +287,9 @@ class MT5Gateway:
     def is_connected(self) -> bool:
         if self._mt5 is None:
             return False
+        mt5 = self._require_owner_thread()
         try:
-            return self._mt5.terminal_info() is not None
+            return mt5.terminal_info() is not None
         except Exception:
             return False
 
@@ -303,7 +309,7 @@ class MT5Gateway:
 
     def symbols(self) -> list[str]:
         mt5 = self._require_owner_thread()
-        return [s.name for s in (mt5.symbols_get() or [])]
+        return [s.name for s in self._rows(mt5.symbols_get(), "symbols_get")]
 
     def resolve_symbol(self, requested: str) -> str | None:
         """Map a requested name onto the broker's actual symbol name.
@@ -345,6 +351,19 @@ class MT5Gateway:
         mt5 = self._require_owner_thread()
         if mt5.symbol_select(symbol, True):
             self._selected.add(symbol)
+
+    def _rows(self, raw, operation: str):
+        """Distinguish an authoritative empty result from an API failure.
+
+        MetaTrader returns an empty tuple when there are no positions/orders,
+        and ``None`` on error. Collapsing both to ``[]`` lets reconciliation
+        treat an IPC failure as proof that nothing exists.
+        """
+        if raw is not None:
+            return raw
+        mt5 = self._require_owner_thread()
+        code, message = mt5.last_error()
+        raise GatewayError(f"{operation} failed ({code}: {message})")
 
     def symbol_spec(self, symbol: str) -> SymbolSpec | None:
         mt5 = self._require_owner_thread()
@@ -454,9 +473,7 @@ class MT5Gateway:
 
     def positions(self, magic: int | None = None) -> list[PositionInfo]:
         mt5 = self._require_owner_thread()
-        raw = mt5.positions_get()
-        if raw is None:
-            return []
+        raw = self._rows(mt5.positions_get(), "positions_get")
         out = []
         for p in raw:
             if magic is not None and int(p.magic) != magic:
@@ -474,15 +491,14 @@ class MT5Gateway:
                     take_profit=float(p.tp),
                     profit=float(p.profit),
                     time=int(p.time),
+                    comment=str(getattr(p, "comment", "") or ""),
                 )
             )
         return out
 
     def orders(self, magic: int | None = None) -> list[OrderInfo]:
         mt5 = self._require_owner_thread()
-        raw = mt5.orders_get()
-        if raw is None:
-            return []
+        raw = self._rows(mt5.orders_get(), "orders_get")
         return [
             OrderInfo(
                 ticket=int(o.ticket),
@@ -493,6 +509,8 @@ class MT5Gateway:
                 volume_current=float(o.volume_current),
                 price_open=float(o.price_open),
                 time_setup=int(o.time_setup),
+                position_id=int(getattr(o, "position_id", 0) or 0),
+                comment=str(getattr(o, "comment", "") or ""),
             )
             for o in raw
             if magic is None or int(o.magic) == magic
@@ -500,9 +518,9 @@ class MT5Gateway:
 
     def history_orders(self, since: int, until: int, magic: int | None = None) -> list[OrderInfo]:
         mt5 = self._require_owner_thread()
-        raw = mt5.history_orders_get(_dt(since), _dt(until))
-        if raw is None:
-            return []
+        raw = self._rows(
+            mt5.history_orders_get(_dt(since), _dt(until)), "history_orders_get"
+        )
         return [
             OrderInfo(
                 ticket=int(o.ticket),
@@ -513,6 +531,8 @@ class MT5Gateway:
                 volume_current=float(o.volume_current),
                 price_open=float(o.price_open),
                 time_setup=int(o.time_setup),
+                position_id=int(getattr(o, "position_id", 0) or 0),
+                comment=str(getattr(o, "comment", "") or ""),
             )
             for o in raw
             if magic is None or int(o.magic) == magic
@@ -520,9 +540,9 @@ class MT5Gateway:
 
     def history_deals(self, since: int, until: int, magic: int | None = None) -> list[DealInfo]:
         mt5 = self._require_owner_thread()
-        raw = mt5.history_deals_get(_dt(since), _dt(until))
-        if raw is None:
-            return []
+        raw = self._rows(
+            mt5.history_deals_get(_dt(since), _dt(until)), "history_deals_get"
+        )
         return [
             DealInfo(
                 ticket=int(d.ticket),
@@ -536,7 +556,12 @@ class MT5Gateway:
                 profit=float(d.profit),
                 commission=float(d.commission),
                 swap=float(d.swap),
+                fee=float(getattr(d, "fee", 0.0) or 0.0),
                 time=int(d.time),
+                comment=str(getattr(d, "comment", "") or ""),
+                # Missing/unknown is empty, never CLIENT. ``None or 0`` would
+                # silently invent a manual-close reason from absent data.
+                reason=_deal_reason_name(getattr(d, "reason", None)),
             )
             for d in raw
             if magic is None or int(d.magic) == magic
@@ -644,12 +669,20 @@ class MT5Gateway:
         result = mt5.order_send(self._build_request(request))
         if result is None:
             code, message = mt5.last_error()
-            return OrderResult(ok=False, retcode=int(code), comment=str(message))
+            return OrderResult(
+                ok=False,
+                definitive=False,
+                retcode=int(code),
+                comment=str(message),
+            )
 
         retcode = int(result.retcode)
         return OrderResult(
             # 10009 DONE, 10008 PLACED, 10010 DONE_PARTIAL are the accepted set.
             ok=retcode in (10008, 10009, 10010),
+            # A server timeout/connection loss is not proof of rejection. The
+            # correlation key and history reconciliation decide what happened.
+            definitive=retcode not in (10012, 10031),
             retcode=retcode,
             order=int(result.order),
             deal=int(result.deal),
@@ -686,3 +719,20 @@ def _order_state_name(state: int) -> str:
         8: "REQUEST_MODIFY",
         9: "REQUEST_CANCEL",
     }.get(state, "UNKNOWN")
+
+
+def _deal_reason_name(reason: int | None) -> str:
+    """Normalise MT5 DEAL_REASON_* without leaking adapter integers to core."""
+    return {
+        0: "CLIENT",
+        1: "MOBILE",
+        2: "WEB",
+        3: "EXPERT",
+        4: "SL",
+        5: "TP",
+        6: "SO",
+        7: "ROLLOVER",
+        8: "VMARGIN",
+        9: "SPLIT",
+        10: "CORPORATE_ACTION",
+    }.get(reason, "")

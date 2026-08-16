@@ -27,18 +27,20 @@ not know" is the strongest possible reason to send nothing further.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..config import AppConfig
-from .enums import ExecState, RunMode
+from .enums import Direction, ExecState, RunMode
 from .environment import Environment, capabilities
 from .hashing import fnv1a64
-from .order_errors import ErrorTally
+from .order_errors import ErrorCategory, ErrorTally
 from .journal import Journal
 from .models import (
     DEAL_ENTRY_OUT,
     DEAL_ENTRY_OUT_BY,
+    DEAL_ENTRY_INOUT,
     AccountInfo,
+    DealInfo,
     ExecutionRecord,
     SymbolSpec,
     TradePlan,
@@ -77,10 +79,16 @@ class BrokerTruth:
     source: str = ""
     detail: str = ""
     filled_volume: float = 0.0
-    #: The broker's own open price for the position, when a live position was
-    #: what resolved this execution. Zero when the source could not say.
-    fill_price: float = 0.0
+    closed_volume: float = 0.0
+    order_ticket: int = 0
     position_id: int = 0
+    deals: tuple[DealInfo, ...] = field(default_factory=tuple)
+    entry_price: float = 0.0
+    exit_price: float = 0.0
+    net_profit: float = 0.0
+    close_reason: str = ""
+    closed_at: int = 0
+    ambiguous: bool = False
 
 
 class DealLedger:
@@ -199,7 +207,13 @@ class ExecutionEngine:
         if self._save is not None:
             self._save(self._current)
 
-    def recover_after_restart(self, record: ExecutionRecord | None, now: int) -> None:
+    def recover_after_restart(
+        self,
+        record: ExecutionRecord | None,
+        now: int,
+        *,
+        reconcile: bool = True,
+    ) -> None:
         """Restore an in-flight execution so reconciliation resumes instead of
         the order being forgotten.
 
@@ -209,12 +223,17 @@ class ExecutionEngine:
         if record is None or record.execution_id == "":
             return
         self._current = record
-        if record.state != ExecState.UNKNOWN:
+        if reconcile and record.state != ExecState.UNKNOWN:
             self._current.state = ExecState.RECONCILING
         self._journal.warn(
-            "EXECUTION_RECOVERED",
+            "EXECUTION_RECOVERED" if reconcile else "OUTCOME_COMMIT_RECOVERED",
             record.symbol,
-            f"execution {record.execution_id} was in flight at shutdown; reconciling",
+            (
+                f"execution {record.execution_id} was in flight at shutdown; reconciling"
+                if reconcile
+                else f"execution {record.execution_id} retained terminal disposition "
+                f"{record.state.name}; committing its missing outcome"
+            ),
             now,
         )
         self._persist(now)
@@ -254,10 +273,13 @@ class ExecutionEngine:
         if mode == RunMode.ALERT_ONLY:
             return False, "ALERT_ONLY_MODE"
 
-        # Unconditional. Not a setting, not overridable.
+        # A broker account is needed even for Shadow because the identical
+        # permissions, sizing and OrderCheck path must run. Only a mode that can
+        # actually send is restricted to demo here; Shadow returns before the
+        # send boundary and is the supported rehearsal on a real account.
         if account is None:
             return False, "NO_ACCOUNT"
-        if not account.is_demo:
+        if mode == RunMode.DEMO_CONFIRM and not account.is_demo:
             self._journal.error(
                 "REAL_ACCOUNT_BLOCKED",
                 plan.symbol,
@@ -273,18 +295,41 @@ class ExecutionEngine:
                 return False, "UNRESOLVED_MANUAL_REVIEW_REQUIRED"
             return False, "EXECUTION_ALREADY_UNRESOLVED"
 
+        # A unique token is created before OrderCheck so the request checked is
+        # byte-for-byte the request sent. It is persisted before the sole send
+        # boundary, allowing recovery to find broker records even when the
+        # process dies before receiving order/deal tickets.
+        import uuid
+
+        correlation_key = f"AK-{uuid.uuid4().hex[:16].upper()}"
         result = self._preflight.validate(
-            plan, gateway=gateway, account=account, spec=spec, now=now
+            plan,
+            gateway=gateway,
+            account=account,
+            spec=spec,
+            now=now,
+            correlation_comment=correlation_key,
         )
         if not result.ok or result.request is None:
             return False, result.reason
 
         self._current = ExecutionRecord(
-            execution_id=fnv1a64(f"{plan.plan_id}|{now}"),
+            execution_id=fnv1a64(f"{plan.plan_id}|{now}|{correlation_key}"),
             plan_id=plan.plan_id,
             signal_id=plan.signal_id,
             symbol=plan.symbol,
+            mode=mode,
             requested_volume=plan.lot_size,
+            correlation_key=correlation_key,
+            direction=plan.direction,
+            planned_entry=plan.entry,
+            stop_loss=plan.stop_loss,
+            take_profit=plan.take_profit,
+            initial_risk_amount=(
+                result.actual_risk_amount
+                or plan.actual_risk_amount
+                or plan.risk_amount
+            ),
             created_at=now,
             state=ExecState.SUBMITTING,
             terminal=False,
@@ -302,6 +347,16 @@ class ExecutionEngine:
                 now,
             )
             return True, "SHADOW_MODE"
+
+        # Defence immediately before the only send call as well as at the top
+        # of the Demo path. A future refactor cannot turn Shadow's real-account
+        # rehearsal permission into real-account execution by moving a return.
+        if not account.is_demo:
+            self._current.state = ExecState.CANCELLED
+            self._current.terminal = True
+            self._current.message = "REAL_ACCOUNT_BLOCKED"
+            self._persist(now)
+            return False, "REAL_ACCOUNT_BLOCKED"
 
         # The last gate before the only line in this application that can move
         # money. Recomputed from the environment name here rather than reusing
@@ -327,30 +382,53 @@ class ExecutionEngine:
         # the reply, restart recovery still finds the record.
         self._persist(now)
 
-        outcome = gateway.send_order(result.request)
+        try:
+            outcome = gateway.send_order(result.request)
+        except Exception as error:
+            # The transport may fail after the terminal accepted the request.
+            # That is not a rejection and must never release the submit gate.
+            # The pre-send record plus correlation key let reconciliation find
+            # the broker truth without depending on a response ticket.
+            self._current.state = ExecState.UNKNOWN
+            self._current.terminal = False
+            self._current.message = (
+                f"ORDER_SEND_UNCERTAIN({type(error).__name__}: {error})"
+            )
+            self._journal.error(
+                "ORDER_SEND_UNCERTAIN",
+                plan.symbol,
+                "order transport raised after durable intent; broker truth must be reconciled",
+                now,
+            )
+            self._persist(now)
+            return False, self._current.message
 
         self._current.request_id = outcome.request_id
         self._current.order_ticket = outcome.order
         self._current.deal_ticket = outcome.deal
         self._current.retcode = outcome.retcode
         self._current.message = outcome.comment
-        # A synchronous DONE carries the executed price. Taken as a provisional
-        # value; the deal stream corrects it if the fill was split.
-        #
-        # The *volume* is deliberately not taken from here. Filled volume is
-        # owned by the deal ledger, which is where idempotency lives — setting
-        # it from the send result means the deal that follows adds to a total
-        # that already counted it, and a partial fill reads as complete. The
-        # existing partial-fill tests caught exactly that.
-        if outcome.ok and outcome.price > 0.0:
-            self._current.fill_price = outcome.price
 
-        if not outcome.ok:
+        error = self._errors.record(outcome.retcode, plan.symbol, now)
+        if not outcome.definitive or error.category == ErrorCategory.UNKNOWN:
+            # No reply, a transport-level uncertainty, or a broker code this
+            # build does not understand cannot establish non-execution. Keep
+            # the durable intent open and let exact broker state resolve it.
+            self._current.state = ExecState.UNKNOWN
+            self._current.terminal = False
+            if not outcome.definitive:
+                reason = f"ORDER_SEND_UNCERTAIN({error.code}:{outcome.comment})"
+            else:
+                reason = f"UNKNOWN_RETCODE({outcome.retcode}:{outcome.comment})"
+        elif outcome.retcode == 10007:
+            self._current.state = ExecState.CANCELLED
+            self._current.terminal = True
+            reason = f"ORDER_CANCELLED({outcome.comment})"
+        elif not outcome.ok:
             # Classify before deciding what to say. The retcode alone is not a
             # diagnosis, and the three categories want three different
             # responses: a REQUEST error is this application's own defect, a
             # MARKET error is the market, an ACCOUNT error is the operator's.
-            error = self._errors.record(outcome.retcode, plan.symbol, now)
             self._current.state = ExecState.REJECTED
             self._current.terminal = True
             if error.is_defect:
@@ -374,199 +452,597 @@ class ExecutionEngine:
         elif outcome.retcode == RETCODE_PLACED:
             self._current.state = ExecState.ACCEPTED
             reason = ""
-        else:
-            # Anything else is genuinely unknown until reconciled. Treating an
-            # unrecognised retcode as failure risks a live position nobody
-            # tracks.
+        else:  # defensive: accepted flag with a non-accepted known code
             self._current.state = ExecState.UNKNOWN
-            reason = f"UNKNOWN_RETCODE({outcome.retcode}:{outcome.comment})"
+            self._current.terminal = False
+            reason = f"INCONSISTENT_ORDER_RESULT({outcome.retcode}:{outcome.comment})"
 
         self._persist(now)
         return outcome.ok, reason
 
     # ------------------------------------------------------------ broker truth
-    #
-    # Four sources, consulted in descending order of authority. Each answers a
-    # different question, and consulting only one is how a live order gets
-    # mistaken for nothing having happened:
-    #
-    #   1. Open positions  — "is there a position right now"
-    #   2. Working orders  — "is an order still live but unfilled"
-    #   3. History orders  — "what was the order's final disposition"
-    #   4. History deals   — "what actually executed"
+    # Identity is never inferred from symbol. A symbol is not a transaction
+    # identifier: two scanner trades can share it, and a crash may leave us
+    # without the response tickets. Every source must therefore match an exact
+    # broker ticket/position id or the unique comment persisted before send.
 
-    def _find_open_position(self, gateway: BrokerGateway) -> BrokerTruth | None:
-        for position in gateway.positions(self._magic):
-            matches_id = (
-                self._current.position_id > 0
-                and position.position_id == self._current.position_id
-            )
-            if not matches_id and position.symbol != self._current.symbol:
-                continue
-            return BrokerTruth(
-                resolved=True,
-                state=ExecState.POSITION_ACTIVE,
-                terminal=False,  # a live position is not a finished execution
-                source="POSITION",
-                detail=f"position {position.position_id} open",
-                filled_volume=position.volume,
-                # The broker's own record of what this position opened at, which
-                # is authoritative in a way the request never was.
-                fill_price=getattr(position, "price_open", 0.0) or 0.0,
-                position_id=position.position_id,
-            )
-        return None
+    def _comment_matches(self, comment: str) -> bool:
+        return bool(self._current.correlation_key) and comment == self._current.correlation_key
 
-    def _find_working_order(self, gateway: BrokerGateway) -> BrokerTruth | None:
-        for order in gateway.orders(self._magic):
-            if self._current.order_ticket > 0:
-                if order.ticket != self._current.order_ticket and order.symbol != self._current.symbol:
-                    continue
-            elif order.symbol != self._current.symbol:
-                continue
-            return BrokerTruth(
-                resolved=True,
-                state=ExecState.ACCEPTED,
-                terminal=False,  # still working: emphatically not finished
-                source="WORKING_ORDER",
-                detail=f"order {order.ticket} still live",
+    def _deal_directly_matches_current(self, deal: DealInfo) -> bool:
+        """A deal identity that does not rely on shared netting position id."""
+        return bool(
+            (self._current.deal_ticket > 0 and deal.ticket == self._current.deal_ticket)
+            or (self._current.order_ticket > 0 and deal.order == self._current.order_ticket)
+            or self._comment_matches(deal.comment)
+        )
+
+    @staticmethod
+    def _ambiguous(
+        source: str,
+        detail: str,
+        *,
+        deals: tuple[DealInfo, ...] = (),
+        order_ticket: int = 0,
+        position_id: int = 0,
+    ) -> BrokerTruth:
+        return BrokerTruth(
+            resolved=True,
+            state=ExecState.UNKNOWN,
+            terminal=False,
+            source=source,
+            detail=detail,
+            ambiguous=True,
+            deals=deals,
+            order_ticket=order_ticket,
+            position_id=position_id,
+        )
+
+    def _find_open_position(
+        self, gateway: BrokerGateway, learned_position_id: int = 0
+    ) -> BrokerTruth | None:
+        matches = []
+        # Do not pre-filter by magic. A broker/manual close can create related
+        # rows with a different magic; exact position/comment identity below is
+        # the attribution boundary and is stronger than an EA-wide tag.
+        for position in gateway.positions(None):
+            expected_position = self._current.position_id or learned_position_id
+            exact = bool(
+                (expected_position > 0 and position.position_id == expected_position)
+                or self._comment_matches(position.comment)
             )
-        return None
+            if exact:
+                matches.append(position)
+        if len(matches) > 1:
+            return self._ambiguous("POSITION", "multiple positions matched one execution")
+        if not matches:
+            return None
+        position = matches[0]
+        if position.symbol != self._current.symbol:
+            return self._ambiguous(
+                "POSITION", "exact position identity belongs to a different symbol"
+            )
+        return BrokerTruth(
+            resolved=True,
+            state=ExecState.POSITION_ACTIVE,
+            terminal=False,
+            source="POSITION",
+            detail=f"position {position.position_id} open",
+            filled_volume=position.volume,
+            position_id=position.position_id,
+        )
+
+    def _find_working_order(
+        self, gateway: BrokerGateway, learned_order_ticket: int = 0
+    ) -> BrokerTruth | None:
+        matches = []
+        for order in gateway.orders(None):
+            expected_order = self._current.order_ticket or learned_order_ticket
+            exact = bool(
+                (expected_order > 0 and order.ticket == expected_order)
+                or self._comment_matches(order.comment)
+            )
+            if exact:
+                matches.append(order)
+        if len(matches) > 1:
+            return self._ambiguous("WORKING_ORDER", "multiple orders matched one execution")
+        if not matches:
+            return None
+        order = matches[0]
+        if order.symbol != self._current.symbol:
+            return self._ambiguous(
+                "WORKING_ORDER", "exact working-order identity belongs to a different symbol"
+            )
+        return BrokerTruth(
+            resolved=True,
+            state=ExecState.ACCEPTED,
+            terminal=False,
+            source="WORKING_ORDER",
+            detail=f"order {order.ticket} still live",
+            order_ticket=order.ticket,
+            position_id=order.position_id,
+        )
 
     def _resolve_history_order(
-        self, gateway: BrokerGateway, since: int, until: int
+        self,
+        gateway: BrokerGateway,
+        since: int,
+        until: int,
+        learned_order_ticket: int = 0,
     ) -> BrokerTruth | None:
-        """Map a completed order's final state.
+        matches = []
+        for order in gateway.history_orders(since, until, None):
+            expected_order = self._current.order_ticket or learned_order_ticket
+            exact = bool(
+                (expected_order > 0 and order.ticket == expected_order)
+                or self._comment_matches(order.comment)
+            )
+            if exact:
+                matches.append(order)
+        if len(matches) > 1:
+            return self._ambiguous("HISTORY_ORDER", "multiple history orders matched")
+        if not matches:
+            return None
 
-        Only reached when the order is no longer working, so every branch here
-        is a definite disposition. A transitional state says nothing final and
-        is reported as *no answer* rather than an invented one.
-        """
-        if self._current.order_ticket <= 0:
-            return None
-        for order in gateway.history_orders(since, until, self._magic):
-            if order.ticket != self._current.order_ticket:
-                continue
-            state = order.state.upper()
-            if state == "FILLED":
-                return BrokerTruth(
-                    resolved=True,
-                    state=ExecState.FILLED,
-                    terminal=False,  # filled, but the position's fate is open
-                    source="HISTORY_ORDER",
-                    detail=f"order {order.ticket} filled",
-                    filled_volume=order.volume_initial,
-                )
-            if state == "PARTIAL":
-                return BrokerTruth(
-                    resolved=True,
-                    state=ExecState.PARTIALLY_FILLED,
-                    terminal=False,
-                    source="HISTORY_ORDER",
-                    detail=f"order {order.ticket} partially filled",
-                )
-            if state in ("CANCELED", "CANCELLED", "EXPIRED"):
-                return BrokerTruth(
-                    resolved=True,
-                    state=ExecState.CANCELLED,
-                    terminal=True,
-                    source="HISTORY_ORDER",
-                    detail=f"order {order.ticket} cancelled/expired",
-                )
-            if state == "REJECTED":
-                return BrokerTruth(
-                    resolved=True,
-                    state=ExecState.REJECTED,
-                    terminal=True,
-                    source="HISTORY_ORDER",
-                    detail=f"order {order.ticket} rejected",
-                )
-            return None
+        order = matches[0]
+        if order.symbol != self._current.symbol:
+            return self._ambiguous(
+                "HISTORY_ORDER", "exact history-order identity belongs to a different symbol"
+            )
+        state = order.state.upper()
+        common = dict(
+            resolved=True,
+            source="HISTORY_ORDER",
+            order_ticket=order.ticket,
+            position_id=order.position_id,
+        )
+        if state == "FILLED":
+            return BrokerTruth(
+                **common,
+                state=ExecState.FILLED,
+                terminal=False,
+                detail=f"order {order.ticket} filled",
+                filled_volume=order.volume_initial,
+            )
+        if state == "PARTIAL":
+            return BrokerTruth(
+                **common,
+                state=ExecState.PARTIALLY_FILLED,
+                terminal=False,
+                detail=f"order {order.ticket} partially filled",
+                filled_volume=max(0.0, order.volume_initial - order.volume_current),
+            )
+        if state in ("CANCELED", "CANCELLED", "EXPIRED"):
+            return BrokerTruth(
+                **common,
+                state=ExecState.CANCELLED,
+                terminal=True,
+                detail=f"order {order.ticket} cancelled/expired",
+            )
+        if state == "REJECTED":
+            return BrokerTruth(
+                **common,
+                state=ExecState.REJECTED,
+                terminal=True,
+                detail=f"order {order.ticket} rejected",
+            )
         return None
 
     def _resolve_from_deals(
         self, gateway: BrokerGateway, since: int, until: int
     ) -> BrokerTruth | None:
-        """Sum this execution's deals.
+        # Exit deals created by a human, stop, target or broker intervention may
+        # not retain the opening EA's magic. Fetch the bounded account history
+        # and correlate only by exact ticket/position/comment links below.
+        raw = list(gateway.history_deals(since, until, None))
 
-        An IN followed by a matching OUT means the trade opened and closed while
-        we were not watching — a genuinely finished execution, not a missing one.
-        """
-        volume_in = volume_out = 0.0
-        position_id = 0
-        matched = 0
+        # Establish the execution's position identity only from exact links.
+        position_ids: set[int] = set()
+        if self._current.position_id > 0:
+            position_ids.add(self._current.position_id)
+        for deal in raw:
+            exact_seed = self._deal_directly_matches_current(deal)
+            if exact_seed and deal.position_id > 0:
+                position_ids.add(deal.position_id)
 
-        for deal in gateway.history_deals(since, until, self._magic):
-            if deal.symbol != self._current.symbol:
-                continue
-            # Prefer an exact link when we have one; otherwise magic + symbol
-            # within the window is the best available correlation.
-            if (
-                self._current.order_ticket > 0
-                and deal.order != self._current.order_ticket
-                and self._current.position_id > 0
-                and deal.position_id != self._current.position_id
-            ):
-                continue
+        if len(position_ids) > 1:
+            return self._ambiguous(
+                "HISTORY_DEAL", "exact broker links resolve to multiple position ids"
+            )
 
-            if deal.entry == 0:  # IN
-                volume_in += deal.volume
-            elif deal.entry in (DEAL_ENTRY_OUT, DEAL_ENTRY_OUT_BY):
-                volume_out += deal.volume
-            if position_id == 0:
-                position_id = deal.position_id
-            matched += 1
+        # A netting position may accept later entries from a human or another
+        # EA under the same position_id. Such an entry changes both volume and
+        # ownership. It is not ours merely because the position is ours; only a
+        # direct order/deal/comment link can admit an entry into this execution.
+        foreign_entries = [
+            deal
+            for deal in raw
+            if deal.position_id > 0
+            and deal.position_id in position_ids
+            and deal.entry in (0, DEAL_ENTRY_INOUT)
+            and not self._deal_directly_matches_current(deal)
+        ]
+        if foreign_entries:
+            return self._ambiguous(
+                "HISTORY_DEAL",
+                "position contains an entry without a direct execution link",
+            )
 
-        if matched == 0:
+        matched: list[DealInfo] = []
+        for deal in raw:
+            exact = (
+                (self._current.deal_ticket > 0 and deal.ticket == self._current.deal_ticket)
+                or (self._current.order_ticket > 0 and deal.order == self._current.order_ticket)
+                or (deal.position_id > 0 and deal.position_id in position_ids)
+                or self._comment_matches(deal.comment)
+            )
+            if exact:
+                matched.append(deal)
+
+        return self._truth_from_deals(matched, position_ids, source="HISTORY_DEAL")
+
+    def _truth_from_deals(
+        self,
+        matched: list[DealInfo],
+        position_ids: set[int] | None = None,
+        *,
+        source: str,
+    ) -> BrokerTruth | None:
+        """Reduce already-exact deals without inferring any missing fact."""
+        if not matched:
             return None
+
+        # History is expected to contain one row per deal ticket, but truth must
+        # not depend on that courtesy. Identical duplicates are collapsed;
+        # conflicting rows under one broker ticket are an explicit anomaly.
+        unique: dict[int, DealInfo] = {}
+        for deal in matched:
+            if deal.ticket <= 0:
+                return self._ambiguous(source, "exact deal has no broker ticket")
+            previous = unique.get(deal.ticket)
+            if previous is not None and previous != deal:
+                return self._ambiguous(
+                    source, "one broker deal ticket has conflicting facts"
+                )
+            unique[deal.ticket] = deal
+        matched = list(unique.values())
+
+        if any(deal.symbol != self._current.symbol for deal in matched):
+            return self._ambiguous(
+                source,
+                "exact deal identity belongs to a different symbol",
+                deals=tuple(matched),
+            )
+        known_entry_types = {0, DEAL_ENTRY_OUT, DEAL_ENTRY_INOUT, DEAL_ENTRY_OUT_BY}
+        if any(deal.entry not in known_entry_types for deal in matched):
+            return self._ambiguous(
+                source,
+                "exact deal has an unsupported entry classification",
+                deals=tuple(matched),
+            )
+        if any(deal.volume <= 0.0 or deal.price <= 0.0 for deal in matched):
+            return self._ambiguous(
+                source,
+                "exact trade deal has a non-positive volume or price",
+                deals=tuple(matched),
+            )
+
+        position_ids = set(position_ids or ())
+        position_ids.update(deal.position_id for deal in matched if deal.position_id > 0)
+        if len(position_ids) > 1:
+            return self._ambiguous(
+                source,
+                "exact deals resolve to multiple position ids",
+                deals=tuple(matched),
+            )
+        matched.sort(key=lambda d: (d.time, d.ticket))
+        if any(deal.entry == DEAL_ENTRY_INOUT for deal in matched):
+            return self._ambiguous(
+                source,
+                "INOUT/reversal deal cannot be reduced to one entry and one outcome",
+                deals=tuple(matched),
+            )
+
+        entries = [deal for deal in matched if deal.entry == 0]
+        exits = [deal for deal in matched if deal.entry in (DEAL_ENTRY_OUT, DEAL_ENTRY_OUT_BY)]
+        entry_order_ids = {deal.order for deal in entries if deal.order > 0}
+        if self._current.order_ticket > 0:
+            entry_order_ids.add(self._current.order_ticket)
+        if len(entry_order_ids) > 1:
+            return self._ambiguous(
+                source,
+                "exact entry deals disagree on opening order identity",
+                deals=tuple(matched),
+            )
+        order_ticket = next(iter(entry_order_ids), 0)
+        volume_in = sum(deal.volume for deal in entries)
+        volume_out = sum(deal.volume for deal in exits)
+        if (
+            self._current.requested_volume > 0.0
+            and volume_in > self._current.requested_volume + 1e-8
+        ):
+            return self._ambiguous(
+                source,
+                "exact entry volume exceeds the submitted request volume",
+                deals=tuple(matched),
+                order_ticket=order_ticket,
+                position_id=next(iter(position_ids), 0),
+            )
+        filled = volume_in or self._current.filled_volume
+        position_id = next(iter(position_ids), 0)
+
+        entry_price = (
+            sum(deal.price * deal.volume for deal in entries) / volume_in
+            if volume_in > 0.0
+            else 0.0
+        )
+        exit_price = (
+            sum(deal.price * deal.volume for deal in exits) / volume_out
+            if volume_out > 0.0
+            else 0.0
+        )
+        # Every closing slice must state the same broker reason. Filtering out
+        # an empty reason would turn [UNKNOWN, TP] into TP and create a win by
+        # omission. Missing and mixed are explicit non-scorable dispositions.
+        reasons = {
+            (deal.reason or "").strip().upper() or "UNKNOWN" for deal in exits
+        }
+        close_reason = (
+            next(iter(reasons))
+            if len(reasons) == 1
+            else ("MIXED" if reasons else "")
+        )
+
+        if filled > 0.0 and volume_out > filled + 1e-8:
+            return self._ambiguous(
+                source,
+                "position exit volume exceeds this execution's exact entry volume",
+                deals=tuple(matched),
+                order_ticket=order_ticket,
+                position_id=position_id,
+            )
 
         truth = BrokerTruth(
             resolved=True,
-            source="HISTORY_DEAL",
-            filled_volume=volume_in,
+            source=source,
+            filled_volume=filled,
+            closed_volume=volume_out,
+            order_ticket=order_ticket,
             position_id=position_id,
+            deals=tuple(matched),
+            entry_price=entry_price,
+            exit_price=exit_price,
+            net_profit=sum(deal.net_profit for deal in matched),
+            close_reason=close_reason,
+            closed_at=max((deal.time for deal in exits), default=0),
         )
-        if volume_in > 0.0 and volume_out + 1e-8 >= volume_in:
+        if filled > 0.0 and volume_out + 1e-8 >= filled:
             truth.state = ExecState.COMPLETED
             truth.terminal = True
-            truth.detail = f"opened {volume_in:.2f} and closed {volume_out:.2f}"
+            truth.detail = f"opened {filled:.2f} and closed {volume_out:.2f}"
         else:
-            truth.state = ExecState.FILLED
+            truth.state = (
+                ExecState.PARTIALLY_FILLED
+                if filled + 1e-8 < self._current.requested_volume
+                else ExecState.FILLED
+            )
             truth.terminal = False
-            truth.detail = f"filled {volume_in:.2f}, {volume_in - volume_out:.2f} still open"
+            truth.detail = f"filled {filled:.2f}, {max(0.0, filled - volume_out):.2f} still open"
         return truth
 
+    def truth_from_persisted_deals(self, deals: list[DealInfo]) -> BrokerTruth:
+        """Rebuild after a crash from broker facts already committed locally.
+
+        These rows were admitted only after exact execution correlation. They
+        are therefore evidence, not a cache guess, and can close the tiny crash
+        window between persisting COMPLETED and persisting its outcome even if
+        MT5 history is temporarily unavailable on restart.
+        """
+        truth = self._truth_from_deals(
+            list(deals),
+            {self._current.position_id} if self._current.position_id > 0 else set(),
+            source="PERSISTED_BROKER_DEALS",
+        )
+        if (
+            truth is not None
+            and truth.terminal
+            and truth.filled_volume + 1e-8 < self._current.requested_volume
+        ):
+            # Locally durable deals prove that the observed partial fill made a
+            # round trip; they do not prove the server cancelled the unfilled
+            # remainder. Only fresh live Order/Position reads can close that
+            # question after restart.
+            truth.state = ExecState.UNKNOWN
+            truth.terminal = False
+            truth.ambiguous = True
+            truth.detail = (
+                f"{truth.detail}; persisted deals close only an observed partial "
+                "fill and cannot state the request remainder"
+            )
+        return truth or BrokerTruth(resolved=False)
+
     def resolve_from_broker(self, gateway: BrokerGateway, now: int) -> BrokerTruth:
-        """Consult all four sources. An unresolved truth means every one was
-        silent — which is a finding, not an absence of one."""
-        # The window is anchored on when this execution was created, widened so
-        # a clock skew between app and server cannot hide the records.
+        """Rebuild one coherent truth from every broker source.
+
+        Deals are consulted before order disposition so an order marked FILLED
+        cannot hide the later closing deals. Contradictory exact sources are an
+        immediate UNKNOWN; silence merely waits for the fixed grace deadline.
+        """
         since = self._current.created_at - 3600 if self._current.created_at > 0 else now - 86400
         until = now + 3600
 
-        for resolver in (
-            lambda: self._find_open_position(gateway),
-            lambda: self._find_working_order(gateway),
-            lambda: self._resolve_history_order(gateway, since, until),
-            lambda: self._resolve_from_deals(gateway, since, until),
-        ):
+        answers: dict[str, BrokerTruth | None] = {}
+        failed: set[str] = set()
+
+        def read(name: str, resolver) -> BrokerTruth | None:
             try:
-                truth = resolver()
-            except Exception as error:  # a gateway that raises is not an answer
+                answer = resolver()
+            except Exception as error:
+                failed.add(name)
                 self._journal.warn(
                     "BROKER_TRUTH_SOURCE_FAILED",
                     self._current.symbol,
-                    f"a reconciliation source raised: {error}",
+                    f"{name} raised: {error}",
                     now,
                 )
-                continue
-            if truth is not None and truth.resolved:
-                return truth
+                answer = None
+            answers[name] = answer
+            return answer
 
+        # Deals are read first deliberately. An exact entry deal can be the only
+        # place the position/order identifiers survived a lost send response.
+        # Pass those broker ids into the live readers in this same reconciliation
+        # round instead of waiting for a later pass or relying on comments being
+        # copied onto the position row.
+        deals = read(
+            "HISTORY_DEAL", lambda: self._resolve_from_deals(gateway, since, until)
+        )
+        learned_position_id = deals.position_id if deals is not None else 0
+        learned_order_ticket = deals.order_ticket if deals is not None else 0
+        position = read(
+            "POSITION",
+            lambda: self._find_open_position(gateway, learned_position_id),
+        )
+        working = read(
+            "WORKING_ORDER",
+            lambda: self._find_working_order(gateway, learned_order_ticket),
+        )
+        history = read(
+            "HISTORY_ORDER",
+            lambda: self._resolve_history_order(
+                gateway, since, until, learned_order_ticket
+            ),
+        )
+
+        for answer in answers.values():
+            if answer is not None and answer.ambiguous:
+                return answer
+
+        # Independent exact links must converge on one broker position. A
+        # correlation comment pointing at one live position while the exact
+        # order/deal tickets point at another is a collision or broker anomaly,
+        # never a fact to resolve by source priority.
+        position_ids = {
+            answer.position_id
+            for answer in (deals, position, working, history)
+            if answer is not None and answer.position_id > 0
+        }
+        if len(position_ids) > 1:
+            return self._ambiguous(
+                "BROKER_SOURCES",
+                "exact broker sources disagree on position identity",
+            )
+
+        if deals is not None and deals.terminal:
+            # A complete close of only the *observed* partial fill cannot prove
+            # the unfilled remainder disappeared when either live source failed.
+            # Full requested volume is different: there can be no remainder from
+            # this order. Preserve the exact deals but keep the gate shut.
+            if (
+                deals.filled_volume + 1e-8 < self._current.requested_volume
+                and ({"POSITION", "WORKING_ORDER"} & failed)
+            ):
+                return self._ambiguous(
+                    "BROKER_SOURCES",
+                    "observed partial fill is closed but live remainder state is unavailable",
+                    deals=deals.deals,
+                    order_ticket=deals.order_ticket,
+                    position_id=deals.position_id,
+                )
+            if position is not None or working is not None:
+                return self._ambiguous(
+                    "BROKER_SOURCES",
+                    "terminal deals contradict a live position/order",
+                    deals=deals.deals,
+                    order_ticket=deals.order_ticket,
+                    position_id=deals.position_id,
+                )
+            return deals
+        if position is not None:
+            if deals is not None:
+                expected_open = max(0.0, deals.filled_volume - deals.closed_volume)
+                if (
+                    deals.filled_volume > 0.0
+                    and abs(position.filled_volume - expected_open) > 1e-8
+                    and now - self._current.created_at
+                    > self._config.execution.reconcile_grace_seconds
+                ):
+                    return self._ambiguous(
+                        "BROKER_SOURCES",
+                        "live position volume disagrees with exact execution deals",
+                    )
+                position.deals = deals.deals
+                position.filled_volume = max(position.filled_volume, deals.filled_volume)
+                position.closed_volume = deals.closed_volume
+                position.entry_price = deals.entry_price
+                position.exit_price = deals.exit_price
+                position.net_profit = deals.net_profit
+                position.close_reason = deals.close_reason
+            return position
+        if working is not None:
+            if deals is not None:
+                working.deals = deals.deals
+                working.filled_volume = deals.filled_volume
+                working.closed_volume = deals.closed_volume
+                working.entry_price = deals.entry_price
+                working.exit_price = deals.exit_price
+                working.net_profit = deals.net_profit
+                if deals.filled_volume > 0.0:
+                    working.state = ExecState.PARTIALLY_FILLED
+                    working.detail = (
+                        f"order remains live after {deals.filled_volume:.2f} exact fill"
+                    )
+            return working
+        if deals is not None:
+            return deals
+        if history is not None:
+            # A terminal order disposition is only conclusive if deal history
+            # answered successfully; otherwise a partial fill could be hidden.
+            if history.terminal and "HISTORY_DEAL" in failed:
+                return BrokerTruth(resolved=False)
+            return history
         return BrokerTruth(resolved=False)
 
     # ------------------------------------------------------------- reconcile
-    def reconcile(self, gateway: BrokerGateway, now: int) -> None:
+    def _accept_truth(self, truth: BrokerTruth, now: int) -> BrokerTruth:
+        self._current.state = truth.state
+        # Belt and braces: even a resolver bug cannot mark a
+        # not-actually-finished state as finished and reopen the gate.
+        self._current.terminal = truth.terminal and may_be_auto_terminal(truth.state)
+        self._current.message = truth.detail
+        if truth.position_id > 0:
+            self._current.position_id = truth.position_id
+        if truth.order_ticket > 0:
+            self._current.order_ticket = truth.order_ticket
+        if truth.filled_volume > 0.0:
+            # An open-position row states remaining volume. Never let a later
+            # partial exit shrink the already established original fill.
+            self._current.filled_volume = max(
+                self._current.filled_volume, truth.filled_volume
+            )
+        self._current.closed_volume = max(self._current.closed_volume, truth.closed_volume)
+        for deal in truth.deals:
+            self._admit_correlated_deal(deal, now, mutate=False)
+        self._journal.info(
+            "RECONCILED",
+            self._current.symbol,
+            f"execution {self._current.execution_id} resolved as "
+            f"{truth.state.name} via {truth.source} ({truth.detail})",
+            now,
+        )
+        self._persist(now)
+        return truth
+
+    def reconcile_persisted_deals(
+        self, deals: list[DealInfo], now: int
+    ) -> BrokerTruth | None:
+        """Apply exact locally persisted broker facts during restart."""
+        if not self.has_unresolved() or not deals:
+            return None
+        truth = self.truth_from_persisted_deals(deals)
+        return self._accept_truth(truth, now) if truth.resolved else truth
+
+    def reconcile(self, gateway: BrokerGateway, now: int) -> BrokerTruth | None:
         """Rebuild the truth from the broker.
 
         Transaction events can be dropped entirely when the terminal's queue
@@ -574,41 +1050,43 @@ class ExecutionEngine:
         an event arriving.
         """
         if not self.has_unresolved():
-            return
+            return None
 
         truth = self.resolve_from_broker(gateway, now)
 
+        grace = self._config.execution.reconcile_grace_seconds
         if truth.resolved:
-            self._current.state = truth.state
-            # Belt and braces: even a resolver bug cannot mark a
-            # not-actually-finished state as finished and reopen the gate.
-            self._current.terminal = truth.terminal and may_be_auto_terminal(truth.state)
-            self._current.message = truth.detail
-            if truth.position_id > 0:
-                self._current.position_id = truth.position_id
-            if truth.filled_volume > 0.0:
-                self._current.filled_volume = truth.filled_volume
-            if truth.fill_price > 0.0:
-                # Authoritative: this is what the broker says the position
-                # opened at, not what the request asked for.
-                self._current.fill_price = truth.fill_price
-            self._journal.info(
-                "RECONCILED",
-                self._current.symbol,
-                f"execution {self._current.execution_id} resolved as "
-                f"{truth.state.name} via {truth.source} ({truth.detail})",
-                now,
+            # A working order or an open position is a complete statement of
+            # current broker state, and a complete round trip/rejection is a
+            # complete statement of terminal state. Historical evidence of an
+            # entry *alone* is different: once the grace window has elapsed,
+            # "filled but neither open nor closed" means at least one current
+            # fact is missing. Leaving that state as FILLED forever would keep
+            # the submit gate shut but never expose the operator's documented
+            # acknowledgement path. Preserve every exact deal, then fail
+            # closed as UNKNOWN so the discrepancy is explicit and actionable.
+            current_fact = truth.source in ("POSITION", "WORKING_ORDER")
+            inside_grace = now - self._current.created_at <= grace
+            if truth.terminal or truth.ambiguous or current_fact or inside_grace:
+                return self._accept_truth(truth, now)
+            truth.state = ExecState.UNKNOWN
+            truth.terminal = False
+            truth.ambiguous = True
+            truth.detail = (
+                f"{truth.detail}; historical fill has no exact live "
+                "position/order or complete exit after reconciliation grace"
             )
-            self._persist(now)
-            return
+            return self._accept_truth(truth, now)
 
         # Not resolvable yet. Inside the grace period this is normal — the
         # server may simply not have answered.
-        grace = self._config.execution.reconcile_grace_seconds
-        if now - self._current.updated_at <= grace:
+        # The deadline is anchored to the persisted intent, not ``updated_at``.
+        # Polling updates the latter; using it here renewed the grace period on
+        # every pass and could keep an execution in RECONCILING forever.
+        if now - self._current.created_at <= grace:
             self._current.state = ExecState.RECONCILING
             self._persist(now)
-            return
+            return truth
 
         # Past the grace period with all four broker sources silent. This is a
         # real unknown: an order may be live that this app cannot see. The
@@ -631,6 +1109,7 @@ class ExecutionEngine:
         self._current.terminal = False
         self._current.message = "UNRESOLVED_MANUAL_REVIEW_REQUIRED"
         self._persist(now)
+        return truth
 
     def acknowledge_unresolved(self, operator_note: str, now: int) -> bool:
         """Operator escape hatch.
@@ -657,14 +1136,85 @@ class ExecutionEngine:
         return True
 
     # ------------------------------------------------------------------ deals
-    def apply_deal(self, deal, now: int) -> bool:
-        """Fold one deal into execution state, at most once.
+    def _deal_matches_current(self, deal: DealInfo) -> bool:
+        """Whether a deal carries an exact identity for the current execution."""
+        if not self._current.execution_id:
+            return False
+        direct = self._deal_directly_matches_current(deal)
+        position_link = bool(
+            self._current.position_id > 0
+            and deal.position_id == self._current.position_id
+        )
+        # A broker/manual exit is legitimately linked by exact position id even
+        # when it does not inherit the opening order's comment or magic. A new
+        # IN under the same netting position is different: it changes ownership
+        # and volume, so position id alone must never admit it as our fill.
+        if deal.entry in (DEAL_ENTRY_OUT, DEAL_ENTRY_OUT_BY):
+            return direct or position_link
+        return direct
 
-        Returns True when the deal was admitted. A replayed ticket is refused
-        here, before it can touch ``filled_volume`` — the defect that made the
-        MQL5 ledger's idempotency decorative was recording the ticket and then
-        mutating state regardless.
-        """
+    def _admit_correlated_deal(
+        self, deal: DealInfo, now: int, *, mutate: bool
+    ) -> bool:
+        exact_identity = bool(
+            self._deal_directly_matches_current(deal)
+            or (
+                self._current.position_id > 0
+                and deal.position_id == self._current.position_id
+            )
+        )
+        if exact_identity and deal.symbol != self._current.symbol:
+            # An exact ticket/position/comment pointing at another symbol is a
+            # broker anomaly or corrupted response, not an unrelated event to
+            # ignore. Surface it and retain the send lock.
+            self._current.state = ExecState.UNKNOWN
+            self._current.terminal = False
+            self._current.message = "EXACT_IDENTITY_SYMBOL_CONFLICT"
+            self._journal.error(
+                "EXACT_IDENTITY_SYMBOL_CONFLICT",
+                deal.symbol,
+                f"deal {deal.ticket} exactly links to {self._current.execution_id} "
+                f"but reports {deal.symbol} instead of {self._current.symbol}",
+                now,
+            )
+            self._persist(now)
+            return False
+
+        position_only_entry = bool(
+            deal.entry in (0, DEAL_ENTRY_INOUT)
+            and self._current.position_id > 0
+            and deal.position_id == self._current.position_id
+            and not self._deal_directly_matches_current(deal)
+        )
+        if position_only_entry:
+            # This is evidence of netting contamination, not this execution's
+            # entry. Do not put it in the correlated ledger; keep the submit
+            # gate shut and require the account to be inspected.
+            self._current.state = ExecState.UNKNOWN
+            self._current.terminal = False
+            self._current.message = "FOREIGN_NETTING_ENTRY_REQUIRES_MANUAL_REVIEW"
+            self._journal.error(
+                "FOREIGN_NETTING_ENTRY",
+                deal.symbol,
+                f"deal {deal.ticket} entered position {deal.position_id} without "
+                "an exact order/deal/comment link",
+                now,
+            )
+            self._persist(now)
+            return False
+
+        # Correlate BEFORE durable admission. The old order recorded unrelated
+        # same-symbol deals in this execution's evidence table and only then
+        # discovered they should not move state.
+        if not self._deal_matches_current(deal):
+            self._journal.debug(
+                "UNRELATED_DEAL_IGNORED",
+                deal.symbol,
+                f"deal {deal.ticket} has no exact link to {self._current.execution_id}",
+                now,
+            )
+            return False
+
         admitted = self._ledger.admit(
             deal.ticket,
             execution_id=self._current.execution_id,
@@ -674,40 +1224,66 @@ class ExecutionEngine:
             price=deal.price,
             net_profit=deal.net_profit,
             recorded_at=now,
+            order_ticket=deal.order,
+            position_id=deal.position_id,
+            broker_time=deal.time,
+            reason=deal.reason,
+            comment=deal.comment,
         )
         if not admitted:
-            self._journal.debug(
-                "DEAL_REPLAY_IGNORED", deal.symbol, f"deal {deal.ticket} already applied", now
-            )
             return False
-
-        if not self.has_unresolved():
-            return True
-        if deal.symbol != self._current.symbol:
+        if not mutate:
             return True
 
-        if deal.order > 0:
-            self._current.order_ticket = deal.order
-        if deal.position_id > 0:
-            self._current.position_id = deal.position_id
+        if deal.entry == DEAL_ENTRY_INOUT:
+            self._current.state = ExecState.UNKNOWN
+            self._current.terminal = False
+            self._current.message = "INOUT_DEAL_REQUIRES_MANUAL_REVIEW"
+            self._persist(now)
+            return True
 
-        if deal.entry in (DEAL_ENTRY_OUT, DEAL_ENTRY_OUT_BY):
-            self._current.state = ExecState.COMPLETED
-            self._current.terminal = True
-        else:
-            # Volume-weighted, because a partial fill can arrive as several
-            # deals at different prices and the entry that matters is the one
-            # the position actually holds — not the first tick of it.
-            previous_volume = self._current.filled_volume
+        if deal.entry == 0:
+            if self._current.order_ticket <= 0 and deal.order > 0:
+                self._current.order_ticket = deal.order
+            if deal.position_id > 0:
+                self._current.position_id = deal.position_id
             self._current.filled_volume += deal.volume
-            if self._current.filled_volume > 0.0 and deal.price > 0.0:
-                self._current.fill_price = (
-                    self._current.fill_price * previous_volume + deal.price * deal.volume
-                ) / self._current.filled_volume
             self._current.state = (
                 ExecState.FILLED
                 if self._current.filled_volume + 1e-8 >= self._current.requested_volume
                 else ExecState.PARTIALLY_FILLED
             )
+        elif deal.entry in (DEAL_ENTRY_OUT, DEAL_ENTRY_OUT_BY):
+            if deal.position_id > 0:
+                self._current.position_id = deal.position_id
+            self._current.closed_volume += deal.volume
+            if (
+                self._current.filled_volume > 0.0
+                and self._current.closed_volume + 1e-8 >= self._current.filled_volume
+            ):
+                self._current.state = ExecState.COMPLETED
+                self._current.terminal = True
+            else:
+                # A partial exit is still an open risk, never a completed trade.
+                self._current.state = ExecState.POSITION_ACTIVE
+                self._current.terminal = False
         self._persist(now)
         return True
+
+    def apply_deal(self, deal: DealInfo, now: int) -> bool:
+        """Fold one deal into execution state, at most once.
+
+        Returns True when the deal was admitted. A replayed ticket is refused
+        here, before it can touch ``filled_volume`` — the defect that made the
+        MQL5 ledger's idempotency decorative was recording the ticket and then
+        mutating state regardless.
+        """
+        admitted = self._admit_correlated_deal(deal, now, mutate=True)
+        if not admitted:
+            self._journal.debug(
+                "DEAL_REPLAY_OR_UNRELATED",
+                deal.symbol,
+                f"deal {deal.ticket} was already applied or was not correlated",
+                now,
+            )
+        return admitted

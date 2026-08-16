@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import sqlite3
 
-from ...core.enums import SignalState
+from ...core.enums import Direction, RunMode, SignalState
 from ...core.journal import Event, Level
+from ...core.lifecycle import transition_allowed
 from ...core.models import (
+    DealInfo,
     ExecutionRecord,
     Outcome,
     RiskState,
@@ -29,6 +31,77 @@ from ...core.enums import ExecState
 from .database import Database
 
 
+class SignalIdentityCollision(ValueError):
+    """One hash names two different structural signals; never merge them."""
+
+
+def _direction(value) -> Direction:
+    try:
+        return Direction(int(value or 0))
+    except (TypeError, ValueError):
+        return Direction.NONE
+
+
+def _execution_from_row(row) -> ExecutionRecord:
+    try:
+        state = ExecState[row["state"]]
+    except KeyError:
+        state = ExecState.UNKNOWN
+    try:
+        mode = RunMode[row["execution_mode"]]
+    except (KeyError, IndexError):
+        mode = RunMode.ALERT_ONLY
+    return ExecutionRecord(
+        execution_id=row["execution_id"],
+        plan_id=row["plan_id"],
+        signal_id=row["signal_id"],
+        symbol=row["symbol"],
+        state=state,
+        mode=mode,
+        request_id=row["request_id"] or 0,
+        order_ticket=row["order_ticket"] or 0,
+        deal_ticket=row["deal_ticket"] or 0,
+        position_id=row["position_id"] or 0,
+        requested_volume=row["requested_volume"] or 0.0,
+        filled_volume=row["filled_volume"] or 0.0,
+        closed_volume=row["closed_volume"] or 0.0,
+        correlation_key=row["correlation_key"] or "",
+        direction=_direction(row["direction"]),
+        planned_entry=row["planned_entry"] or 0.0,
+        stop_loss=row["stop_loss"] or 0.0,
+        take_profit=row["take_profit"] or 0.0,
+        initial_risk_amount=row["initial_risk_amount"] or 0.0,
+        retcode=row["retcode"] or 0,
+        message=row["message"] or "",
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        terminal=bool(row["terminal"]),
+    )
+
+
+def _outcome_from_row(row) -> Outcome:
+    return Outcome(
+        signal_id=row["signal_id"],
+        result=row["result"],
+        realized_r=row["realized_r"] or 0.0,
+        mfe_r=row["mfe_r"],
+        mae_r=row["mae_r"],
+        closed_at=row["closed_at"] or 0,
+        execution_id=row["execution_id"] or "",
+        source=row["source"] or "",
+        evidence_quality=row["evidence_quality"] or "",
+        entry_price=row["entry_price"] or 0.0,
+        exit_price=row["exit_price"] or 0.0,
+        filled_volume=row["filled_volume"] or 0.0,
+        net_profit=row["net_profit"] or 0.0,
+        valid_for_statistics=bool(row["valid_for_statistics"]),
+        rule_version=row["rule_version"] or "",
+        scoring_version=row["scoring_version"] or "",
+        parameter_hash=row["parameter_hash"] or "",
+        broker_spec_hash=row["broker_spec_hash"] or "",
+    )
+
+
 class Repositories:
     def __init__(self, database: Database) -> None:
         self._db = database
@@ -37,7 +110,22 @@ class Repositories:
     def ready(self) -> bool:
         return self._db.is_open
 
+    @property
+    def database_path(self) -> str:
+        return self._db.path
+
+    def close(self) -> None:
+        self._db.close()
+
     # ------------------------------------------------------------------- runs
+    def run_exists(self, run_id: str) -> bool:
+        if not self.ready or not run_id:
+            return False
+        return (
+            self._db.execute("SELECT 1 FROM runs WHERE run_id=?", (run_id,)).fetchone()
+            is not None
+        )
+
     def start_run(
         self,
         run_id: str,
@@ -53,23 +141,26 @@ class Repositories:
     ) -> bool:
         if not self.ready:
             return False
-        self._db.execute(
-            "INSERT OR REPLACE INTO runs(run_id, kind, is_production, app_version,"
-            " rule_version, scoring_version, parameter_hash, symbols, started_at, note)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (
-                run_id,
-                kind,
-                1 if is_production else 0,
-                app_version,
-                rule_version,
-                scoring_version,
-                parameter_hash,
-                symbols,
-                started_at,
-                note,
-            ),
-        )
+        try:
+            self._db.execute(
+                "INSERT INTO runs(run_id, kind, is_production, app_version,"
+                " rule_version, scoring_version, parameter_hash, symbols, started_at, note)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    run_id,
+                    kind,
+                    1 if is_production else 0,
+                    app_version,
+                    rule_version,
+                    scoring_version,
+                    parameter_hash,
+                    symbols,
+                    started_at,
+                    note,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            return False
         self._db.commit()
         return True
 
@@ -94,16 +185,49 @@ class Repositories:
     def save_signal(self, signal: SignalCandidate, run_id: str = "") -> bool:
         """Insert a signal, or leave the existing row alone.
 
-        ``INSERT OR IGNORE`` rather than ``REPLACE``: the identity of a signal
-        is its structural situation, and a signal re-evaluated a few seconds
-        later at a slightly different quote is the SAME signal. Replacing would
-        overwrite the moment it was first seen, which is the timestamp any
-        later analysis depends on.
+        The identity of a signal is its structural situation, and a signal
+        re-evaluated a few seconds later at a slightly different quote is the
+        SAME signal. Its first row is preserved. If the same hash is already
+        attached to a *different* structural tuple, that is a collision and a
+        hard failure—not permission to merge two evidence lifecycles.
         """
         if not self.ready:
             return False
+        existing = self._db.execute(
+            "SELECT symbol, direction, setup, confirmation_bar_time, rule_version"
+            ", scoring_version, parameter_hash, broker_spec_hash"
+            " FROM signals WHERE signal_id=?",
+            (signal.signal_id,),
+        ).fetchone()
+        if existing is not None:
+            stored_identity = (
+                existing["symbol"],
+                int(existing["direction"]),
+                int(existing["setup"]),
+                int(existing["confirmation_bar_time"] or 0),
+                existing["rule_version"],
+                existing["scoring_version"],
+                existing["parameter_hash"],
+                existing["broker_spec_hash"],
+            )
+            incoming_identity = (
+                signal.symbol,
+                int(signal.direction),
+                int(signal.setup),
+                int(signal.confirmation_bar_time),
+                signal.rule_version,
+                signal.scoring_version,
+                signal.parameter_hash,
+                signal.broker_spec_hash,
+            )
+            if stored_identity != incoming_identity:
+                raise SignalIdentityCollision(
+                    f"signal id {signal.signal_id} maps to both "
+                    f"{stored_identity!r} and {incoming_identity!r}"
+                )
+            return True
         self._db.execute(
-            "INSERT OR IGNORE INTO signals(signal_id, run_id, symbol, direction, setup,"
+            "INSERT INTO signals(signal_id, run_id, symbol, direction, setup,"
             " state, preferred_entry, stop_loss, take_profit, nearest_support,"
             " nearest_resistance, demand_relation, supply_relation, long_score,"
             " short_score, regime, reasons, validation_codes, confirmation_bar_time,"
@@ -144,11 +268,18 @@ class Repositories:
     def update_signal_state(self, signal_id: str, state: SignalState) -> bool:
         if not self.ready:
             return False
-        self._db.execute(
+        current = self.signal_state(signal_id)
+        if current is None:
+            return False
+        if current == state:
+            return True
+        if not transition_allowed(current, state):
+            return False
+        cursor = self._db.execute(
             "UPDATE signals SET state = ? WHERE signal_id = ?", (state.name, signal_id)
         )
         self._db.commit()
-        return True
+        return cursor.rowcount == 1
 
     def signal_state(self, signal_id: str) -> SignalState | None:
         if not self.ready:
@@ -162,6 +293,24 @@ class Repositories:
             return SignalState[row["state"]]
         except KeyError:
             return None
+
+    def signal_metadata(self, signal_id: str) -> dict[str, str]:
+        """Version stamps needed when a recovered execution closes."""
+        if not self.ready:
+            return {}
+        row = self._db.execute(
+            "SELECT rule_version, scoring_version, parameter_hash, broker_spec_hash"
+            " FROM signals WHERE signal_id = ?",
+            (signal_id,),
+        ).fetchone()
+        if row is None:
+            return {}
+        return {
+            "rule_version": row["rule_version"] or "",
+            "scoring_version": row["scoring_version"] or "",
+            "parameter_hash": row["parameter_hash"] or "",
+            "broker_spec_hash": row["broker_spec_hash"] or "",
+        }
 
     def save_feature(self, signal_id: str, name: str, value: float) -> bool:
         if not self.ready:
@@ -218,21 +367,31 @@ class Repositories:
             return False
         self._db.execute(
             "INSERT OR REPLACE INTO executions(execution_id, plan_id, signal_id, symbol,"
-            " state, request_id, order_ticket, deal_ticket, position_id,"
-            " requested_volume, filled_volume, retcode, message, created_at,"
-            " updated_at, terminal) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " state, execution_mode, request_id, order_ticket, deal_ticket, position_id,"
+            " requested_volume, filled_volume, closed_volume, correlation_key, direction,"
+            " planned_entry, stop_loss, take_profit, initial_risk_amount, retcode, message,"
+            " created_at, updated_at, terminal)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 execution.execution_id,
                 execution.plan_id,
                 execution.signal_id,
                 execution.symbol,
                 execution.state.name,
+                execution.mode.name,
                 execution.request_id,
                 execution.order_ticket,
                 execution.deal_ticket,
                 execution.position_id,
                 execution.requested_volume,
                 execution.filled_volume,
+                execution.closed_volume,
+                execution.correlation_key,
+                int(execution.direction),
+                execution.planned_entry,
+                execution.stop_loss,
+                execution.take_profit,
+                execution.initial_risk_amount,
                 execution.retcode,
                 execution.message,
                 execution.created_at,
@@ -258,31 +417,7 @@ class Repositories:
         if row is None:
             return None
 
-        try:
-            state = ExecState[row["state"]]
-        except KeyError:
-            # An unparseable stored state is not a reason to assume the
-            # execution finished. UNKNOWN keeps the gate shut.
-            state = ExecState.UNKNOWN
-
-        return ExecutionRecord(
-            execution_id=row["execution_id"],
-            plan_id=row["plan_id"],
-            signal_id=row["signal_id"],
-            symbol=row["symbol"],
-            state=state,
-            request_id=row["request_id"] or 0,
-            order_ticket=row["order_ticket"] or 0,
-            deal_ticket=row["deal_ticket"] or 0,
-            position_id=row["position_id"] or 0,
-            requested_volume=row["requested_volume"] or 0.0,
-            filled_volume=row["filled_volume"] or 0.0,
-            retcode=row["retcode"] or 0,
-            message=row["message"] or "",
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            terminal=bool(row["terminal"]),
-        )
+        return _execution_from_row(row)
 
     # ------------------------------------------------------------------ deals
     def record_deal_once(
@@ -296,6 +431,11 @@ class Repositories:
         price: float,
         net_profit: float,
         recorded_at: int,
+        order_ticket: int = 0,
+        position_id: int = 0,
+        broker_time: int = 0,
+        reason: str = "",
+        comment: str = "",
     ) -> bool:
         """Admission gate. True only the first time this ticket is seen.
 
@@ -309,7 +449,8 @@ class Repositories:
         try:
             self._db.execute(
                 "INSERT INTO deals(deal_ticket, execution_id, symbol, entry_type,"
-                " volume, price, net_profit, recorded_at) VALUES(?,?,?,?,?,?,?,?)",
+                " volume, price, net_profit, recorded_at, order_ticket, position_id,"
+                " broker_time, reason, comment) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     deal_ticket,
                     execution_id,
@@ -319,6 +460,11 @@ class Repositories:
                     price,
                     net_profit,
                     recorded_at,
+                    order_ticket,
+                    position_id,
+                    broker_time,
+                    reason,
+                    comment,
                 ),
             )
         except sqlite3.IntegrityError:
@@ -331,13 +477,44 @@ class Repositories:
             return []
         return [row[0] for row in self._db.execute("SELECT deal_ticket FROM deals")]
 
+    def deals_for_execution(self, execution_id: str) -> list[DealInfo]:
+        """Exact broker facts already admitted for one execution."""
+        if not self.ready or not execution_id:
+            return []
+        rows = self._db.execute(
+            "SELECT * FROM deals WHERE execution_id=? ORDER BY broker_time, deal_ticket",
+            (execution_id,),
+        ).fetchall()
+        return [
+            DealInfo(
+                ticket=int(row["deal_ticket"] or 0),
+                order=int(row["order_ticket"] or 0),
+                position_id=int(row["position_id"] or 0),
+                symbol=row["symbol"] or "",
+                entry=int(row["entry_type"] or 0),
+                volume=float(row["volume"] or 0.0),
+                price=float(row["price"] or 0.0),
+                # Stored net is already profit + commission + swap + fee. Keeping it
+                # in ``profit`` reconstructs DealInfo.net_profit exactly.
+                profit=float(row["net_profit"] or 0.0),
+                time=int(row["broker_time"] or 0),
+                comment=row["comment"] or "",
+                reason=row["reason"] or "",
+            )
+            for row in rows
+        ]
+
     # --------------------------------------------------------------- outcomes
     def save_outcome(self, outcome: Outcome) -> bool:
+        """Persist once; a later replay/error may not rewrite valid evidence."""
         if not self.ready:
             return False
-        self._db.execute(
-            "INSERT OR REPLACE INTO outcomes(signal_id, result, realized_r, mfe_r,"
-            " mae_r, closed_at) VALUES(?,?,?,?,?,?)",
+        cursor = self._db.execute(
+            "INSERT OR IGNORE INTO outcomes(signal_id, result, realized_r, mfe_r,"
+            " mae_r, closed_at, execution_id, source, evidence_quality, entry_price,"
+            " exit_price, filled_volume, net_profit, valid_for_statistics, rule_version,"
+            " scoring_version, parameter_hash, broker_spec_hash)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 outcome.signal_id,
                 outcome.result,
@@ -345,10 +522,139 @@ class Repositories:
                 outcome.mfe_r,
                 outcome.mae_r,
                 outcome.closed_at,
+                outcome.execution_id,
+                outcome.source,
+                outcome.evidence_quality,
+                outcome.entry_price,
+                outcome.exit_price,
+                outcome.filled_volume,
+                outcome.net_profit,
+                1 if outcome.valid_for_statistics else 0,
+                outcome.rule_version,
+                outcome.scoring_version,
+                outcome.parameter_hash,
+                outcome.broker_spec_hash,
             ),
         )
         self._db.commit()
-        return True
+        return cursor.rowcount == 1
+
+    def save_outcome_with_state(
+        self,
+        outcome: Outcome,
+        state: SignalState,
+        *,
+        risk_state: RiskState | None = None,
+    ) -> bool:
+        """Commit outcome evidence and its terminal lifecycle state together.
+
+        A crash may occur between any two Python statements. Keeping these two
+        writes in one SQLite transaction prevents an outcome row paired with a
+        signal that remains ACTIVE forever (or a terminal signal with no
+        evidence row).
+        """
+        if not self.ready:
+            return False
+        connection = self._db.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state FROM signals WHERE signal_id=?", (outcome.signal_id,)
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return False
+            try:
+                current = SignalState[row["state"]]
+            except KeyError:
+                connection.rollback()
+                return False
+            if current != state and not transition_allowed(current, state):
+                connection.rollback()
+                return False
+
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO outcomes(signal_id, result, realized_r, mfe_r,"
+                " mae_r, closed_at, execution_id, source, evidence_quality, entry_price,"
+                " exit_price, filled_volume, net_profit, valid_for_statistics, rule_version,"
+                " scoring_version, parameter_hash, broker_spec_hash)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    outcome.signal_id,
+                    outcome.result,
+                    outcome.realized_r,
+                    outcome.mfe_r,
+                    outcome.mae_r,
+                    outcome.closed_at,
+                    outcome.execution_id,
+                    outcome.source,
+                    outcome.evidence_quality,
+                    outcome.entry_price,
+                    outcome.exit_price,
+                    outcome.filled_volume,
+                    outcome.net_profit,
+                    1 if outcome.valid_for_statistics else 0,
+                    outcome.rule_version,
+                    outcome.scoring_version,
+                    outcome.parameter_hash,
+                    outcome.broker_spec_hash,
+                ),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                return False
+            if current != state:
+                connection.execute(
+                    "UPDATE signals SET state=? WHERE signal_id=?",
+                    (state.name, outcome.signal_id),
+                )
+            if risk_state is not None:
+                connection.execute(
+                    "INSERT OR REPLACE INTO risk_state(id, day_key, day_start_equity,"
+                    " peak_equity, consecutive_losses, daily_risk_used_pct, updated_at)"
+                    " VALUES(1,?,?,?,?,?,?)",
+                    (
+                        risk_state.day_key,
+                        risk_state.day_start_equity,
+                        risk_state.peak_equity,
+                        risk_state.consecutive_losses,
+                        risk_state.daily_risk_used_pct,
+                        risk_state.updated_at,
+                    ),
+                )
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
+
+    def outcome_for_execution(self, execution_id: str) -> Outcome | None:
+        if not self.ready or not execution_id:
+            return None
+        row = self._db.execute(
+            "SELECT * FROM outcomes WHERE execution_id = ?", (execution_id,)
+        ).fetchone()
+        return _outcome_from_row(row) if row is not None else None
+
+    def load_execution_awaiting_outcome(self) -> ExecutionRecord | None:
+        """A terminal broker disposition whose outcome was not committed.
+
+        A crash can land after COMPLETED, REJECTED or CANCELLED was persisted
+        but before the atomic outcome/lifecycle commit. Returning all three
+        prevents a rejected send from becoming a preview that can be submitted
+        again after restart.
+        """
+        if not self.ready:
+            return None
+        row = self._db.execute(
+            "SELECT e.* FROM executions e"
+            " LEFT JOIN outcomes o ON o.execution_id = e.execution_id"
+            " WHERE e.terminal = 1"
+            " AND e.state IN ('COMPLETED','REJECTED','CANCELLED')"
+            " AND o.signal_id IS NULL"
+            " ORDER BY e.created_at DESC LIMIT 1"
+        ).fetchone()
+        return _execution_from_row(row) if row is not None else None
 
     def outcome_counts(self, symbol: str, setup: int, rule_version: str) -> tuple[int, int]:
         """``(wins, total)`` for this symbol, setup and rule version.
@@ -367,99 +673,135 @@ class Repositories:
             "  SUM(CASE WHEN o.result = 'TP' THEN 1 ELSE 0 END) AS wins,"
             "  COUNT(*) AS total"
             " FROM outcomes o JOIN signals s ON s.signal_id = o.signal_id"
+            " LEFT JOIN runs r ON r.run_id = s.run_id"
             " WHERE s.symbol = ? AND s.setup = ? AND s.rule_version = ?"
-            "   AND o.result IN ('TP','SL')",
+            "   AND o.result IN ('TP','SL') AND o.valid_for_statistics = 1"
+            "   AND (r.kind IS NULL OR r.kind <> 'REPLAY' OR r.finished_at IS NOT NULL)",
             (symbol, setup, rule_version),
         ).fetchone()
         if row is None or row["total"] is None:
             return 0, 0
         return int(row["wins"] or 0), int(row["total"] or 0)
 
-    def purge_runs_of_kind(self, kind: str, *, keep_run_id: str = "") -> int:
-        """Delete every run of ``kind`` and everything hanging off it.
+    @staticmethod
+    def _purge_kind(connection, kind: str) -> None:
+        execution_scope = (
+            "SELECT e.execution_id FROM executions e"
+            " JOIN signals s ON s.signal_id=e.signal_id"
+            " JOIN runs r ON r.run_id=s.run_id WHERE r.kind=?"
+        )
+        signal_scope = (
+            "SELECT s.signal_id FROM signals s JOIN runs r ON r.run_id=s.run_id"
+            " WHERE r.kind=?"
+        )
+        connection.execute(
+            f"DELETE FROM deals WHERE execution_id IN ({execution_scope})", (kind,)
+        )
+        connection.execute(
+            f"DELETE FROM executions WHERE execution_id IN ({execution_scope})", (kind,)
+        )
+        for table in ("outcomes", "signal_features", "trade_plans"):
+            connection.execute(
+                f"DELETE FROM {table} WHERE signal_id IN ({signal_scope})", (kind,)
+            )
+        connection.execute(
+            "DELETE FROM signals WHERE run_id IN (SELECT run_id FROM runs WHERE kind=?)",
+            (kind,),
+        )
+        connection.execute("DELETE FROM runs WHERE kind=?", (kind,))
 
-        Exists so calibration is *replaceable* rather than cumulative. Without
-        it, running the calibration twice would double the sample behind every
-        win rate — the numbers would keep improving in the operator's eyes
-        while describing the same trades counted repeatedly, which is the most
-        insidious way an evidence base can go wrong.
+    def discard_run(self, run_id: str) -> None:
+        """Remove one incomplete run without touching any previous evidence."""
+        if not self.ready or not run_id:
+            return
+        connection = self._db.connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            execution_scope = (
+                "SELECT execution_id FROM executions WHERE signal_id IN"
+                " (SELECT signal_id FROM signals WHERE run_id=?)"
+            )
+            signal_scope = "SELECT signal_id FROM signals WHERE run_id=?"
+            connection.execute(
+                f"DELETE FROM deals WHERE execution_id IN ({execution_scope})", (run_id,)
+            )
+            connection.execute(
+                f"DELETE FROM executions WHERE execution_id IN ({execution_scope})", (run_id,)
+            )
+            for table in ("outcomes", "signal_features", "trade_plans"):
+                connection.execute(
+                    f"DELETE FROM {table} WHERE signal_id IN ({signal_scope})", (run_id,)
+                )
+            connection.execute("DELETE FROM signals WHERE run_id=?", (run_id,))
+            connection.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
-        Deliberately scoped by run kind and never by "everything": a call that
-        could reach a LIVE run would be one typo away from erasing the only
-        records in this application that came from a real account.
+    def replace_runs_of_kind_from(self, staged_database: str, kind: str) -> int:
+        """Atomically swap one evidence kind from a completed staging DB.
 
-        ``keep_run_id`` spares one run, and it is what makes replacement safe
-        rather than merely correct-on-success. Callers used to purge *before*
-        replaying, so an operator who cancelled the run — or a replay that
-        raised halfway — was left with no calibration at all and nothing to
-        restore it from. The order is now: write the new run, then purge the
-        others, keeping the one just written.
+        The expensive replay runs elsewhere. The live database sees either its
+        previous valid sample or the complete replacement, never a partially
+        written run. Any copy error rolls the delete back with the inserts.
         """
         if not self.ready:
             return 0
-
-        if keep_run_id:
-            rows = self._db.execute(
-                "SELECT s.signal_id AS signal_id FROM signals s"
-                " JOIN runs r ON r.run_id = s.run_id"
-                " WHERE r.kind = ? AND s.run_id <> ?",
-                (kind, keep_run_id),
-            ).fetchall()
-        else:
-            rows = self._db.execute(
-                "SELECT s.signal_id AS signal_id FROM signals s"
-                " JOIN runs r ON r.run_id = s.run_id WHERE r.kind = ?",
+        connection = self._db.connection
+        alias = "staged_evidence"
+        connection.execute(f"ATTACH DATABASE ? AS {alias}", (staged_database,))
+        try:
+            unfinished = connection.execute(
+                f"SELECT COUNT(*) FROM {alias}.runs"
+                " WHERE kind=? AND finished_at IS NULL",
                 (kind,),
-            ).fetchall()
-        signals = [row["signal_id"] for row in rows]
+            ).fetchone()[0]
+            if unfinished:
+                raise ValueError("staged evidence contains an unfinished run")
+            staged_count = connection.execute(
+                f"SELECT COUNT(*) FROM {alias}.signals s"
+                f" JOIN {alias}.runs r ON r.run_id=s.run_id WHERE r.kind=?",
+                (kind,),
+            ).fetchone()[0]
 
-        if signals:
-            marks = ",".join("?" * len(signals))
-            for table in ("outcomes", "signal_features", "trade_plans"):
-                self._db.connection.execute(
-                    f"DELETE FROM {table} WHERE signal_id IN ({marks})", signals
+            connection.execute("BEGIN IMMEDIATE")
+            self._purge_kind(connection, kind)
+            connection.execute(
+                f"INSERT INTO runs SELECT * FROM {alias}.runs WHERE kind=?", (kind,)
+            )
+            connection.execute(
+                f"INSERT INTO signals SELECT s.* FROM {alias}.signals s"
+                f" JOIN {alias}.runs r ON r.run_id=s.run_id WHERE r.kind=?",
+                (kind,),
+            )
+            for table in ("signal_features", "trade_plans", "outcomes"):
+                connection.execute(
+                    f"INSERT INTO {table} SELECT child.* FROM {alias}.{table} child"
+                    f" JOIN {alias}.signals s ON s.signal_id=child.signal_id"
+                    f" JOIN {alias}.runs r ON r.run_id=s.run_id WHERE r.kind=?",
+                    (kind,),
                 )
-            self._db.connection.execute(
-                f"DELETE FROM signals WHERE signal_id IN ({marks})", signals
+            connection.execute(
+                f"INSERT INTO executions SELECT e.* FROM {alias}.executions e"
+                f" JOIN {alias}.signals s ON s.signal_id=e.signal_id"
+                f" JOIN {alias}.runs r ON r.run_id=s.run_id WHERE r.kind=?",
+                (kind,),
             )
-        if keep_run_id:
-            self._db.execute(
-                "DELETE FROM runs WHERE kind = ? AND run_id <> ?", (kind, keep_run_id)
+            connection.execute(
+                f"INSERT INTO deals SELECT d.* FROM {alias}.deals d"
+                f" JOIN {alias}.executions e ON e.execution_id=d.execution_id"
+                f" JOIN {alias}.signals s ON s.signal_id=e.signal_id"
+                f" JOIN {alias}.runs r ON r.run_id=s.run_id WHERE r.kind=?",
+                (kind,),
             )
-        else:
-            self._db.execute("DELETE FROM runs WHERE kind = ?", (kind,))
-        self._db.commit()
-        return len(signals)
-
-    def purge_run(self, run_id: str) -> int:
-        """Delete one run and everything hanging off it.
-
-        The undo for a replay that was cancelled or raised. The partial rows it
-        wrote describe a run that never finished, and leaving them would put a
-        truncated sample into the evidence base under a label that says nothing
-        about being truncated.
-        """
-        if not self.ready or not run_id:
-            return 0
-
-        signals = [
-            row["signal_id"]
-            for row in self._db.execute(
-                "SELECT signal_id FROM signals WHERE run_id = ?", (run_id,)
-            ).fetchall()
-        ]
-        if signals:
-            marks = ",".join("?" * len(signals))
-            for table in ("outcomes", "signal_features", "trade_plans"):
-                self._db.connection.execute(
-                    f"DELETE FROM {table} WHERE signal_id IN ({marks})", signals
-                )
-            self._db.connection.execute(
-                f"DELETE FROM signals WHERE signal_id IN ({marks})", signals
-            )
-        self._db.execute("DELETE FROM runs WHERE run_id = ?", (run_id,))
-        self._db.commit()
-        return len(signals)
+            connection.commit()
+            return int(staged_count)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.execute(f"DETACH DATABASE {alias}")
 
     def outcome_provenance(
         self, symbol: str, setup: int, rule_version: str
@@ -486,7 +828,8 @@ class Repositories:
             " JOIN signals s ON s.signal_id = o.signal_id"
             " LEFT JOIN runs r ON r.run_id = s.run_id"
             " WHERE s.symbol = ? AND s.setup = ? AND s.rule_version = ?"
-            "   AND o.result IN ('TP','SL')",
+            "   AND o.result IN ('TP','SL') AND o.valid_for_statistics = 1"
+            "   AND (r.kind IS NULL OR r.kind <> 'REPLAY' OR r.finished_at IS NOT NULL)",
             (symbol, setup, rule_version),
         ).fetchall()
 
@@ -510,15 +853,22 @@ class Repositories:
                 " SUM(CASE WHEN o.result='TP' THEN 1 ELSE 0 END) AS wins,"
                 " SUM(o.realized_r) AS sum_r"
                 " FROM outcomes o JOIN signals s ON s.signal_id = o.signal_id"
-                " WHERE o.result IN ('TP','SL') AND s.rule_version = ?",
+                " LEFT JOIN runs r ON r.run_id = s.run_id"
+                " WHERE o.result IN ('TP','SL') AND o.valid_for_statistics = 1"
+                " AND s.rule_version = ?"
+                " AND (r.kind IS NULL OR r.kind <> 'REPLAY' OR r.finished_at IS NOT NULL)",
                 (rule_version,),
             ).fetchone()
         else:
             row = self._db.execute(
                 "SELECT COUNT(*) AS total,"
-                " SUM(CASE WHEN result='TP' THEN 1 ELSE 0 END) AS wins,"
-                " SUM(realized_r) AS sum_r"
-                " FROM outcomes WHERE result IN ('TP','SL')"
+                " SUM(CASE WHEN o.result='TP' THEN 1 ELSE 0 END) AS wins,"
+                " SUM(o.realized_r) AS sum_r"
+                " FROM outcomes o JOIN signals s ON s.signal_id=o.signal_id"
+                " LEFT JOIN runs r ON r.run_id=s.run_id"
+                " WHERE o.result IN ('TP','SL')"
+                " AND o.valid_for_statistics = 1"
+                " AND (r.kind IS NULL OR r.kind <> 'REPLAY' OR r.finished_at IS NOT NULL)"
             ).fetchone()
 
         total = int(row["total"] or 0)

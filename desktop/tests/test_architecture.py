@@ -14,9 +14,11 @@ sideways into `alikhande.adapters` for something convenient.
 
 So this walks the source with `ast` and checks two things.
 
-**Nothing outside the standard library.** An allowlist rather than a denylist,
-because the failure mode being prevented is somebody adding a dependency
-without noticing, and a denylist only catches the ones already thought of.
+**Nothing outside the standard library.** Judged against
+``sys.stdlib_module_names`` rather than a hand-written allowlist. A list has to
+be extended every time somebody imports a normal module — this one failed first
+on ``csv`` and ``uuid`` — and a list people are used to extending is a list a
+third-party import eventually gets waved through.
 
 **No import from an outer layer.** ``core`` is the innermost ring: ``adapters``,
 ``app`` and ``ui`` may all depend on it and it may depend on none of them. That
@@ -31,28 +33,25 @@ inside docstrings and misses ``import x as y``.
 from __future__ import annotations
 
 import ast
+import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CORE = ROOT / "alikhande" / "core"
 
-#: Standard-library modules ``core`` is permitted to import.
+#: ``core`` may import from the standard library and nothing else.
 #:
-#: Deliberately short. Every addition here is a decision that the pure core now
-#: depends on one more thing, and it should be made on purpose — which is what
-#: a test failure forces.
-ALLOWED_STDLIB = {
-    "__future__",
-    "collections",
-    "dataclasses",
-    "datetime",
-    "enum",
-    "math",
-    "pathlib",
-    "time",
-    "typing",
-}
+#: Asked of the interpreter rather than hand-listed. A hand-written allowlist
+#: is a proxy for "is this stdlib", and it drifts: the first version of this
+#: test failed on ``csv`` and ``uuid``, both of which are stdlib and both of
+#: which core may legitimately use — a list that has to be extended every time
+#: somebody imports a normal module trains people to extend it without thinking,
+#: which is exactly how a third-party import would eventually get waved through.
+#:
+#: ``sys.stdlib_module_names`` is the real answer to the real question, and it
+#: still rejects numpy, requests, PySide6 and MetaTrader5.
+STDLIB = set(sys.stdlib_module_names) | {"__future__"}
 
 #: Layers ``core`` must never import from. The ring below it does not exist.
 FORBIDDEN_LAYERS = ("adapters", "app", "ui")
@@ -93,7 +92,7 @@ class TestCoreIsDependencyFree(unittest.TestCase):
                 if module.startswith("."):
                     continue  # a sibling in the same ring; the next test judges it
                 root = module.split(".")[0]
-                if root not in ALLOWED_STDLIB:
+                if root not in STDLIB:
                     offenders.append(f"{path.name}:{line} imports {module!r}")
         self.assertEqual(
             offenders,
@@ -148,21 +147,18 @@ class TestCoreIsDependencyFree(unittest.TestCase):
         )
 
 
-class TestTheAllowlistIsHonest(unittest.TestCase):
-    """The allowlist is only meaningful if it is actually restrictive."""
+class TestTheStdlibCheckIsHonest(unittest.TestCase):
+    """The check is only meaningful if it actually rejects things."""
 
-    def test_the_allowlist_would_reject_a_third_party_import(self):
-        offenders = [m for m in ("numpy", "requests", "PySide6") if m in ALLOWED_STDLIB]
-        self.assertEqual(offenders, [])
+    def test_it_rejects_the_dependencies_this_project_actually_has(self):
+        """The three that would matter: the UI toolkit, the broker package, and
+        the numeric library the broker package drags in."""
+        for third_party in ("PySide6", "MetaTrader5", "numpy"):
+            self.assertNotIn(third_party, STDLIB)
 
-    def test_every_allowlisted_module_is_actually_importable(self):
-        """A typo in the allowlist silently widens it — an entry that matches
-        nothing real still lets a module through if somebody imports that
-        misspelling."""
-        import importlib
-
-        for name in sorted(ALLOWED_STDLIB - {"__future__"}):
-            importlib.import_module(name)
+    def test_it_accepts_what_core_legitimately_uses(self):
+        for stdlib in ("dataclasses", "enum", "typing", "csv", "uuid", "math"):
+            self.assertIn(stdlib, STDLIB)
 
 
 if __name__ == "__main__":

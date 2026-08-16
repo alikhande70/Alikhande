@@ -20,7 +20,7 @@ from .ports import BrokerGateway
 
 
 class PreflightResult:
-    __slots__ = ("ok", "request", "retcode", "reason")
+    __slots__ = ("ok", "request", "retcode", "reason", "actual_risk_amount")
 
     def __init__(
         self,
@@ -28,11 +28,13 @@ class PreflightResult:
         request: OrderRequest | None = None,
         retcode: int = 0,
         reason: str = "",
+        actual_risk_amount: float = 0.0,
     ) -> None:
         self.ok = ok
         self.request = request
         self.retcode = retcode
         self.reason = reason
+        self.actual_risk_amount = actual_risk_amount
 
 
 class Preflight:
@@ -48,6 +50,7 @@ class Preflight:
         account: AccountInfo | None,
         spec: SymbolSpec | None,
         now: int,
+        correlation_comment: str = "",
     ) -> PreflightResult:
         """Build and validate the request.
 
@@ -61,6 +64,25 @@ class Preflight:
         if now > plan.expires_at:
             return PreflightResult(False, reason="PREVIEW_EXPIRED")
 
+        # Re-read the specification at Confirm, not only when the preview was
+        # built. A changed contract size/tick value invalidates the sizing even
+        # when price itself has barely moved.
+        try:
+            current_spec = gateway.symbol_spec(plan.symbol)
+        except Exception as error:
+            return PreflightResult(
+                False, reason=f"BROKER_SPEC_UNAVAILABLE({type(error).__name__})"
+            )
+        if current_spec is None or not current_spec.ready:
+            return PreflightResult(False, reason="BROKER_SPEC_UNAVAILABLE")
+        if (
+            spec is not None
+            and spec.fingerprint
+            and current_spec.fingerprint != spec.fingerprint
+        ):
+            return PreflightResult(False, reason="BROKER_SPEC_CHANGED_REPLAN")
+        spec = current_spec
+
         codes = self._guards.trade_permissions(account, spec)
         if codes:
             return PreflightResult(False, reason=";".join(codes))
@@ -71,7 +93,30 @@ class Preflight:
 
         assert spec is not None  # trade_permissions already refused a missing spec
 
-        tick = gateway.tick(plan.symbol)
+        # Exposure is also a last-moment broker read. The scan pass checks this
+        # while building the preview, but a position/order can appear during
+        # the operator's arming window. API failure is distinct from a real
+        # empty list and fails closed.
+        try:
+            # Any same-symbol exposure is a refusal, not only this EA's magic.
+            # On a netting account a manual position would merge with the new
+            # order under one position_id and make later exits impossible to
+            # attribute without guessing.
+            positions = gateway.positions(None)
+            orders = gateway.orders(None)
+        except Exception as error:
+            return PreflightResult(
+                False, reason=f"BROKER_EXPOSURE_UNAVAILABLE({type(error).__name__})"
+            )
+        if self._guards.has_exposure(plan.symbol, positions, orders):
+            return PreflightResult(False, reason="ALREADY_EXPOSED")
+
+        try:
+            tick = gateway.tick(plan.symbol)
+        except Exception as error:
+            return PreflightResult(
+                False, reason=f"BROKER_TICK_UNAVAILABLE({type(error).__name__})"
+            )
         if tick is None:
             return PreflightResult(False, reason="NO_TICK")
         if spec.point <= 0.0:
@@ -94,6 +139,37 @@ class Preflight:
                 reason=f"PRICE_DRIFT_EXCEEDED({drift_points:.0f}>{plan.max_drift_points:.0f} pts)",
             )
 
+        # Price drift inside the tolerance can still increase the cash distance
+        # to the stop. Reprice the exact volume/request price at the last
+        # responsible moment; otherwise a plan that was within budget when
+        # previewed can leave with more risk than the operator approved.
+        try:
+            actual_risk = gateway.calc_profit(
+                plan.symbol,
+                int(plan.direction),
+                plan.lot_size,
+                current,
+                plan.stop_loss,
+            )
+        except Exception as error:
+            return PreflightResult(
+                False, reason=f"ACTUAL_RISK_UNAVAILABLE({type(error).__name__})"
+            )
+        if actual_risk is None:
+            return PreflightResult(False, reason="ACTUAL_RISK_UNAVAILABLE")
+        actual_risk = abs(float(actual_risk))
+        budget = plan.risk_amount or plan.actual_risk_amount
+        if actual_risk <= 0.0 or budget <= 0.0:
+            return PreflightResult(False, reason="ACTUAL_RISK_INVALID")
+        if actual_risk > budget * cfg.risk.rounding_tolerance:
+            return PreflightResult(
+                False,
+                reason=(
+                    "ACTUAL_RISK_EXCEEDS_PLAN"
+                    f"({actual_risk:.2f}>{budget:.2f})"
+                ),
+            )
+
         request = OrderRequest(
             symbol=plan.symbol,
             direction=plan.direction,
@@ -103,13 +179,28 @@ class Preflight:
             take_profit=plan.take_profit,
             deviation=max(1, int(plan.max_drift_points)),
             magic=cfg.execution.magic,
-            comment=cfg.execution.order_comment,
+            # The execution identity is broker-visible and persisted before
+            # send. A static product comment cannot distinguish two trades on
+            # the same symbol after a crash, so execution always supplies the
+            # unique value on the real send path. The fallback keeps direct
+            # preflight callers and shadow diagnostics useful.
+            comment=correlation_comment or cfg.execution.order_comment,
         )
 
-        accepted, retcode, comment = gateway.check_order(request)
+        try:
+            accepted, retcode, comment = gateway.check_order(request)
+        except Exception as error:
+            return PreflightResult(
+                False, reason=f"ORDER_CHECK_UNAVAILABLE({type(error).__name__})"
+            )
         if not accepted:
             return PreflightResult(
                 False, retcode=retcode, reason=f"ORDER_CHECK_FAILED({retcode}:{comment})"
             )
 
-        return PreflightResult(True, request=request, retcode=retcode)
+        return PreflightResult(
+            True,
+            request=request,
+            retcode=retcode,
+            actual_risk_amount=actual_risk,
+        )

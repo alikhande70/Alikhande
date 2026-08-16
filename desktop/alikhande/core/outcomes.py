@@ -53,6 +53,9 @@ class TrackedSignal:
     take_profit: float
     opened_at: int
     rule_version: str
+    scoring_version: str
+    parameter_hash: str
+    broker_spec_hash: str
     setup: int
     # Excursions in price terms; converted to R on resolution.
     best_price: float = 0.0
@@ -97,6 +100,9 @@ class OutcomeTracker:
             take_profit=candidate.take_profit,
             opened_at=now,
             rule_version=candidate.rule_version,
+            scoring_version=candidate.scoring_version,
+            parameter_hash=candidate.parameter_hash,
+            broker_spec_hash=candidate.broker_spec_hash,
             setup=int(candidate.setup),
         )
         return True
@@ -178,4 +184,13 @@ class OutcomeTracker:
             mfe_r=max(0.0, mfe_r),
             mae_r=min(0.0, mae_r),
             closed_at=now,
+            source="REPLAY",
+            evidence_quality="BAR_CONSERVATIVE",
+            entry_price=tracked.entry,
+            exit_price=exit_price,
+            valid_for_statistics=result in ("TP", "SL"),
+            rule_version=tracked.rule_version,
+            scoring_version=tracked.scoring_version,
+            parameter_hash=tracked.parameter_hash,
+            broker_spec_hash=tracked.broker_spec_hash,
         )

@@ -41,9 +41,18 @@ class EvidenceTestCase(unittest.TestCase):
         self.database.close()
         self._tmp.cleanup()
 
-    def seed_run(self, run_id: str, count: int, kind=RuntimeKind.REPLAY) -> None:
+    def seed_run(
+        self,
+        run_id: str,
+        count: int,
+        kind=RuntimeKind.REPLAY,
+        *,
+        repositories: Repositories | None = None,
+        finished: bool = True,
+    ) -> None:
         """Write a run with ``count`` signals, each carrying one outcome."""
-        self.repositories.start_run(
+        repo = repositories or self.repositories
+        repo.start_run(
             run_id=run_id,
             kind=kind.name,
             is_production=False,
@@ -56,7 +65,7 @@ class EvidenceTestCase(unittest.TestCase):
         )
         for index in range(count):
             signal_id = f"{run_id}-S{index}"
-            self.repositories.save_signal(
+            repo.save_signal(
                 SignalCandidate(
                     signal_id=signal_id,
                     symbol="EURUSD",
@@ -69,7 +78,7 @@ class EvidenceTestCase(unittest.TestCase):
                 ),
                 run_id,
             )
-            self.repositories.save_outcome(
+            repo.save_outcome(
                 Outcome(
                     signal_id=signal_id,
                     result="TP",
@@ -79,6 +88,23 @@ class EvidenceTestCase(unittest.TestCase):
                     closed_at=2000,
                 )
             )
+        if finished:
+            repo.finish_run(run_id, 2001)
+
+    def stage_run(
+        self, run_id: str, count: int, *, finished: bool = True
+    ) -> str:
+        path = str(Path(self._tmp.name) / f"stage-{run_id}.sqlite")
+        database = Database()
+        database.open(path)
+        self.seed_run(
+            run_id,
+            count,
+            repositories=Repositories(database),
+            finished=finished,
+        )
+        database.close()
+        return path
 
     def outcome_total(self) -> int:
         return int(self.repositories.outcome_summary()["total"])
@@ -90,22 +116,24 @@ class TestReplacementIsAtomic(EvidenceTestCase):
         self.seed_run("old", 5)
         self.assertEqual(self.outcome_total(), 5)
 
-        self.seed_run("new", 3)
-        self.assertEqual(self.outcome_total(), 8, "both runs should coexist mid-flight")
-
-        removed = self.repositories.purge_runs_of_kind(
-            RuntimeKind.REPLAY.name, keep_run_id="new"
+        staged = self.stage_run("new", 3)
+        copied = self.repositories.replace_runs_of_kind_from(
+            staged, RuntimeKind.REPLAY.name
         )
-        self.assertEqual(removed, 5)
+        self.assertEqual(copied, 3)
         self.assertEqual(self.outcome_total(), 3, "only the new run should remain")
 
     def test_a_cancelled_run_leaves_the_previous_evidence_intact(self):
         """The defect. Purging first meant a Stop press erased the calibration
         and replaced it with nothing."""
         self.seed_run("old", 5)
-        self.seed_run("partial", 2)  # cancelled halfway
-
-        self.repositories.purge_run("partial")
+        # Cancellation happens in a disposable database. Discarding it cannot
+        # even open, much less mutate, the target holding the old calibration.
+        staged = self.stage_run("partial", 2, finished=False)
+        stage_db = Database()
+        stage_db.open(staged)
+        Repositories(stage_db).discard_run("partial")
+        stage_db.close()
 
         self.assertEqual(
             self.outcome_total(), 5, "cancelling destroyed the previous calibration"
@@ -113,32 +141,31 @@ class TestReplacementIsAtomic(EvidenceTestCase):
 
     def test_a_failed_run_leaves_the_previous_evidence_intact(self):
         self.seed_run("old", 4)
-        try:
-            self.seed_run("doomed", 1)
-            raise RuntimeError("the replay raised")
-        except RuntimeError:
-            self.repositories.purge_run("doomed")
+        # A raised replay never reaches the target-copy phase.
+        self.stage_run("doomed", 1, finished=False)
         self.assertEqual(self.outcome_total(), 4)
 
-    def test_the_partial_run_is_not_kept(self):
+    def test_an_unfinished_staged_run_is_refused(self):
         """A truncated sample stored under the same label as a complete one is
         indistinguishable from it afterwards."""
-        self.seed_run("partial", 3)
-        self.repositories.purge_run("partial")
+        staged = self.stage_run("partial", 3, finished=False)
+        with self.assertRaisesRegex(ValueError, "unfinished"):
+            self.repositories.replace_runs_of_kind_from(
+                staged, RuntimeKind.REPLAY.name
+            )
         self.assertEqual(self.outcome_total(), 0)
 
-    def test_purging_a_run_that_does_not_exist_is_harmless(self):
+    def test_discarding_a_run_that_does_not_exist_is_harmless(self):
         self.seed_run("old", 3)
-        self.assertEqual(self.repositories.purge_run("never-existed"), 0)
+        self.repositories.discard_run("never-existed")
         self.assertEqual(self.outcome_total(), 3)
 
-    def test_purging_with_no_keep_still_clears_everything(self):
-        """The original signature still works — the calibration path uses it
-        nowhere now, but the guarantee it made has not changed."""
+    def test_replacement_removes_every_previous_replay_run(self):
         self.seed_run("a", 2)
         self.seed_run("b", 2)
-        self.repositories.purge_runs_of_kind(RuntimeKind.REPLAY.name)
-        self.assertEqual(self.outcome_total(), 0)
+        staged = self.stage_run("replacement", 1)
+        self.repositories.replace_runs_of_kind_from(staged, RuntimeKind.REPLAY.name)
+        self.assertEqual(self.outcome_total(), 1)
 
 
 class TestALiveRunIsNeverTouched(EvidenceTestCase):
@@ -149,17 +176,18 @@ class TestALiveRunIsNeverTouched(EvidenceTestCase):
     at all.
     """
 
-    def test_purging_replays_leaves_live_outcomes_alone(self):
+    def test_replacing_replays_leaves_live_outcomes_alone(self):
         self.seed_run("live-session", 6, kind=RuntimeKind.LIVE)
         self.seed_run("replay", 4, kind=RuntimeKind.REPLAY)
         self.assertEqual(self.outcome_total(), 10)
 
-        self.repositories.purge_runs_of_kind(RuntimeKind.REPLAY.name)
-        self.assertEqual(self.outcome_total(), 6, "a LIVE run was destroyed")
+        staged = self.stage_run("new-replay", 2)
+        self.repositories.replace_runs_of_kind_from(staged, RuntimeKind.REPLAY.name)
+        self.assertEqual(self.outcome_total(), 8, "a LIVE run was destroyed")
 
-    def test_purging_a_replay_run_by_id_cannot_reach_a_live_one(self):
+    def test_discarding_an_unknown_run_cannot_reach_a_live_one(self):
         self.seed_run("live-session", 3, kind=RuntimeKind.LIVE)
-        self.repositories.purge_run("replay-that-was-never-written")
+        self.repositories.discard_run("replay-that-was-never-written")
         self.assertEqual(self.outcome_total(), 3)
 
 
@@ -169,31 +197,26 @@ class TestTheCallersUseTheSafeOrder(unittest.TestCase):
     moment it is written rather than the moment it costs somebody a week of
     demo history."""
 
-    def test_the_backtest_view_purges_only_after_the_run(self):
-        # From disk: importing the view pulls in PySide6, which is unimportable
-        # in the dependency-free job — and this guard is worth running there.
+    def test_the_backtest_view_uses_the_atomic_staging_boundary(self):
+        # Read from disk rather than via ``inspect``: importing the view pulls
+        # in PySide6, which is unimportable in the dependency-free job. That is
+        # what turned this guard into an error there. The property asserted is
+        # unchanged.
         body = module_source("ui", "views", "backtest.py")
-        purge_at = body.index("purge_runs_of_kind")
-        run_at = body.index("Backtester(config).run")
-        self.assertLess(
-            run_at, purge_at, "the view still purges before it replays"
-        )
-        self.assertIn("keep_run_id", body)
-        self.assertIn("purge_run(run_id)", body)
+        self.assertIn("run_with_atomic_persistence", body)
+        self.assertNotIn("purge_runs_of_kind", body)
 
-    def test_the_calibration_command_purges_only_after_the_run(self):
+    def test_the_calibration_command_uses_the_atomic_staging_boundary(self):
         body = method_source(module_source("__main__.py"), "_cmd_calibrate")
-        purge_at = body.index("purge_runs_of_kind")
-        run_at = body.index("Backtester(config).run")
-        self.assertLess(run_at, purge_at, "calibrate still purges before it replays")
-        self.assertIn("keep_run_id", body)
+        self.assertIn("run_with_atomic_persistence", body)
+        self.assertNotIn("purge_runs_of_kind", body)
 
-    def test_the_calibration_command_cleans_up_on_a_keyboard_interrupt(self):
+    def test_the_backtester_discards_staging_on_keyboard_interrupt(self):
         """`except Exception` would miss Ctrl-C, which is the interruption an
         operator is most likely to cause."""
-        body = method_source(module_source("__main__.py"), "_cmd_calibrate")
+        body = method_source(module_source("app", "backtest.py"), "run")
         self.assertIn("except BaseException", body)
-        self.assertIn("purge_run(run_id)", body)
+        self.assertIn("discard_run(run_id)", body)
 
 
 if __name__ == "__main__":

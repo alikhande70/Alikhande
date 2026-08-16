@@ -110,6 +110,11 @@ class SignalState(IntEnum):
     INVALIDATED = 8  # structure broke before entry
     NOT_FILLED = 9
     AMBIGUOUS = 10  # outcome could not be reconciled — needs a human
+    # A broker-confirmed close that was neither the configured TP nor SL
+    # (manual close, stop-out, expert intervention, etc.).  It is evidence that
+    # the lifecycle closed, but it is deliberately excluded from win-rate
+    # statistics because calling it TP or SL would be a guess.
+    CLOSED = 11
 
 
 class ExecState(IntEnum):

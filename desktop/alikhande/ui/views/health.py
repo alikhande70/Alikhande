@@ -186,7 +186,7 @@ class HealthView(QWidget):
             PALETTE.ink_secondary if persistence.enabled else PALETTE.ink_muted,
         )
 
-    def update_view(self, snapshot, journal) -> None:
+    def update_view(self, snapshot, journal_entries=None) -> None:
         live = snapshot.runtime.kind == RuntimeKind.LIVE
         self._session.set(
             t("health.field.gateway"),
@@ -203,7 +203,8 @@ class HealthView(QWidget):
             PALETTE.warning if snapshot.news_blind else PALETTE.good,
         )
 
-        text = "\n".join(event.format() for event in journal.recent(120))
+        entries = snapshot.journal_entries if journal_entries is None else journal_entries
+        text = "\n".join(event.format() for event in entries[-120:])
         if text != self._journal.toPlainText():
             self._journal.setPlainText(text)
             bar = self._journal.verticalScrollBar()

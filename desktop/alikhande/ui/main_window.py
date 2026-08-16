@@ -1,9 +1,9 @@
 """The application window.
 
-Composition only: it wires a gateway to an engine to a worker to the views, and
-owns no scanner logic of its own. Everything it displays came from a snapshot
-the worker produced, and the ranking on the landing screen comes from
-``app.scanner`` rather than from a widget.
+Composition only: it gives bootstrap descriptions to a worker and wires that
+worker's immutable snapshots to the views. It never receives a gateway, engine
+or repository object and owns no scanner logic. The ranking on the landing
+screen is produced inside the worker, not by a widget.
 
 The shell is a **left navigation rail** rather than a tab strip. Tabs imply peers
 of equal weight; these are not peers. The Scanner is where the operator lives —
@@ -14,10 +14,10 @@ leaves space for a live count beside it so an opportunity is visible from any
 view.
 
 The one piece of judgement that lives here is the **real-account banner**. When
-the attached account is not a demo, a red bar takes the top of the window and
-the mode selector locks to Alert-only. The refusal is enforced three layers down
-and does not depend on this bar existing — the bar is here so the operator is
-never surprised by it.
+the attached account is not a demo, a red bar takes the top of the window.
+Alert-only and Shadow rehearsal remain available; Demo Confirm is refused in
+the engine and adapter. The refusal does not depend on this bar existing — the
+bar is here so the operator is never surprised by it.
 """
 
 from __future__ import annotations
@@ -41,7 +41,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..app.engine import ScanEngine
 from ..app.maintenance import (
     backup_database,
     diagnostics,
@@ -53,6 +52,7 @@ from ..app.maintenance import (
     save_sessions,
     write_diagnostics,
 )
+from ..app.paths import data_directory
 from ..config import AppConfig
 from ..i18n import (
     LANGUAGES,
@@ -66,9 +66,7 @@ from ..i18n import (
     set_language,
     t,
 )
-from ..core.calendar_gate import CalendarGate
 from ..core.enums import DataState, RunMode, RuntimeKind, Timeframe
-from ..core.journal import Journal
 from ..core.dataquality import DataQualityMonitor
 from ..core.environment import Environment
 from ..core.notifications import NotificationRouter, Urgency
@@ -92,7 +90,7 @@ from .views.robot import RobotView
 from .views.scanner import ScannerView
 from .views.settings import SettingsView
 from .views.signal import SignalView
-from .worker import Action, ScanWorker
+from .worker import Action, ScanWorker, WorkerBootstrap
 
 # Icon, translation key, tooltip key. The labels are looked up at render time
 # rather than stored, so switching language relabels the rail without a restart.
@@ -122,30 +120,19 @@ VIEW_SIGNAL = 2
 VIEW_GUIDE = len(NAV) - 1
 
 
-def data_directory() -> Path:
-    """Where the database and logs live.
-
-    ``%LOCALAPPDATA%`` on Windows, XDG elsewhere. Deliberately not beside the
-    executable: a PyInstaller bundle may sit in Program Files, which a normal
-    user cannot write to, and a scanner that silently fails to persist is a
-    scanner with no evidence.
-    """
-    import os
-
-    if sys.platform == "win32":
-        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    else:
-        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    path = base / "AlikhandeScanner"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 class MainWindow(QMainWindow):
-    def __init__(self, engine: ScanEngine, config: AppConfig, runtime, persistence, repositories):
+    def __init__(
+        self,
+        worker: ScanWorker,
+        config: AppConfig,
+        runtime,
+        persistence,
+        declared_environment: str,
+    ):
         super().__init__()
-        self._engine = engine
-        self._repo = repositories
+        self._worker = worker
+        self._declared_environment = declared_environment
+        self._last_snapshot = None
 
         # The preset is restored before anything is built, because it decides
         # the thresholds every view then renders against. Loading it afterwards
@@ -154,10 +141,8 @@ class MainWindow(QMainWindow):
         preferences = load_preferences(data_directory())
         self._profile = Profile.parse(preferences.get("profile"))
         self._overrides = Overrides.from_dict(preferences.get("overrides"))
-        self._config = configure(
-            config, self._profile, self._overrides, self._outcome_summary()
-        )
-        self._statistics = Statistics(repositories, self._config.statistics)
+        self._config = config
+        self._statistics = Statistics(None, self._config.statistics)
 
         # ---- the operational subsystems ------------------------------------
         # Built before the views, because several of them are rendered on the
@@ -182,7 +167,7 @@ class MainWindow(QMainWindow):
         self._recovery = self._sessions.open(
             SessionRecord(
                 session_id=_uuid.uuid4().hex[:8].upper(),
-                environment=engine.environment,
+                environment=declared_environment,
                 version=VERSION,
                 started_at=started,
             )
@@ -227,7 +212,7 @@ class MainWindow(QMainWindow):
         self._report_recovery()
 
     # ------------------------------------------------------------------ views
-    def _build_views(self) -> None:
+    def _build_views(self) -> bool:
         """Construct every view and wire its signals.
 
         Separated from ``__init__`` so a language or theme change can throw
@@ -240,22 +225,32 @@ class MainWindow(QMainWindow):
         The views are pure renderers over a snapshot, so nothing is lost — the
         next scan pass repopulates them within one interval.
         """
-        while self._stack.count():
-            widget = self._stack.widget(0)
+        # Stop every child-owned worker before removing *any* widget. If a
+        # replay cannot join within its deadline, preserving the complete old
+        # view tree is safer than a half-rebuilt stack whose navigation indices
+        # point at different screens.
+        for index in range(self._stack.count()):
+            widget = self._stack.widget(index)
             # The backtest view owns a worker thread. Dropping the widget while
             # that thread runs leaves Qt destroying a live QThread, so give it a
             # chance to stop first — a language or theme switch can land here at
             # any moment, including mid-replay.
             shutdown = getattr(widget, "shutdown", None)
-            if callable(shutdown):
-                shutdown()
+            if callable(shutdown) and shutdown() is False:
+                self.statusBar().showMessage(
+                    "View rebuild postponed: the backtest worker is still stopping."
+                )
+                return False
+
+        while self._stack.count():
+            widget = self._stack.widget(0)
             self._stack.removeWidget(widget)
             widget.deleteLater()
 
         self._scanner = ScannerView(self._config)
         self._dashboard = DashboardView(self._config, self._statistics)
         self._signal = SignalView(self._config, self._statistics)
-        self._risk = RiskView(self._config, self._repo)
+        self._risk = RiskView(self._config)
         self._execution = ExecutionView(self._config)
         self._backtest = BacktestView(
             self._config,
@@ -303,6 +298,7 @@ class MainWindow(QMainWindow):
         self._operations.restore_requested.connect(self._run_restore)
         self._operations.diagnostics_requested.connect(self._write_diagnostics)
         self._operations.export_settings_requested.connect(self._export_settings)
+        return True
 
 
     def _on_environment_change(self, index: int) -> None:
@@ -319,7 +315,7 @@ class MainWindow(QMainWindow):
         next launch — which is also when the persistence routing is decided.
         """
         chosen = self._environment.itemData(index)
-        if not chosen or chosen == self._engine.environment:
+        if not chosen or chosen == self._declared_environment:
             return
         self._save_preferences()
         QMessageBox.information(
@@ -408,7 +404,7 @@ class MainWindow(QMainWindow):
             data_usable=self._quality.worst_grade() <= 2,
             news_blocked=snapshot.news_blind,
             may_trade=snapshot.may_trade,
-            execution_unresolved=self._engine.execution.has_unresolved(),
+            execution_unresolved=snapshot.execution_unresolved,
             candidates=actionable,
             armed_stale=bool(snapshot.armed_symbol) and snapshot.armed_seconds <= 0,
         )
@@ -446,7 +442,8 @@ class MainWindow(QMainWindow):
         """
         import time as _time
 
-        return getattr(self, "_last_now", 0) or int(_time.time())
+        snapshot = self._last_snapshot
+        return snapshot.now if snapshot is not None and snapshot.now else int(_time.time())
 
     def _report_recovery(self) -> None:
         """Say what happened to the previous session.
@@ -494,12 +491,12 @@ class MainWindow(QMainWindow):
 
         message = f'{t(notification.title_key)}{f" — {detail}" if detail else ""}'
         if notification.urgency >= Urgency.WARNING:
-            self._engine.journal.warn(subject.upper(), "", message, now)
+            self._post(Action("journal", ("warn", subject.upper(), message)))
             # 8 seconds: long enough to read, short enough that it does not sit
             # over the pass counter for the rest of the session.
             self.statusBar().showMessage(message, 8000)
         else:
-            self._engine.journal.info(subject.upper(), "", message, now)
+            self._post(Action("journal", ("info", subject.upper(), message)))
 
     # -------------------------------------------------------- operator actions
     def _on_robot_policy(self, policy) -> None:
@@ -535,6 +532,21 @@ class MainWindow(QMainWindow):
     def _run_restore(self, path: str) -> None:
         if not self._persistence.enabled:
             return
+        if self._last_snapshot is not None and self._last_snapshot.execution_unresolved:
+            self._operations.set_recovery_status(
+                "Restore refused while an execution is unresolved.", "critical"
+            )
+            return
+
+        # A hot file swap leaves the worker's open SQLite handle pointing at
+        # the displaced inode and splits evidence between two files. Stop and
+        # join the sole state owner first; restore then requires a fresh launch.
+        if not self._stop_scan_worker():
+            self._operations.set_recovery_status(
+                "Restore refused because the state-owner worker did not stop safely.",
+                "critical",
+            )
+            return
         result = restore_database(path, self._persistence.filename)
         if result.ok:
             self._operations.set_recovery_status(
@@ -548,19 +560,27 @@ class MainWindow(QMainWindow):
                 t("ops.restore.failed", error=result.error), "critical"
             )
         self._operations.set_backups(list_backups(self._backup_folder()))
+        QMessageBox.information(
+            self,
+            t("ops.restore"),
+            "The scan worker is stopped. Restart the application to open the restored database.",
+        )
+        self.close()
 
     def _write_diagnostics(self) -> None:
+        snapshot = self._last_snapshot
         bundle = diagnostics(
             version=VERSION,
-            environment=self._engine.environment,
+            environment=(
+                snapshot.environment if snapshot is not None else self._declared_environment
+            ),
             data_dir=data_directory(),
             link=self._supervisor.health,
             quality=self._quality.symbols(),
             sessions=self._sessions.history(),
-            errors=self._engine.execution.errors,
-            # From the snapshot, not the gateway: this runs on the UI thread.
-            account=getattr(self, "_last_account", None),
-            journal_entries=self._engine.journal.recent(200),
+            errors=snapshot.order_errors if snapshot is not None else None,
+            account=snapshot.account if snapshot is not None else None,
+            journal_entries=(snapshot.journal_entries[-200:] if snapshot is not None else []),
         )
         path = write_diagnostics(bundle, data_directory() / "diagnostics")
         self._operations.set_recovery_status(t("ops.diagnostics.ok", path=path), "good")
@@ -615,7 +635,7 @@ class MainWindow(QMainWindow):
         for name in Environment.ALL:
             self._environment.addItem(t(f"env.{name.lower()}"), name)
         self._environment.setCurrentIndex(
-            self._environment.findData(self._engine.environment)
+            self._environment.findData(self._declared_environment)
         )
         self._environment.currentIndexChanged.connect(self._on_environment_change)
         column.addWidget(self._environment)
@@ -709,7 +729,6 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------------- worker
     def _start_worker(self) -> None:
         self._thread = QThread(self)
-        self._worker = ScanWorker(self._engine, self._config.scan.scan_interval_ms)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.snapshot_ready.connect(self._on_snapshot)
@@ -771,7 +790,8 @@ class MainWindow(QMainWindow):
 
         selected = self._stack.currentIndex()
         selected_symbol = getattr(self._signal, "_symbol", "")
-        self._build_views()
+        if not self._build_views():
+            return
         if 0 <= selected < self._stack.count():
             self._stack.setCurrentIndex(selected)
         if selected_symbol:
@@ -826,7 +846,7 @@ class MainWindow(QMainWindow):
             "environment": (
                 self._environment.currentData()
                 if hasattr(self, "_environment")
-                else self._engine.environment
+                else self._declared_environment
             ),
             "view": self._stack.currentIndex(),
             "width": self.width(),
@@ -844,16 +864,33 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         self._save_preferences()
+        if not self._backtest.shutdown():
+            self.statusBar().showMessage(
+                "Close postponed: the backtest worker is still cancelling."
+            )
+            event.ignore()
+            return
+        if not self._stop_scan_worker():
+            self.statusBar().showMessage(
+                "Close postponed: the state-owner worker is still finishing a broker call."
+            )
+            event.ignore()
+            return
         # Closing the ledger IS the shutdown path whose absence marks a crash.
-        # It runs before the worker is stopped, so a hang in thread teardown
-        # still leaves this session recorded as having closed cleanly.
+        # It runs only after the worker actually stopped, so a timed-out join is
+        # never mis-recorded as a clean shutdown.
         self._sessions.close(getattr(self, "_last_now", 0))
         save_sessions(self._sessions.history(), data_directory())
-        self._backtest.shutdown()
-        self._worker.stop()
-        self._thread.quit()
-        self._thread.wait(3000)
         super().closeEvent(event)
+
+    def _stop_scan_worker(self) -> bool:
+        """Join the state owner; False means no file operation may proceed."""
+        self._worker.stop()
+        if self._thread.isRunning():
+            self._thread.quit()
+            if not self._thread.wait(5000):
+                return False
+        return not self._thread.isRunning()
 
     # ---------------------------------------------------------------- signals
     def _on_view_changed(self, index: int) -> None:
@@ -876,9 +913,8 @@ class MainWindow(QMainWindow):
         answers it with the defaults — Auto's opinion on no evidence is the
         same as Default's, which is the only defensible opinion to hold.
         """
-        if self._repo is None or not getattr(self._repo, "ready", False):
-            return {}
-        return self._repo.outcome_summary()
+        snapshot = self._last_snapshot
+        return dict(snapshot.outcome_summary) if snapshot is not None else {}
 
     def _on_settings_changed(self) -> None:
         """Apply a preset change and push it to the engine.
@@ -894,7 +930,7 @@ class MainWindow(QMainWindow):
         self._config = configure(
             self._config, self._profile, self._overrides, self._outcome_summary()
         )
-        self._statistics = Statistics(self._repo, self._config.statistics)
+        self._statistics = Statistics(None, self._config.statistics)
         self._post(Action("configure", config=self._config))
         self._save_preferences()
 
@@ -913,7 +949,8 @@ class MainWindow(QMainWindow):
         if application is not None:
             application.setStyleSheet(stylesheet())
         selected = self._stack.currentIndex()
-        self._build_views()
+        if not self._build_views():
+            return
         if 0 <= selected < self._stack.count():
             self._stack.setCurrentIndex(selected)
         self._save_preferences()
@@ -923,14 +960,18 @@ class MainWindow(QMainWindow):
 
     def _on_action_result(self, kind: str, ok: bool, reason: str) -> None:
         if ok:
-            self.statusBar().showMessage(
-                {
+            if kind == "confirm" and reason == "SHADOW_MODE":
+                message = "Shadow preflight recorded — no order was sent."
+            else:
+                message = {
                     "arm": "Plan armed — confirm to send.",
                     "confirm": "Order submitted.",
                     "acknowledge": "Unresolved execution cleared.",
                     "mode": "Run mode changed.",
                     "configure": t("set.applied"),
-                }.get(kind, "done"),
+                }.get(kind, "done")
+            self.statusBar().showMessage(
+                message,
                 6000,
             )
             return
@@ -942,7 +983,8 @@ class MainWindow(QMainWindow):
         # A refused mode change must not leave the selector showing a mode the
         # engine is not in — that discrepancy is exactly how somebody ends up
         # believing they armed something.
-        self._sync_mode(self._engine.mode)
+        if self._last_snapshot is not None:
+            self._sync_mode(self._last_snapshot.mode)
         if reason == "REAL_ACCOUNT_BLOCKED":
             QMessageBox.critical(
                 self,
@@ -981,19 +1023,13 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- render
     def _on_snapshot(self, snapshot) -> None:
+        self._last_snapshot = snapshot
         # Recorded so an offscreen render can wait for real data rather than
         # screenshotting the loading state.
         self._passes_seen = snapshot.passes
         # Kept so `closeEvent` can stamp the session with broker time rather
         # than the local clock, which every other timestamp in the ledger uses.
         self._last_now = snapshot.now
-        # The last pass, held whole. The handful of UI-thread consumers that
-        # run outside a pass — the diagnostics bundle, the recovery report,
-        # a backup taken from a button — read what the worker last observed
-        # rather than asking the gateway, which they are on the wrong thread
-        # to do.
-        self._last_snapshot = snapshot
-        self._last_account = snapshot.account
         account = snapshot.account
         live = snapshot.runtime.kind == RuntimeKind.LIVE
 
@@ -1051,8 +1087,10 @@ class MainWindow(QMainWindow):
                 t("banner.real", login=account.login, server=account.server)
             )
             self._banner.setVisible(True)
-            self._mode.setEnabled(False)
-            self._sync_mode(RunMode.ALERT_ONLY)
+            # Shadow is the supported real-account rehearsal and returns before
+            # the send boundary. Keep the selector usable; the engine refuses
+            # DEMO_CONFIRM and synchronises it back if selected.
+            self._mode.setEnabled(True)
         elif snapshot.requires_manual_review:
             self._banner_text.setText(t("banner.review"))
             self._banner.setVisible(True)
@@ -1072,26 +1110,17 @@ class MainWindow(QMainWindow):
         self._nav_items[VIEW_SCANNER].set_badge(len(actionable))
 
         # ---- views -----------------------------------------------------------
-        evidence = 0
-        if self._repo is not None and self._repo.ready:
-            evidence = int(self._repo.outcome_summary()["total"])
+        evidence = int(snapshot.outcome_summary.get("total", 0))
 
-        self._scanner.update_snapshot(snapshot, self._repo)
+        self._scanner.update_snapshot(snapshot)
         self._dashboard.update_view(snapshot, evidence)
         self._signal.update_view(snapshot)
 
-        # Everything here comes off the snapshot. Asking the engine would ask
-        # the gateway, and this method runs on the UI thread — the MetaTrader5
-        # package refuses calls from any thread but the one that attached, so
-        # those reads raised, were swallowed, and rendered as an account with no
-        # positions and no exposure. The accessors that allowed it are gone.
-        self._risk.update_view(
-            snapshot, snapshot.positions, snapshot.exposure, self._engine.guard_state
-        )
+        self._risk.update_view(snapshot)
         self._execution.update_view(
-            snapshot, self._engine.execution.current, snapshot.orders
+            snapshot, snapshot.execution, snapshot.working_orders
         )
-        self._health.update_view(snapshot, self._engine.journal)
+        self._health.update_view(snapshot)
 
         # ---- the operational subsystems, fed from this pass -----------------
         self._observe_link(snapshot)
@@ -1102,13 +1131,13 @@ class MainWindow(QMainWindow):
             link=self._supervisor.health,
             quality=self._quality.symbols(),
             sessions=self._sessions.history(),
-            journal=self._engine.journal.entries(),
+            journal=snapshot.journal_entries,
         )
 
         # The in-flight flag is written every pass rather than at shutdown,
         # because its whole value is being correct at the moment the process
         # dies — and a process that dies does not run its shutdown path.
-        in_flight = self._engine.execution.has_unresolved()
+        in_flight = snapshot.execution_unresolved
         self._sessions.mark_in_flight(snapshot.execution_message or "", in_flight)
         if in_flight != getattr(self, "_last_in_flight", None):
             self._last_in_flight = in_flight
@@ -1120,7 +1149,11 @@ class MainWindow(QMainWindow):
                 passes=fmt_count(snapshot.passes),
                 ms=fmt_count(int(snapshot.last_pass_ms)),
                 runtime=code(snapshot.runtime.kind.name),
-                risk=fmt_percent(snapshot.exposure_open_pct),
+                risk=(
+                    fmt_percent(snapshot.exposure_open_pct)
+                    if snapshot.positions_known
+                    else "?"
+                ),
             )
         )
 
@@ -1136,60 +1169,19 @@ def build_application(offline: bool = False, environment: str = ""):
     while reading synthetic bars would be the single most misleading thing this
     application could put on screen.
     """
-    config = AppConfig()
-    journal = Journal()
-
     stored = load_preferences(data_directory())
     declared = Environment.parse(environment or stored.get("environment"))
-
-    gateway = None
-    connected = False
-    if not offline:
-        # Probe, do not connect. The probe attaches, reads and detaches again,
-        # which answers the two questions this function needs — is a terminal
-        # there, and is its account a demo — without leaving a connection
-        # stamped with the UI thread as its owner. The real attachment happens
-        # on the scan worker, in `ScanWorker._connect`.
-        from ..adapters.mt5.gateway import MT5Gateway, probe_terminal
-
-        probe = probe_terminal()
-        if probe.available:
-            gateway = MT5Gateway()
-            connected = True
-            journal.info(
-                "MT5_AVAILABLE",
-                "",
-                f"terminal build {probe.build}, account {probe.login} @ {probe.server}",
-                0,
-            )
-            if not probe.trade_allowed:
-                journal.warn(
-                    "ALGO_TRADING_DISABLED",
-                    "",
-                    "Algo Trading is off in the terminal; no order can be sent until "
-                    "it is enabled in Tools -> Options -> Expert Advisors",
-                    0,
-                )
-        else:
-            journal.warn("MT5_UNAVAILABLE", "", probe.reason, 0)
-
-    if gateway is None:
-        from ..adapters.offline.gateway import OfflineGateway
-        from ..app.backtest import BACKTEST_TIMEFRAMES
-
-        synthetic = OfflineGateway()
-        synthetic.load_synthetic(config.symbols, BACKTEST_TIMEFRAMES, 400)
-        synthetic.set_cursor(
-            synthetic.series_length(config.symbols[0], BACKTEST_TIMEFRAMES[0])
-        )
-        gateway = synthetic
-        connected = False
-
-    if not connected:
+    if offline:
         declared = Environment.BACKTEST
 
+    # This describes the path the operator launched, not the result of probing
+    # it. Only the worker may touch MT5, so a live launch remains LIVE and
+    # honestly renders disconnected if attachment later fails; it never falls
+    # back to synthetic quotes under a live-looking window.
     runtime = detect_runtime(
-        connected=connected, replay=False, identity_seed=str(data_directory())
+        connected=not offline,
+        replay=False,
+        identity_seed=str(data_directory()),
     )
     # Routed by the declared environment, not by the runtime kind. A demo
     # session and a production session are both RuntimeKind.LIVE and would
@@ -1199,32 +1191,23 @@ def build_application(offline: bool = False, environment: str = ""):
         declared,
         data_directory(),
         session_identity=runtime.session_identity,
-        connected=connected,
+        connected=not offline,
     )
 
-    repositories = None
-    if persistence.enabled:
-        try:
-            from ..adapters.sqlite.database import Database
-            from ..adapters.sqlite.repositories import Repositories
-
-            database = Database()
-            database.open(persistence.filename)
-            repositories = Repositories(database)
-            journal.set_sink(repositories.log_event)
-        except Exception as error:
-            journal.error("DB_OPEN_FAILED", persistence.filename, str(error), 0)
-            if persistence.required:
-                raise
-
-    engine = ScanEngine(
-        gateway,
-        config,
-        runtime=runtime,
-        journal=journal,
-        repositories=repositories,
-        calendar=CalendarGate(None, config.news, journal),
-        environment=declared,
+    base_config = AppConfig()
+    profile = Profile.parse(stored.get("profile"))
+    overrides = Overrides.from_dict(stored.get("overrides"))
+    config = configure(base_config, profile, overrides, {})
+    worker = ScanWorker(
+        WorkerBootstrap(
+            config=config,
+            runtime=runtime,
+            persistence=persistence,
+            environment=declared,
+            calendar_path=str(data_directory() / "calendar.csv"),
+            offline=offline,
+        ),
+        config.scan.scan_interval_ms,
     )
 
     application = QApplication.instance() or QApplication(sys.argv)
@@ -1243,7 +1226,7 @@ def build_application(offline: bool = False, environment: str = ""):
         Qt.LayoutDirection.RightToLeft if is_rtl() else Qt.LayoutDirection.LeftToRight
     )
 
-    window = MainWindow(engine, config, runtime, persistence, repositories)
+    window = MainWindow(worker, config, runtime, persistence, declared)
     width = int(preferences.get("width", 1560))
     height = int(preferences.get("height", 960))
     window.resize(max(1180, width), max(720, height))

@@ -257,9 +257,9 @@ EN: dict[str, str] = {
         "here describes a real market."
     ),
     "banner.real": (
-        "REAL ACCOUNT DETECTED ({login} @ {server}). Execution is blocked "
-        "unconditionally and the mode selector is locked to Alert-only. This "
-        "build never trades a live account."
+        "REAL ACCOUNT DETECTED ({login} @ {server}). Order submission is blocked "
+        "unconditionally. Alert-only and Shadow rehearsal remain available; "
+        "Demo Confirm is refused."
     ),
     "banner.review": (
         "An execution could not be reconciled against the broker. Submission is "
@@ -381,6 +381,7 @@ EN: dict[str, str] = {
     "risk.meter.currency": "Dominant currency leg",
     "risk.meter.class": "Asset class",
     "risk.bounded": "ALL POSITIONS BOUNDED",
+    "risk.exposure.unknown": "BROKER POSITION STATE UNKNOWN",
     "risk.unbounded": (
         "{count} POSITION(S) WITHOUT A COMPUTABLE WORST CASE — every figure "
         "above is a LOWER BOUND and new risk is refused ({symbols})"
@@ -391,6 +392,11 @@ EN: dict[str, str] = {
     "risk.positions": "Open positions",
     "risk.no_positions": "No open positions",
     "risk.no_positions.detail": "Nothing has been opened by this application.",
+    "risk.positions.unknown": "Position state unavailable",
+    "risk.positions.unknown.detail": (
+        "The broker did not answer the positions query. Zero exposure is not "
+        "being inferred; new risk is refused until a real answer arrives."
+    ),
     "risk.no_outcomes": "No outcomes yet",
     "risk.no_outcomes.detail": (
         "A win rate appears only after {floor} resolved trades on the same "
@@ -459,6 +465,10 @@ EN: dict[str, str] = {
     "exec.policy": "Execution policy",
     "exec.orders": "Working orders",
     "exec.no_orders": "No working orders",
+    "exec.orders.unknown": "Working-order state unavailable",
+    "exec.orders.unknown.detail": (
+        "The broker did not answer the orders query; an empty list is not assumed."
+    ),
     "step.submitting": "Submitting",
     "step.accepted": "Accepted",
     "step.partial": "Partial",
@@ -853,9 +863,9 @@ FA: dict[str, str] = {
         "بازار واقعی را توصیف نمی‌کند."
     ),
     "banner.real": (
-        "حساب واقعی شناسایی شد ({login} @ {server}). اجرا بدون قید و شرط مسدود "
-        "است و انتخاب حالت روی «فقط هشدار» قفل شده. این نسخه هرگز روی حساب "
-        "واقعی معامله نمی‌کند."
+        "حساب واقعی شناسایی شد ({login} @ {server}). ارسال سفارش بدون قید و شرط "
+        "مسدود است. حالت‌های «فقط هشدار» و تمرین Shadow در دسترس‌اند؛ Demo Confirm "
+        "رد می‌شود."
     ),
     "banner.review": (
         "یک اجرا با بروکر تطبیق داده نشد. ارسال سفارش مسدود است تا در نمای «اجرا» "
@@ -975,6 +985,7 @@ FA: dict[str, str] = {
     "risk.meter.currency": "پرتکرارترین ارز",
     "risk.meter.class": "طبقهٔ دارایی",
     "risk.bounded": "همهٔ پوزیشن‌ها کران‌دار",
+    "risk.exposure.unknown": "وضعیت پوزیشن نزد بروکر نامعلوم است",
     "risk.unbounded": (
         "{count} پوزیشن بدون بدترین حالت قابل محاسبه — همهٔ اعداد بالا کران "
         "پایین‌اند و ریسک جدید رد می‌شود ({symbols})"
@@ -985,6 +996,11 @@ FA: dict[str, str] = {
     "risk.positions": "پوزیشن‌های باز",
     "risk.no_positions": "پوزیشن بازی نیست",
     "risk.no_positions.detail": "این برنامه چیزی باز نکرده است.",
+    "risk.positions.unknown": "وضعیت پوزیشن‌ها در دسترس نیست",
+    "risk.positions.unknown.detail": (
+        "بروکر به درخواست پوزیشن‌ها پاسخ نداد. ریسک صفر فرض نمی‌شود و تا رسیدن "
+        "پاسخ معتبر، ریسک جدید پذیرفته نخواهد شد."
+    ),
     "risk.no_outcomes": "هنوز نتیجه‌ای نیست",
     "risk.no_outcomes.detail": (
         "نرخ برد فقط پس از {floor} معاملهٔ بسته‌شده روی همان نماد، ستاپ و نسخهٔ "
@@ -1052,6 +1068,10 @@ FA: dict[str, str] = {
     "exec.policy": "سیاست اجرا",
     "exec.orders": "سفارش‌های فعال",
     "exec.no_orders": "سفارش فعالی نیست",
+    "exec.orders.unknown": "وضعیت سفارش‌های فعال در دسترس نیست",
+    "exec.orders.unknown.detail": (
+        "بروکر به درخواست سفارش‌ها پاسخ نداد؛ فهرست خالی فرض نمی‌شود."
+    ),
     "step.submitting": "در حال ارسال",
     "step.accepted": "پذیرفته‌شده",
     "step.partial": "پر شدن جزئی",

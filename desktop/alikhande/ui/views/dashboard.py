@@ -404,11 +404,14 @@ class DashboardView(QWidget):
         )
 
         cap = self._config.risk.max_open_risk_pct
-        self._tile_risk.set(
-            fmt_percent(snapshot.exposure_open_pct),
-            t("dash.tile.risk.caption", cap=fmt_percent(cap)),
-            PALETTE.critical if snapshot.exposure_open_pct > cap else None,
-        )
+        if getattr(snapshot, "positions_known", True):
+            self._tile_risk.set(
+                fmt_percent(snapshot.exposure_open_pct),
+                t("dash.tile.risk.caption", cap=fmt_percent(cap)),
+                PALETTE.critical if snapshot.exposure_open_pct > cap else None,
+            )
+        else:
+            self._tile_risk.set("?", t("risk.exposure.unknown"), PALETTE.critical)
 
         floor = self._config.statistics.min_outcome_sample
         if evidence_count == 0:

@@ -25,21 +25,31 @@ from ..core.calendar_gate import CalendarGate
 from ..core.enums import (
     DataState,
     Direction,
+    ExecState,
     NewsState,
     RunMode,
+    RuntimeKind,
     SignalState,
     SpreadState,
     Timeframe,
 )
 from ..core.environment import Environment, account_verdict, capabilities, send_refusal
-from ..core.execution import ExecutionEngine
+from ..core.execution import BrokerTruth, DealLedger, ExecutionEngine
 from ..core.features import extract as extract_features
 from ..core.guards import AccountRiskGuard, TradeGuards
 from ..core.journal import Journal
+from ..core.lifecycle import is_terminal
+from ..core.order_errors import ErrorTally
 from ..core.models import (
     AccountInfo,
     Bar,
+    ExecutionRecord,
+    ExposureSummary,
     NewsVerdict,
+    Outcome,
+    OrderInfo,
+    PositionInfo,
+    RiskState,
     RuntimeContext,
     SignalCandidate,
     SymbolSnapshot,
@@ -50,9 +60,11 @@ from ..core.models import (
 from ..core.outcomes import OutcomeTracker
 from ..core.ports import BrokerGateway
 from ..core.risk import RiskPlanner
-from ..core.signals import SignalEngine, StructuralContext
+from ..core.signals import SignalEngine, StructuralContext, evidence_signal_id
 from ..core.spread import SpreadTracker
 from ..core.statistics import Statistics
+from ..version import RULE_VERSION, SCORING_VERSION, VERSION
+from ..core.hashing import fnv1a64
 
 ANALYSED_TIMEFRAMES: tuple[Timeframe, ...] = (
     Timeframe.H4,
@@ -121,20 +133,23 @@ class EngineSnapshot:
     #: Empty when an order could be sent; a reason code otherwise. The UI shows
     #: this verbatim rather than deciding for itself whether sending is possible.
     send_lock: str = ""
-
-    # ---- broker state ------------------------------------------------------
-    # Carried here rather than fetched by the UI, and that is a threading
-    # requirement rather than a style preference. The MetaTrader5 package stamps
-    # an owner thread on attach and refuses every call from another, so a view
-    # that asked the engine for positions was asking the gateway from the UI
-    # thread — which raised, was swallowed by the engine's `_safe_*` wrappers,
-    # and rendered as "no open positions" against an account that had them.
-    #
-    # The accessors that made that possible have been removed, so the only way
-    # to read broker state is from a snapshot the worker produced.
-    positions: list = field(default_factory=list)
-    orders: list = field(default_factory=list)
-    exposure: object = None
+    # Complete read model. The GUI has no engine/repository/gateway reference;
+    # these values are deep-copied after the pass and never mutated again.
+    # Empty collections mean "authoritatively empty" only while the matching
+    # flag is true. A failed broker read is UNKNOWN, never zero exposure.
+    positions_known: bool = True
+    orders_known: bool = True
+    positions: list[PositionInfo] = field(default_factory=list)
+    working_orders: list[OrderInfo] = field(default_factory=list)
+    exposure: ExposureSummary = field(default_factory=ExposureSummary)
+    guard_state: RiskState = field(default_factory=RiskState)
+    execution: ExecutionRecord = field(default_factory=ExecutionRecord)
+    execution_unresolved: bool = False
+    journal_entries: list[object] = field(default_factory=list)
+    order_errors: ErrorTally = field(default_factory=ErrorTally)
+    outcome_summary: dict[str, float] = field(default_factory=dict)
+    opportunities: list[object] = field(default_factory=list)
+    persistence_ready: bool = False
 
 
 class ScanEngine:
@@ -164,8 +179,11 @@ class ScanEngine:
         self._guards = TradeGuards()
         self._account_guard = AccountRiskGuard(self._config.risk)
         self._arming = IntentArming(self._config.execution, self._journal)
+        ledger = DealLedger(self._repo.record_deal_once) if self._repo is not None else DealLedger()
+        if self._repo is not None:
+            ledger.load(self._repo.known_deal_tickets())
         self._execution = ExecutionEngine(
-            self._config, self._journal, environment=self._environment
+            self._config, self._journal, ledger, environment=self._environment
         )
         self._calendar = calendar or CalendarGate(None, self._config.news, self._journal)
         self._outcomes = OutcomeTracker()
@@ -179,9 +197,16 @@ class ScanEngine:
         self._views: dict[str, SymbolView] = {}
         self._passes = 0
         self._cursor = 0  # round-robin position for slicing
-        # Signals submitted and awaiting a confirmed fill price. An outcome
-        # cannot be opened until the broker says what it filled at.
-        self._pending_outcomes: dict[str, SignalCandidate] = {}
+        # One coherent account-state read is shared by scanning, risk and the
+        # UI snapshot for each pass. Re-reading in each consumer could combine
+        # mutually inconsistent moments or turn one failed read into an empty
+        # list in only part of the interface.
+        self._all_positions: list[PositionInfo] = []
+        self._all_orders: list[OrderInfo] = []
+        self._own_positions_cache: list[PositionInfo] = []
+        self._own_orders_cache: list[OrderInfo] = []
+        self._positions_known = False
+        self._orders_known = False
 
         if self._repo is not None:
             self._execution.set_persistence(self._repo.save_execution)
@@ -194,17 +219,6 @@ class ScanEngine:
     @property
     def environment(self) -> str:
         return self._environment
-
-    @property
-    def gateway(self):
-        """The broker gateway, for lifecycle only.
-
-        The worker needs it to attach on its own thread and to re-attach on a
-        reconnect. Nothing else should reach through here: every consumer of
-        market data reads the snapshot the engine produced, which is what keeps
-        gateway access on one thread.
-        """
-        return self._gateway
 
     @property
     def execution(self) -> ExecutionEngine:
@@ -226,9 +240,6 @@ class ScanEngine:
     def guard_state(self):
         return self._account_guard.state
 
-    # Public read accessors for the UI. The window used to reach into private
-    # attributes for these, which quietly made every internal rename a UI break
-    # and blurred the rule that the UI only ever reads what the engine offers.
     def server_time(self, fallback: int = 0) -> int:
         """Broker server time, or ``fallback`` when the gateway cannot say.
 
@@ -241,12 +252,6 @@ class ScanEngine:
             return self._gateway.server_time()
         except Exception:
             return fallback
-
-    # `own_positions`, `working_orders` and `exposure_summary` used to live
-    # here. They are gone rather than deprecated: each one reached the gateway,
-    # every caller was on the UI thread, and leaving them available meant the
-    # next view that needed positions would reintroduce the same defect. The
-    # snapshot carries all three now.
 
     def set_mode(self, mode: RunMode, now: int) -> tuple[bool, str]:
         """Change run mode.
@@ -269,7 +274,7 @@ class ScanEngine:
             account = self._safe_account()
             if account is None:
                 return False, "NO_ACCOUNT"
-            if not account.is_demo:
+            if mode == RunMode.DEMO_CONFIRM and not account.is_demo:
                 return False, "REAL_ACCOUNT_BLOCKED"
         if mode == RunMode.DEMO_CONFIRM and self._repo is None:
             # Without persistence there is no de-duplication across restarts and
@@ -301,7 +306,7 @@ class ScanEngine:
         ``initialize`` established. Changing that takes a restart, and the
         settings view says so.
         """
-        if self._execution.requires_manual_review():
+        if self._execution.has_unresolved():
             return False, "EXECUTION_UNRESOLVED"
         if self._arming.is_armed(now):
             return False, "INTENT_ARMED"
@@ -313,7 +318,17 @@ class ScanEngine:
         self._signals = SignalEngine(self._config)
         self._risk = RiskPlanner(self._config)
         self._statistics = Statistics(self._repo, self._config.statistics)
+        # Changing a preset must not reset the persisted drawdown/daily-loss
+        # baseline. Rebuild the policy around an exact copy of the state that
+        # was in force immediately before this action.
+        import copy
+
+        previous_guard = copy.deepcopy(self._account_guard.state)
         self._account_guard = AccountRiskGuard(self._config.risk)
+        account = self._safe_account()
+        self._account_guard.initialize(
+            account.equity if account is not None else 0.0, now, previous_guard
+        )
         self._journal.info(
             "CONFIG_CHANGED",
             "",
@@ -328,6 +343,7 @@ class ScanEngine:
     def initialize(self, now: int) -> None:
         """Resolve symbols, load specs, restore state."""
         self._calendar.apply_runtime_policy(self._runtime, now)
+        self._ensure_run(now)
 
         for requested in self._config.symbols:
             view = SymbolView(requested=requested)
@@ -354,13 +370,130 @@ class ScanEngine:
             self._views[requested] = view
 
         account = self._safe_account()
+        # Establish a real exposure answer before any direct API caller can
+        # arm. The worker performs a pass before consuming actions, but the
+        # engine contract itself should be safe without relying on that caller.
+        self._refresh_broker_state(now)
         equity = account.equity if account else 0.0
         stored = self._repo.load_risk_state() if self._repo is not None else None
         self._account_guard.initialize(equity, now, stored)
 
         if self._repo is not None:
-            self._execution.recover_after_restart(self._repo.load_unresolved_execution(), now)
+            recovery = self._repo.load_unresolved_execution()
+            awaiting_outcome = False
+            if recovery is None:
+                recovery = self._repo.load_execution_awaiting_outcome()
+                awaiting_outcome = recovery is not None
+                if recovery is not None:
+                    # A completed fill needs exact deals to reconstruct prices,
+                    # P/L and close reason. A rejection/cancellation already is
+                    # its own complete, non-scorable broker disposition.
+                    if (
+                        recovery.state == ExecState.COMPLETED
+                        and recovery.mode != RunMode.SHADOW
+                    ):
+                        recovery.terminal = False
+            shadow_disposition = bool(
+                awaiting_outcome
+                and recovery is not None
+                and recovery.state == ExecState.COMPLETED
+                and recovery.mode == RunMode.SHADOW
+            )
+            retain_disposition = bool(
+                awaiting_outcome
+                and recovery is not None
+                and (
+                    recovery.state in (ExecState.REJECTED, ExecState.CANCELLED)
+                    or shadow_disposition
+                )
+            )
+            self._execution.recover_after_restart(
+                recovery, now, reconcile=not retain_disposition
+            )
+            if recovery is not None:
+                if shadow_disposition:
+                    self._apply_shadow_outcome(now)
+                elif retain_disposition:
+                    self._apply_broker_truth(
+                        BrokerTruth(
+                            resolved=True,
+                            state=recovery.state,
+                            terminal=True,
+                            source="PERSISTED_SEND_RESULT",
+                            detail=recovery.message,
+                        ),
+                        now,
+                    )
+                else:
+                    persisted_truth = self._execution.reconcile_persisted_deals(
+                        self._repo.deals_for_execution(recovery.execution_id), now
+                    )
+                    if persisted_truth is not None and persisted_truth.terminal:
+                        self._apply_broker_truth(persisted_truth, now)
             self._journal.extend(self._repo.recent_events(100))
+
+    def refresh_gateway_state(self, now: int) -> None:
+        """Rebuild broker metadata after a successful worker-owned reconnect.
+
+        An initial attach can fail while the terminal is still starting.  The
+        old reconnect path repaired the IPC handle but left every symbol marked
+        unresolved forever because :meth:`initialize` is intentionally run only
+        once.  Refresh only the connection-derived metadata here; execution and
+        recovery state remain untouched.
+        """
+        for requested, view in self._views.items():
+            if not view.resolved:
+                try:
+                    resolved = self._gateway.resolve_symbol(requested)
+                except Exception as error:
+                    view.last_error = str(error)
+                    continue
+                if resolved is None:
+                    view.last_error = "SYMBOL_NOT_FOUND"
+                    continue
+                view.symbol = resolved
+                view.resolved = True
+                view.last_error = ""
+                self._resolved[requested] = resolved
+                self._spread.setdefault(resolved, SpreadTracker(self._config.scan))
+
+            try:
+                spec = self._gateway.symbol_spec(view.symbol)
+            except Exception as error:
+                view.last_error = f"SPEC_UNAVAILABLE({type(error).__name__})"
+                continue
+            if spec is None or not spec.ready:
+                view.last_error = "NO_SYMBOL_SPEC"
+                continue
+            self._register_spec(spec, now)
+            view.spec = spec
+
+        account = self._safe_account()
+        if account is not None and self._account_guard.state.peak_equity <= 0.0:
+            stored = self._repo.load_risk_state() if self._repo is not None else None
+            self._account_guard.initialize(account.equity, now, stored)
+        self._refresh_broker_state(now)
+        self._ensure_run(now)
+
+    def _ensure_run(self, now: int) -> None:
+        """Create provenance only after a real gateway actually answered."""
+        if self._repo is None or self._run_id or not self._safe_connected():
+            return
+        import uuid
+
+        self._run_id = f"LIVE-{uuid.uuid4().hex.upper()}"
+        self._repo.start_run(
+            run_id=self._run_id,
+            kind=self._runtime.kind.name,
+            is_production=self._runtime.is_production,
+            app_version=VERSION,
+            rule_version=RULE_VERSION,
+            scoring_version=SCORING_VERSION,
+            parameter_hash=fnv1a64(self._config.parameter_fingerprint_source()),
+            symbols=",".join(self._config.symbols),
+            started_at=now,
+            note=f"declared environment {self._environment}",
+        )
 
     def _register_spec(self, spec: SymbolSpec, now: int) -> None:
         """Store a spec and shout if the broker changed it under us.
@@ -390,6 +523,47 @@ class ScanEngine:
         except Exception:
             return None
 
+    def _refresh_broker_state(self, now: int) -> None:
+        """Read account exposure once and preserve failure as UNKNOWN.
+
+        MetaTrader returns an empty tuple when the answer is truly empty and
+        ``None`` on failure; the adapter raises for the latter. This layer must
+        not undo that distinction by catching the error and returning ``[]``.
+        """
+        try:
+            self._all_positions = list(self._gateway.positions(None))
+            self._positions_known = True
+        except Exception as error:
+            self._all_positions = []
+            self._positions_known = False
+            self._journal.warn(
+                "BROKER_POSITIONS_UNAVAILABLE",
+                "",
+                f"positions read failed: {type(error).__name__}: {error}",
+                now,
+            )
+
+        try:
+            self._all_orders = list(self._gateway.orders(None))
+            self._orders_known = True
+        except Exception as error:
+            self._all_orders = []
+            self._orders_known = False
+            self._journal.warn(
+                "BROKER_ORDERS_UNAVAILABLE",
+                "",
+                f"orders read failed: {type(error).__name__}: {error}",
+                now,
+            )
+
+        magic = self._config.execution.magic
+        self._own_positions_cache = [
+            position for position in self._all_positions if position.magic == magic
+        ]
+        self._own_orders_cache = [
+            order for order in self._all_orders if order.magic == magic
+        ]
+
     # ------------------------------------------------------------------- pass
     def run_pass(self, now: int) -> EngineSnapshot:
         """One complete scan pass over a slice of the symbol list."""
@@ -398,10 +572,17 @@ class ScanEngine:
         started = _time.perf_counter()
         self._passes += 1
         self._arming.sweep(now)
+        self._ensure_run(now)
 
         account = self._safe_account()
         equity = account.equity if account else 0.0
         may_trade, guard_codes = self._account_guard.check(equity, now)
+        self._refresh_broker_state(now)
+        if not self._positions_known:
+            guard_codes.append("BROKER_POSITIONS_UNAVAILABLE")
+        if not self._orders_known:
+            guard_codes.append("BROKER_ORDERS_UNAVAILABLE")
+        may_trade = may_trade and self._positions_known and self._orders_known
         if self._repo is not None:
             self._repo.save_risk_state(self._account_guard.state)
 
@@ -414,15 +595,12 @@ class ScanEngine:
             self._cursor = (self._cursor + slice_size) % len(resolved_symbols)
 
         if self._execution.has_unresolved():
-            self._execution.reconcile(self._gateway, now)
+            truth = self._execution.reconcile(self._gateway, now)
+            if truth is not None and truth.resolved:
+                self._apply_broker_truth(truth, now)
 
-        self._track_fills(now)
-        self._resolve_outcomes(now)
-
-        # Read once and reused for both the exposure figure and the snapshot.
-        # Two calls would mean the number the operator sees and the list it is
-        # derived from could come from different moments.
-        positions = self._own_positions()
+        positions = list(self._own_positions_cache)
+        orders = list(self._own_orders_cache)
         exposure = self._risk.exposure(
             "", positions, self._specs, equity if equity > 0 else 1.0
         )
@@ -435,7 +613,7 @@ class ScanEngine:
         severity, account_code = account_verdict(
             self._environment, account.is_demo if account is not None else None
         )
-        return EngineSnapshot(
+        snapshot = EngineSnapshot(
             now=now,
             connected=self._safe_connected(),
             runtime=self._runtime,
@@ -457,77 +635,44 @@ class ScanEngine:
             account_severity=severity,
             account_code=account_code,
             send_lock=send_refusal(self._environment, self._mode),
+            positions_known=self._positions_known,
+            orders_known=self._orders_known,
             positions=positions,
-            orders=self._safe_orders(),
+            working_orders=orders,
             exposure=exposure,
+            guard_state=self._account_guard.state,
+            execution=current,
+            execution_unresolved=self._execution.has_unresolved(),
+            journal_entries=self._journal.entries(),
+            order_errors=self._errors_snapshot(),
+            outcome_summary=(
+                self._repo.outcome_summary() if self._repo is not None else {}
+            ),
+            persistence_ready=self._repo is not None and self._repo.ready,
         )
+        # Ranking reads evidence, so it is part of the worker-produced read
+        # model too. Importing lazily avoids an engine/scanner module cycle.
+        from .scanner import build as build_opportunities
 
-    def _track_fills(self, now: int) -> None:
-        """Open an outcome once the broker has confirmed what it filled at.
+        snapshot.opportunities = build_opportunities(snapshot, self._config, self._repo)
 
-        The gap this closes: `confirm()` used to open the outcome immediately,
-        at the planned entry. That is a price nobody traded — the broker fills
-        somewhere else, and on a demo account "somewhere else" is exactly the
-        slippage the evidence base exists to measure.
-        """
-        if not self._pending_outcomes:
-            return
-        record = self._execution.current
-        if record.fill_price <= 0.0 or record.filled_volume <= 0.0:
-            return
+        # SymbolView, Journal and execution records are mutable engine state.
+        # A shallow list copy still lets the next worker pass mutate objects the
+        # GUI is currently painting. Deep copy is the actual thread boundary.
+        import copy
 
-        signal = self._pending_outcomes.get(record.signal_id)
-        if signal is None:
-            return
-        if self._outcomes.open(signal, record.fill_price, now):
-            self._journal.info(
-                "OUTCOME_OPENED",
-                signal.symbol,
-                f"tracking {signal.signal_id} from the filled price {record.fill_price}"
-                f" (planned {signal.preferred_entry})",
-                now,
-            )
-        # Removed either way. A signal whose fill produced no usable risk
-        # distance is refused by the tracker, and retrying it every pass would
-        # journal the same refusal forever.
-        self._pending_outcomes.pop(record.signal_id, None)
+        return copy.deepcopy(snapshot)
 
-    def _resolve_outcomes(self, now: int) -> None:
-        """Score tracked signals against the newest closed bar, and persist.
+    def _errors_snapshot(self) -> ErrorTally:
+        import copy
 
-        Nothing outside the backtest wrote to the ``outcomes`` table. The
-        infrastructure existed, the tracker existed, and in a live or demo
-        session it was never called — so the evidence base could only ever be
-        filled by a replay, and the "closed outcome loop" was closed in exactly
-        one of the two places that matter.
-        """
-        if not self._outcomes.tracked:
-            return
-        for view in self._views.values():
-            if not view.resolved or not view.bars:
-                continue
-            for outcome, state in self._outcomes.update(view.symbol, view.bars[-1], now):
-                if self._repo is not None:
-                    self._repo.save_outcome(outcome)
-                    self._repo.update_signal_state(outcome.signal_id, state)
-                self._journal.info(
-                    "OUTCOME_RESOLVED",
-                    view.symbol,
-                    f"{outcome.signal_id} {state.name} at {outcome.realized_r:+.2f}R",
-                    now,
-                )
+        return copy.deepcopy(self._execution.errors)
 
     def _safe_connected(self) -> bool:
         try:
             return self._gateway.is_connected()
         except Exception:
             return False
-
-    def _own_positions(self):
-        try:
-            return self._gateway.positions(self._config.execution.magic)
-        except Exception:
-            return []
 
     def _scan_symbol(self, view: SymbolView, account: AccountInfo | None, now: int) -> None:
         symbol = view.symbol
@@ -613,21 +758,37 @@ class ScanEngine:
         self._statistics.enrich(signal)
         if spec.fingerprint:
             signal.broker_spec_hash = spec.fingerprint
+        # The pure signal engine creates a structural id before it knows the
+        # contract. Evidence identity additionally includes parameter and broker
+        # fingerprints, so a changed experiment can never inherit an older
+        # signal's terminal state or outcome.
+        signal.signal_id = evidence_signal_id(signal, signal.broker_spec_hash)
         view.signal = signal
 
         verdict = self._calendar.evaluate(symbol, self._runtime, now)
         view.news = verdict
         view.news_blocks = self._calendar.blocks_trading(verdict)
 
+        stored_state = None
         if self._repo is not None and signal.direction != Direction.NONE:
             if not self._repo.signal_exists(signal.signal_id):
                 self._repo.save_signal(signal, self._run_id)
                 self._repo.save_features(
                     signal.signal_id, extract_features(context, signal, snapshot)
                 )
+            stored_state = self._repo.signal_state(signal.signal_id)
 
         # ---- planning ---------------------------------------------------------
         view.plan = None
+        # One structural signal gets one execution lifecycle. A terminal signal
+        # may not be previewed and submitted again: outcomes are intentionally
+        # one-per-signal, so a retry would either overwrite evidence or create
+        # a second execution whose result could never be persisted honestly.
+        if stored_state == SignalState.ACTIVE or (
+            stored_state is not None and is_terminal(stored_state)
+        ):
+            signal.state = stored_state
+            return
         if signal.direction == Direction.NONE or signal.hard_blocked:
             return
         if view.news_blocks:
@@ -639,7 +800,20 @@ class ScanEngine:
             return
         if account is None:
             return
-        if self._guards.has_exposure(symbol, self._own_positions(), self._safe_orders()):
+        if not self._positions_known or not self._orders_known:
+            signal.validation_codes.extend(
+                code
+                for known, code in (
+                    (self._positions_known, "BROKER_POSITIONS_UNAVAILABLE"),
+                    (self._orders_known, "BROKER_ORDERS_UNAVAILABLE"),
+                )
+                if not known and code not in signal.validation_codes
+            )
+            return
+        # Use the unfiltered account view. On a netting account, foreign
+        # same-symbol exposure would merge with this execution and make later
+        # outcome attribution impossible without guessing.
+        if self._guards.has_exposure(symbol, self._all_positions, self._all_orders):
             signal.validation_codes.append("ALREADY_EXPOSED")
             return
 
@@ -648,7 +822,7 @@ class ScanEngine:
             gateway=self._gateway,
             account=account,
             spec=spec,
-            own_positions=self._own_positions(),
+            own_positions=self._own_positions_cache,
             specs=self._specs,
             now=now,
         )
@@ -662,12 +836,6 @@ class ScanEngine:
                     self._repo.update_signal_state(signal.signal_id, SignalState.PREVIEWED)
             signal.state = SignalState.PREVIEWED
 
-    def _safe_orders(self):
-        try:
-            return self._gateway.orders(self._config.execution.magic)
-        except Exception:
-            return []
-
     def _required_bars(self, timeframe: Timeframe) -> int:
         """Enough history for the slow EMA, ADX warm-up and the ATR median."""
         needed = max(
@@ -679,11 +847,19 @@ class ScanEngine:
 
     # -------------------------------------------------------------- execution
     def arm(self, symbol: str, now: int) -> tuple[bool, str]:
+        if self._execution.has_unresolved():
+            return False, "EXECUTION_ALREADY_UNRESOLVED"
+        if not self._positions_known or not self._orders_known:
+            return False, "BROKER_STATE_UNAVAILABLE"
         view = next((v for v in self._views.values() if v.symbol == symbol), None)
         if view is None or view.plan is None or not view.plan.valid:
             return False, "NO_VALID_PLAN"
-        if self._mode != RunMode.DEMO_CONFIRM:
-            return False, "ARMING_REQUIRES_DEMO_CONFIRM_MODE"
+        if self._repo is not None:
+            stored = self._repo.signal_state(view.plan.signal_id)
+            if stored is not None and is_terminal(stored):
+                return False, "SIGNAL_ALREADY_TERMINAL"
+        if self._mode not in (RunMode.SHADOW, RunMode.DEMO_CONFIRM):
+            return False, "ARMING_REQUIRES_CONFIRMABLE_MODE"
         if not self._arming.arm(view.plan, now):
             return False, "ARM_REFUSED"
         return True, ""
@@ -692,36 +868,183 @@ class ScanEngine:
         """Consume the armed intent and submit. The only path to an order."""
         view = next((v for v in self._views.values() if v.symbol == symbol), None)
         if view is None or view.plan is None or not view.plan.valid:
+            self._arming.disarm("CURRENT_PLAN_UNAVAILABLE", now)
             return False, "NO_VALID_PLAN"
+
+        if self._repo is not None:
+            stored = self._repo.signal_state(view.plan.signal_id)
+            if stored is not None and is_terminal(stored):
+                self._arming.disarm("SIGNAL_ALREADY_TERMINAL", now)
+                return False, "SIGNAL_ALREADY_TERMINAL"
 
         confirmed, reason = self._arming.confirm(view.plan, now)
         if not confirmed:
             return False, reason
 
+        # Calendar is queried again at the last responsible moment. The pass
+        # that produced the plan already checked it, but an external CSV may be
+        # updated between paint and Confirm; a stale CLEAR is not a clearance.
+        news = self._calendar.evaluate(symbol, self._runtime, now)
+        if self._calendar.blocks_trading(news):
+            return False, f"NEWS_{news.state.name}"
+
+        account = self._safe_account()
         may_trade, codes = self._account_guard.check(
-            self._safe_account().equity if self._safe_account() else 0.0, now
+            account.equity if account is not None else 0.0, now
         )
         if not may_trade:
             return False, ";".join(codes)
 
-        account = self._safe_account()
         spec = self._specs.get(symbol)
         accepted, submit_reason = self._execution.submit(
             view.plan, self._mode, gateway=self._gateway, account=account, spec=spec, now=now
         )
-        if accepted and view.signal is not None:
+        if accepted and view.signal is not None and not self._execution.current.terminal:
             self._account_guard.register_risk_used(view.plan.risk_percent, now)
-            # The outcome is NOT opened here. It used to be, at
-            # ``view.plan.entry`` — the price the plan asked for, recorded
-            # before the broker had said anything at all. Every realised R in
-            # the evidence base was then measured from a price that was never
-            # traded, off by the slippage, in the direction that flatters the
-            # result. It is opened in `_track_fills` instead, on the price the
-            # broker reports, and only once a fill is confirmed.
-            self._pending_outcomes[view.signal.signal_id] = view.signal
-            if self._repo is not None:
-                self._repo.update_signal_state(view.signal.signal_id, SignalState.ACTIVE)
+        # A broker rejection/cancellation is already terminal and factual. It
+        # produces a non-scorable NOT_FILLED outcome immediately; a successful
+        # send waits for reconciliation to verify the actual fill first.
+        if self._execution.current.terminal:
+            if submit_reason == "SHADOW_MODE":
+                self._apply_shadow_outcome(now)
+            else:
+                self._apply_broker_truth(
+                    BrokerTruth(
+                        resolved=True,
+                        state=self._execution.current.state,
+                        terminal=True,
+                        source="SEND_RESULT",
+                        detail=self._execution.current.message,
+                    ),
+                    now,
+                )
         return accepted, submit_reason
+
+    def _apply_shadow_outcome(self, now: int) -> None:
+        """Persist a rehearsal as rehearsal, never as broker evidence."""
+        record = self._execution.current
+        if self._repo is None or not record.signal_id:
+            return
+        if self._repo.outcome_for_execution(record.execution_id) is not None:
+            return
+        outcome = Outcome(
+            signal_id=record.signal_id,
+            execution_id=record.execution_id,
+            result="SHADOW",
+            realized_r=0.0,
+            mfe_r=None,
+            mae_r=None,
+            closed_at=record.created_at or now,
+            source="SHADOW",
+            evidence_quality="PREFLIGHT_ONLY",
+            valid_for_statistics=False,
+            **self._repo.signal_metadata(record.signal_id),
+        )
+        self._repo.save_outcome_with_state(outcome, SignalState.NOT_FILLED)
+
+    def _apply_broker_truth(self, truth: BrokerTruth, now: int) -> None:
+        """Advance lifecycle and persist one outcome from exact broker truth."""
+        record = self._execution.current
+        if self._repo is None or not record.signal_id:
+            return
+
+        if truth.state in (
+            ExecState.PARTIALLY_FILLED,
+            ExecState.FILLED,
+            ExecState.POSITION_ACTIVE,
+        ):
+            self._repo.update_signal_state(record.signal_id, SignalState.ACTIVE)
+            return
+        if not truth.terminal:
+            return
+        if self._repo.outcome_for_execution(record.execution_id) is not None:
+            return
+
+        metadata = self._repo.signal_metadata(record.signal_id)
+        if truth.state in (ExecState.CANCELLED, ExecState.REJECTED):
+            result = "NOT_FILLED"
+            signal_state = SignalState.NOT_FILLED
+            valid = False
+        else:
+            reason = truth.close_reason.upper()
+            if reason == "TP":
+                result, signal_state = "TP", SignalState.TP
+            elif reason == "SL":
+                result, signal_state = "SL", SignalState.SL
+            else:
+                result, signal_state = "CLOSED", SignalState.CLOSED
+            valid = result in ("TP", "SL")
+
+        # A process can miss the visible ACTIVE phase while exact broker deals
+        # prove that the position both opened and closed. Persist the implied
+        # factual transition before the terminal one so lifecycle validation
+        # remains strict without losing crash-recovered truth.
+        if truth.state == ExecState.COMPLETED:
+            self._repo.update_signal_state(record.signal_id, SignalState.ACTIVE)
+
+        filled = truth.filled_volume or record.filled_volume
+        risk_amount = 0.0
+        if record.requested_volume > 0.0 and filled > 0.0:
+            risk_amount = record.initial_risk_amount * min(
+                1.0, filled / record.requested_volume
+            )
+        exact_prices = truth.entry_price > 0.0 and truth.exit_price > 0.0
+        broker_close_time_known = not truth.deals or truth.closed_at > 0
+        valid = (
+            valid
+            and risk_amount > 0.0
+            and exact_prices
+            and filled > 0.0
+            and broker_close_time_known
+        )
+        realized_r = truth.net_profit / risk_amount if risk_amount > 0.0 else 0.0
+
+        outcome = Outcome(
+            signal_id=record.signal_id,
+            execution_id=record.execution_id,
+            result=result,
+            realized_r=realized_r,
+            mfe_r=None,
+            mae_r=None,
+            # A deal-backed outcome uses only the broker timestamp. Falling
+            # back to reconciliation time would invent when the trade closed.
+            # A send disposition has no deal and happened when its intent was
+            # created, which is persisted even across restart recovery.
+            closed_at=(
+                truth.closed_at
+                if truth.deals
+                else (record.created_at or now)
+            ),
+            source="LIVE_DEMO",
+            evidence_quality="BROKER_DEALS" if truth.deals else "BROKER_DISPOSITION",
+            entry_price=truth.entry_price,
+            exit_price=truth.exit_price,
+            filled_volume=filled,
+            net_profit=truth.net_profit,
+            valid_for_statistics=valid,
+            **metadata,
+        )
+        guard_after = None
+        if truth.state == ExecState.COMPLETED:
+            # Outcome, lifecycle and the loss-streak state are one durability
+            # fact. Build the next guard state on a copy, commit it in the same
+            # SQLite transaction, then publish it in memory only on success.
+            import copy
+
+            guard_after = copy.deepcopy(self._account_guard)
+            guard_after.register_closed_profit(truth.net_profit, now)
+        if self._repo.save_outcome_with_state(
+            outcome,
+            signal_state,
+            risk_state=guard_after.state if guard_after is not None else None,
+        ):
+            if guard_after is not None:
+                self._account_guard = guard_after
+
+    def shutdown(self, now: int) -> None:
+        """Finish provenance while still on the gateway/database owner thread."""
+        if self._repo is not None and self._run_id:
+            self._repo.finish_run(self._run_id, now)
 
     def acknowledge_unresolved(self, note: str, now: int) -> bool:
         return self._execution.acknowledge_unresolved(note, now)

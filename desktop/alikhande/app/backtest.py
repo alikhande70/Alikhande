@@ -27,17 +27,17 @@ overstates itself is worse than none:
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..config import AppConfig
 from ..core.enums import Direction, RuntimeKind, SetupType, SignalState, Timeframe
 from ..core.features import extract as extract_features
-from ..core.hashing import fnv1a
+from ..core.hashing import fnv1a, fnv1a64
 from ..core.journal import Journal
 from ..core.models import Bar, Outcome, RuntimeContext, SymbolSnapshot
 from ..core.outcomes import OutcomeTracker
 from ..core.risk import RiskPlanner
-from ..core.signals import SignalEngine
+from ..core.signals import SignalEngine, evidence_signal_id
 from ..core.spread import SpreadTracker
 from ..core.statistics import wilson
 from ..adapters.offline.gateway import OfflineGateway
@@ -49,6 +49,10 @@ BACKTEST_TIMEFRAMES: tuple[Timeframe, ...] = (
     Timeframe.H1,
     Timeframe.H4,
 )
+
+
+class RunIdCollision(ValueError):
+    """The requested replay id already belongs to pre-existing evidence."""
 
 
 @dataclass
@@ -76,6 +80,9 @@ class BacktestResult:
     # broken one — but the report says so, because a truncated backtest quoted
     # as a finished one is a silently smaller sample.
     cancelled: bool = False
+    # None: persistence was not requested. False: cancelled/failed staging was
+    # discarded. True: the complete run atomically replaced prior replay data.
+    evidence_committed: bool | None = None
     rejection_reasons: dict[str, int] = field(default_factory=dict)
     setups: dict[str, int] = field(default_factory=dict)
 
@@ -146,6 +153,12 @@ class BacktestResult:
             add("     describes the bars that were replayed before it stopped,")
             add("     which is a SMALLER SAMPLE than was asked for. **")
             add("")
+        if self.evidence_committed is False:
+            add("  EVIDENCE NOT COMMITTED — previous valid replay evidence was preserved.")
+            add("")
+        elif self.evidence_committed is True:
+            add("  EVIDENCE COMMITTED — complete replay replaced prior replay evidence atomically.")
+            add("")
         add("  WHAT THIS DOES AND DOES NOT ESTABLISH")
 
         if self.trades == 0:
@@ -200,6 +213,54 @@ class Backtester:
         repositories=None,
         run_id: str = "",
         progress=None,
+        cancelled=None,
+    ) -> BacktestResult:
+        """Failure-safe public entrypoint.
+
+        Copy-on-success staging protects the UI/CLI target. This second layer
+        protects direct library callers too: an exception removes only the new
+        namespaced run and cannot touch evidence that pre-dated it.
+        """
+        if not run_id:
+            import uuid
+
+            run_id = f"REPLAY-{uuid.uuid4().hex.upper()}"
+        # A caller-supplied id must never alias prior valid evidence. This check
+        # is outside the cleanup ``try`` so a duplicate is refused without the
+        # exception handler deleting the pre-existing run it did not create.
+        if repositories is not None and repositories.run_exists(run_id):
+            raise RunIdCollision(f"backtest run id already exists: {run_id}")
+        try:
+            return self._run(
+                gateway,
+                symbols,
+                warmup_bars=warmup_bars,
+                max_steps=max_steps,
+                step=step,
+                data_source=data_source,
+                repositories=repositories,
+                run_id=run_id,
+                progress=progress,
+                cancelled=cancelled,
+            )
+        except BaseException as error:
+            if repositories is not None and not isinstance(error, RunIdCollision):
+                repositories.discard_run(run_id)
+            raise
+
+    def _run(
+        self,
+        gateway: OfflineGateway,
+        symbols: tuple[str, ...],
+        *,
+        warmup_bars: int = 400,
+        max_steps: int | None = None,
+        step: int = 1,
+        data_source: str = "synthetic",
+        repositories=None,
+        run_id: str = "",
+        progress=None,
+        cancelled=None,
     ) -> BacktestResult:
         """Replay ``gateway``'s M5 series through the live pipeline.
 
@@ -214,8 +275,12 @@ class Backtester:
         tracker = OutcomeTracker()
         spread_trackers = {s: SpreadTracker(self._config.scan) for s in symbols}
 
+        if not run_id:
+            import uuid
+
+            run_id = f"REPLAY-{uuid.uuid4().hex.upper()}"
         result = BacktestResult(
-            run_id=run_id or fnv1a(f"backtest|{time.time()}"),
+            run_id=run_id,
             data_source=data_source,
             symbols=symbols,
         )
@@ -226,18 +291,22 @@ class Backtester:
         # is precisely the "is this number from a backtest or from a demo
         # account?" question the runs table exists to answer.
         if repositories is not None:
-            repositories.start_run(
+            run_started = repositories.start_run(
                 run_id=result.run_id,
                 kind=RuntimeKind.REPLAY.name,
                 is_production=False,
                 app_version=VERSION,
                 rule_version=RULE_VERSION,
                 scoring_version=SCORING_VERSION,
-                parameter_hash=fnv1a(self._config.parameter_fingerprint_source()),
+                parameter_hash=fnv1a64(self._config.parameter_fingerprint_source()),
                 symbols=",".join(symbols),
                 started_at=int(time.time()),
                 note=f"backtest over {data_source}",
             )
+            if not run_started:
+                raise RunIdCollision(
+                    f"backtest run id already exists: {result.run_id}"
+                )
 
         base_tf = Timeframe.M5
         total = min(gateway.series_length(s, base_tf) for s in symbols)
@@ -256,6 +325,12 @@ class Backtester:
         heartbeat = max(1, span // 100)
 
         for cursor in range(warmup_bars, end, max(1, step)):
+            # Cancellation is checked every replay step. Progress remains
+            # rate-limited below; coupling the two made a large multi-symbol run
+            # ignore Stop for as many as a thousand expensive bars.
+            if cancelled is not None and cancelled():
+                result.cancelled = True
+                break
             if progress is not None and (cursor - warmup_bars) % heartbeat == 0:
                 # Returning False is how a caller cancels. A backtest that
                 # cannot be stopped is one the operator has to kill the whole
@@ -331,6 +406,15 @@ class Backtester:
 
                 # ---- evaluate -------------------------------------------------
                 signal = engine.evaluate(context, snapshot, now)  # type: ignore[arg-type]
+                signal = replace(signal, broker_spec_hash=spec.fingerprint)
+                # Evidence identity includes the parameter/spec experiment and
+                # the UUID run namespace, not only the legacy structural hash.
+                signal = replace(
+                    signal,
+                    signal_id=evidence_signal_id(
+                        signal, spec.fingerprint, namespace=result.run_id
+                    ),
+                )
                 result.signals_evaluated += 1
 
                 if signal.state == SignalState.CANDIDATE:
@@ -377,6 +461,9 @@ class Backtester:
                         signal.signal_id, extract_features(context, signal, snapshot)
                     )
                     repositories.save_plan(plan)
+                    repositories.update_signal_state(
+                        signal.signal_id, SignalState.PREVIEWED
+                    )
                     repositories.update_signal_state(signal.signal_id, SignalState.ACTIVE)
                 tracker.open(signal, plan.entry, now)
 
@@ -384,7 +471,11 @@ class Backtester:
 
         result.elapsed_seconds = time.perf_counter() - started
         if repositories is not None:
-            repositories.finish_run(result.run_id, int(time.time()))
+            if result.cancelled:
+                repositories.discard_run(result.run_id)
+                result.evidence_committed = False
+            else:
+                repositories.finish_run(result.run_id, int(time.time()))
         return result
 
     def _required(self, timeframe: Timeframe) -> int:
@@ -403,3 +494,53 @@ def backtest_runtime(session: str = "backtest") -> RuntimeContext:
         session_identity=fnv1a(session),
         description="replay",
     )
+
+
+def run_with_atomic_persistence(
+    backtester: Backtester,
+    gateway: OfflineGateway,
+    symbols: tuple[str, ...],
+    *,
+    target_database: str,
+    **run_options,
+) -> BacktestResult:
+    """Run in a disposable DB and publish only a complete result.
+
+    This is intentionally outside :meth:`Backtester.run`: a caller that does
+    not request persistence should not pay for SQLite, while every real UI/CLI
+    persistence path shares this single copy-on-success implementation.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from ..adapters.sqlite.database import Database
+    from ..adapters.sqlite.repositories import Repositories
+
+    with tempfile.TemporaryDirectory(prefix="alikhande-replay-") as folder:
+        staged_path = str(Path(folder) / "staged.sqlite")
+        staged_db = Database()
+        staged_db.open(staged_path)
+        staged_repo = Repositories(staged_db)
+        try:
+            result = backtester.run(
+                gateway,
+                symbols,
+                repositories=staged_repo,
+                **run_options,
+            )
+        finally:
+            staged_db.close()
+
+        if result.cancelled:
+            result.evidence_committed = False
+            return result
+
+        target_db = Database()
+        target_db.open(target_database)
+        target_repo = Repositories(target_db)
+        try:
+            target_repo.replace_runs_of_kind_from(staged_path, RuntimeKind.REPLAY.name)
+        finally:
+            target_db.close()
+        result.evidence_committed = True
+        return result

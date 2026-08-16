@@ -51,6 +51,40 @@ def parameter_hash(config: AppConfig) -> str:
     return fnv1a64(config.parameter_fingerprint_source())
 
 
+def evidence_signal_id(
+    signal: SignalCandidate,
+    broker_spec_hash: str,
+    *,
+    namespace: str = "",
+) -> str:
+    """Identity of one evidence lifecycle, not merely one chart pattern.
+
+    ``SignalEngine.evaluate`` first produces the legacy structural id because
+    the broker specification is not available inside the pure signal engine.
+    Persistence must be stricter: the same bar/setup under different parameters
+    or a different contract specification is not the same experiment.  This
+    second-stage 64-bit id scopes the structural fact by every versioned input
+    that changes its meaning.  Replays additionally supply their UUID run id as
+    ``namespace`` so two datasets cannot share a lifecycle.
+    """
+    return fnv1a64(
+        "|".join(
+            (
+                namespace,
+                signal.signal_id,
+                signal.symbol,
+                str(int(signal.direction)),
+                str(int(signal.setup)),
+                str(int(signal.confirmation_bar_time)),
+                signal.rule_version,
+                signal.scoring_version,
+                signal.parameter_hash,
+                broker_spec_hash,
+            )
+        )
+    )
+
+
 @dataclass
 class StructuralContext:
     """The half that only changes on bar close."""

@@ -21,6 +21,7 @@ from .enums import (
     NewsSource,
     NewsState,
     Regime,
+    RunMode,
     RuntimeKind,
     SetupType,
     SignalState,
@@ -241,21 +242,25 @@ class ExecutionRecord:
     signal_id: str = ""
     symbol: str = ""
     state: ExecState = ExecState.IDLE
+    # Explicit provenance for recovery. In particular, COMPLETED+SHADOW means
+    # a preflight rehearsal, not a broker round trip awaiting deal history.
+    mode: RunMode = RunMode.ALERT_ONLY
     request_id: int = 0
     order_ticket: int = 0
     deal_ticket: int = 0
     position_id: int = 0
     requested_volume: float = 0.0
     filled_volume: float = 0.0
-    #: Volume-weighted average price of the entry deals, as the broker reported
-    #: them. Zero until a fill is confirmed.
-    #:
-    #: This exists because the outcome tracker used to be opened at the
-    #: *planned* entry, the moment `confirm()` returned, before the broker had
-    #: said anything. Every realised R in the evidence base was then measured
-    #: from a price that was never traded — off by the slippage, in the
-    #: direction that flatters the result.
-    fill_price: float = 0.0
+    closed_volume: float = 0.0
+    # Unique broker-visible identity persisted before the sole send boundary.
+    # This is what makes recovery possible when the process dies after sending
+    # but before MetaTrader's response (and therefore its tickets) arrives.
+    correlation_key: str = ""
+    direction: Direction = Direction.NONE
+    planned_entry: float = 0.0
+    stop_loss: float = 0.0
+    take_profit: float = 0.0
+    initial_risk_amount: float = 0.0
     retcode: int = 0
     message: str = ""
     created_at: int = 0
@@ -266,12 +271,27 @@ class ExecutionRecord:
 @dataclass
 class Outcome:
     signal_id: str = ""
-    # TP | SL | EXPIRED | INVALIDATED | NOT_FILLED | AMBIGUOUS
+    # TP | SL | EXPIRED | INVALIDATED | NOT_FILLED | AMBIGUOUS | CLOSED | SHADOW
     result: str = ""
     realized_r: float = 0.0  # realised result in R multiples
-    mfe_r: float = 0.0  # maximum favourable excursion, in R
-    mae_r: float = 0.0  # maximum adverse excursion, in R
+    # ``None`` means the source cannot state the path. Broker deals establish
+    # fills and P/L but do not contain the tick path needed for MFE/MAE; zero
+    # would fabricate "no excursion" and is therefore not used as a sentinel.
+    mfe_r: float | None = None  # maximum favourable excursion, in R
+    mae_r: float | None = None  # maximum adverse excursion, in R
     closed_at: int = 0
+    execution_id: str = ""
+    source: str = ""  # LIVE_DEMO | REPLAY
+    evidence_quality: str = ""  # BROKER_DEALS | BAR_CONSERVATIVE
+    entry_price: float = 0.0
+    exit_price: float = 0.0
+    filled_volume: float = 0.0
+    net_profit: float = 0.0
+    valid_for_statistics: bool = True
+    rule_version: str = ""
+    scoring_version: str = ""
+    parameter_hash: str = ""
+    broker_spec_hash: str = ""
 
 
 @dataclass
@@ -336,6 +356,7 @@ class PositionInfo:
     take_profit: float = 0.0
     profit: float = 0.0
     time: int = 0
+    comment: str = ""
 
 
 @dataclass(frozen=True)
@@ -348,6 +369,8 @@ class OrderInfo:
     volume_current: float = 0.0
     price_open: float = 0.0
     time_setup: int = 0
+    position_id: int = 0
+    comment: str = ""
 
 
 @dataclass(frozen=True)
@@ -363,11 +386,19 @@ class DealInfo:
     profit: float = 0.0
     commission: float = 0.0
     swap: float = 0.0
+    # Some brokers book an additional per-deal fee separately from commission.
+    # Omitting it overstates realised P/L while still looking broker-derived.
+    fee: float = 0.0
     time: int = 0
+    comment: str = ""
+    # Adapter-normalised broker reason (TP, SL, CLIENT, EXPERT, SO, ...).
+    # Empty means the adapter could not state it; callers must not infer it
+    # from price or P/L.
+    reason: str = ""
 
     @property
     def net_profit(self) -> float:
-        return self.profit + self.commission + self.swap
+        return self.profit + self.commission + self.swap + self.fee
 
 
 DEAL_ENTRY_IN = 0
@@ -399,6 +430,10 @@ class OrderRequest:
 @dataclass(frozen=True)
 class OrderResult:
     ok: bool = False
+    # False when no authoritative trade-server disposition was received. A
+    # transport timeout can happen after acceptance, so callers must reconcile
+    # instead of recording a rejection from absence of a reply.
+    definitive: bool = True
     retcode: int = 0
     order: int = 0
     deal: int = 0

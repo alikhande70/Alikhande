@@ -22,9 +22,9 @@ reports ``UNKNOWN`` / ``UNAVAILABLE`` honestly, and the runtime policy decides:
 in a production session UNKNOWN blocks, so a news filter that cannot see refuses
 to trade rather than pretending the road is empty.
 
-A ``StaticCalendar`` source is provided so an operator can supply their own
-event list (a CSV export, a scraped schedule) and get a real ``LIVE`` verdict.
-Until they do, the honest state is UNKNOWN.
+``CsvCalendar`` is the live operator adapter and requires an explicit coverage
+horizon; ``StaticCalendar`` is the deterministic test/replay source. Until a
+covered live source exists, the honest state is UNKNOWN.
 """
 
 from __future__ import annotations
@@ -88,6 +88,106 @@ class StaticCalendar:
             for event in self._events
             if since <= event.time <= until and event.currency in wanted
         ]
+
+
+class CsvCalendar:
+    """A live-reloadable operator-supplied calendar.
+
+    The Python MT5 bridge has no calendar API.  A ``calendar.csv`` file is the
+    smallest honest production adapter: the file's presence means a source is
+    configured, every evaluation reloads it so a long-running session sees
+    updates, and a malformed row raises so :class:`CalendarGate` returns
+    UNKNOWN/fail-closed rather than silently skipping an event.
+
+    Required columns are ``time,currency,name,importance,coverage_until``.
+    ``time`` and ``coverage_until`` may be Unix or ISO-8601 timestamps;
+    timestamps without an offset are UTC. At least one row must declare a
+    coverage horizon at or beyond the requested window. A coverage-only row
+    may leave the four event fields empty. This is what distinguishes an
+    authoritative empty window from an old file that merely contains no future
+    rows.
+    """
+
+    def __init__(self, path) -> None:
+        from pathlib import Path
+
+        self.path = Path(path)
+
+    def available(self) -> bool:
+        return self.path.is_file()
+
+    @staticmethod
+    def _timestamp(value: str) -> int:
+        from datetime import datetime, timezone
+
+        value = value.strip()
+        try:
+            return int(value)
+        except ValueError:
+            moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            return int(moment.timestamp())
+
+    def events(self, since: int, until: int, currencies: tuple[str, ...]) -> list[CalendarEvent]:
+        import csv
+
+        wanted = {value.upper() for value in currencies if value}
+        events: list[CalendarEvent] = []
+        with self.path.open(newline="", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            required = {"time", "currency", "name", "importance", "coverage_until"}
+            fields = {str(value).strip().lower() for value in (reader.fieldnames or [])}
+            if not required.issubset(fields):
+                raise ValueError(
+                    "calendar.csv requires columns: "
+                    "time,currency,name,importance,coverage_until"
+                )
+            coverage_until = 0
+            for line, raw in enumerate(reader, start=2):
+                row = {str(key).strip().lower(): str(value or "").strip() for key, value in raw.items()}
+                if row["coverage_until"]:
+                    try:
+                        coverage_until = max(
+                            coverage_until, self._timestamp(row["coverage_until"])
+                        )
+                    except ValueError as error:
+                        raise ValueError(
+                            f"calendar.csv line {line}: invalid coverage_until"
+                        ) from error
+                event_values = tuple(
+                    row[name] for name in ("time", "currency", "name", "importance")
+                )
+                if not any(event_values):
+                    continue
+                if not all(event_values):
+                    raise ValueError(
+                        f"calendar.csv line {line}: incomplete event row"
+                    )
+                try:
+                    event = CalendarEvent(
+                        time=self._timestamp(row["time"]),
+                        currency=row["currency"].upper(),
+                        name=row["name"],
+                        importance=row["importance"].upper(),
+                    )
+                except (KeyError, TypeError, ValueError) as error:
+                    raise ValueError(f"calendar.csv line {line}: {error}") from error
+                if not event.currency or not event.name or not event.importance:
+                    raise ValueError(f"calendar.csv line {line}: empty required value")
+                if len(event.currency) != 3 or not event.currency.isalpha():
+                    raise ValueError(f"calendar.csv line {line}: invalid currency")
+                if event.importance not in {"HIGH", "MEDIUM", "LOW"}:
+                    raise ValueError(f"calendar.csv line {line}: invalid importance")
+                if since <= event.time <= until and (
+                    not wanted or event.currency in wanted
+                ):
+                    events.append(event)
+        if coverage_until < until:
+            raise ValueError(
+                f"calendar.csv coverage ends at {coverage_until}, before {until}"
+            )
+        return events
 
 
 class CalendarGate:

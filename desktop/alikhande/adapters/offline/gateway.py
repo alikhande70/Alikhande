@@ -429,6 +429,7 @@ class OfflineGateway:
                 stop_loss=request.stop_loss,
                 take_profit=request.take_profit,
                 time=now,
+                comment=request.comment,
             )
         )
         self._deals.append(
@@ -442,6 +443,7 @@ class OfflineGateway:
                 volume=request.volume,
                 price=request.price,
                 time=now,
+                comment=request.comment,
             )
         )
         return OrderResult(
@@ -455,7 +457,9 @@ class OfflineGateway:
             comment="offline fill",
         )
 
-    def close_position(self, position_id: int, price: float, profit: float) -> None:
+    def close_position(
+        self, position_id: int, price: float, profit: float, reason: str = "CLIENT"
+    ) -> None:
         """Close a synthetic position, emitting the OUT deal.
 
         Used by the backtest to make the broker's history agree with what the
@@ -481,6 +485,7 @@ class OfflineGateway:
                     price=price,
                     profit=profit,
                     time=self.server_time(),
+                    reason=reason,
                 )
             )
         self._positions = remaining

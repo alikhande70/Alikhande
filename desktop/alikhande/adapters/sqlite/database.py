@@ -136,6 +136,59 @@ _V1_STATEMENTS: tuple[str, ...] = (
 )
 
 
+# V2 makes the broker identity and the resulting evidence self-describing.
+# Every statement is additive so an existing evidence database is preserved;
+# Legacy TP/SL rows remain scorable: their signal/run joins already carry the
+# provenance and version that made them valid under v1. New columns label them
+# LEGACY rather than inventing broker-level detail they never contained.
+_V2_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE executions ADD COLUMN closed_volume REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE executions ADD COLUMN correlation_key TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE executions ADD COLUMN direction INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE executions ADD COLUMN planned_entry REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE executions ADD COLUMN stop_loss REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE executions ADD COLUMN take_profit REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE executions ADD COLUMN initial_risk_amount REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE outcomes ADD COLUMN execution_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE outcomes ADD COLUMN source TEXT NOT NULL DEFAULT 'LEGACY'",
+    "ALTER TABLE outcomes ADD COLUMN evidence_quality TEXT NOT NULL DEFAULT 'LEGACY'",
+    "ALTER TABLE outcomes ADD COLUMN entry_price REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE outcomes ADD COLUMN exit_price REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE outcomes ADD COLUMN filled_volume REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE outcomes ADD COLUMN net_profit REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE outcomes ADD COLUMN valid_for_statistics INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE outcomes ADD COLUMN rule_version TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE outcomes ADD COLUMN scoring_version TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE outcomes ADD COLUMN parameter_hash TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE outcomes ADD COLUMN broker_spec_hash TEXT NOT NULL DEFAULT ''",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_outcomes_execution"
+    " ON outcomes(execution_id) WHERE execution_id <> ''",
+    "CREATE INDEX IF NOT EXISTS ix_executions_correlation ON executions(correlation_key)",
+)
+
+
+# V3 turns the deal ledger into independently auditable broker evidence rather
+# than only an idempotency key.  Outcome classification can now be checked from
+# the database itself: exact order/position identity, broker timestamp, close
+# reason and correlation comment survive the process that observed them.
+_V3_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE deals ADD COLUMN order_ticket INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE deals ADD COLUMN position_id INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE deals ADD COLUMN broker_time INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE deals ADD COLUMN reason TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE deals ADD COLUMN comment TEXT NOT NULL DEFAULT ''",
+    "CREATE INDEX IF NOT EXISTS ix_deals_execution ON deals(execution_id)",
+    "CREATE INDEX IF NOT EXISTS ix_deals_position ON deals(position_id)",
+)
+
+
+# V4 makes execution provenance explicit. Recovery must never infer that a
+# COMPLETED record was a Shadow rehearsal from a display message string.
+_V4_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE executions ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'ALERT_ONLY'",
+)
+
+
 class Database:
     def __init__(self) -> None:
         self._connection: sqlite3.Connection | None = None
@@ -162,11 +215,10 @@ class Database:
         path = Path(filename)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        # ``check_same_thread=False`` because the scan worker owns the
-        # connection while the UI thread reads snapshots the worker produced.
-        # All actual SQL is issued from the worker thread; this flag only stops
-        # sqlite3 from objecting to the handle being created elsewhere.
-        connection = sqlite3.connect(str(path), check_same_thread=False)
+        # Connections are created by, and remain owned by, one worker thread.
+        # Keeping sqlite3's default thread check on turns an accidental UI read
+        # into an immediate exception rather than a cross-thread race.
+        connection = sqlite3.connect(str(path))
         connection.row_factory = sqlite3.Row
 
         # WAL keeps a reader — an external inspection tool, or a second window —
@@ -219,7 +271,12 @@ class Database:
         # the stored version pointing at the last shape that fully succeeded.
         while current < DB_SCHEMA_VERSION:
             target = current + 1
-            statements = {1: _V1_STATEMENTS}.get(target)
+            statements = {
+                1: _V1_STATEMENTS,
+                2: _V2_STATEMENTS,
+                3: _V3_STATEMENTS,
+                4: _V4_STATEMENTS,
+            }.get(target)
             if statements is None:
                 raise RuntimeError(f"no migration step defined for v{target}")
 

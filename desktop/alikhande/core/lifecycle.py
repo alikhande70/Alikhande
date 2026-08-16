@@ -18,6 +18,7 @@ _TERMINAL_STATES = frozenset(
         SignalState.INVALIDATED,
         SignalState.NOT_FILLED,
         SignalState.AMBIGUOUS,
+        SignalState.CLOSED,
     }
 )
 
@@ -39,7 +40,9 @@ _ALLOWED: dict[SignalState, frozenset[SignalState]] = {
             SignalState.EXPIRED,
         }
     ),
-    SignalState.ACTIVE: frozenset({SignalState.TP, SignalState.SL, SignalState.AMBIGUOUS}),
+    SignalState.ACTIVE: frozenset(
+        {SignalState.TP, SignalState.SL, SignalState.AMBIGUOUS, SignalState.CLOSED}
+    ),
 }
 
 
