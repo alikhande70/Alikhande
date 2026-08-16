@@ -148,9 +148,18 @@ class TestOnlyTheWorkerTouchesTheBroker(unittest.TestCase):
         )
 
     def tearDown(self):
-        self.window._worker.stop()
-        self.window._thread.quit()
-        self.window._thread.wait(3000)
+        # Close the window rather than only stopping the worker.
+        #
+        # `closeEvent` is what saves preferences, closes the session ledger and
+        # shuts the thread down in the right order. Stopping the worker by hand
+        # left the QMainWindow alive holding a QThread, which Qt then destroyed
+        # at interpreter exit with "QThread: Destroyed while thread is still
+        # running" — harmless, and exactly the kind of line that makes a
+        # hardening-gate log look untrustworthy.
+        self.window.close()
+        self.window.deleteLater()
+        self.application.processEvents()
+        self.window = None
 
     def _settle(self, passes: int = 4, timeout: float = 20.0) -> None:
         deadline = time.time() + timeout

@@ -406,13 +406,17 @@ def diagnostics(
     except ImportError:
         bundle["machine"]["pyside6"] = "not installed"
 
-    if sys.platform == "win32":
-        try:
-            import MetaTrader5 as mt5
+    # Asked of the adapter rather than imported here. One module in this
+    # package knows what MetaTrader5 is; everything else asks it — and the
+    # sentence explaining *why* it is absent belongs to whoever is writing the
+    # report, not to the adapter.
+    from ..adapters.mt5.gateway import package_version
 
-            bundle["machine"]["metatrader5"] = mt5.__version__
-        except ImportError:
-            bundle["machine"]["metatrader5"] = "not installed"
+    version = package_version()
+    if version:
+        bundle["machine"]["metatrader5"] = version
+    elif sys.platform == "win32":
+        bundle["machine"]["metatrader5"] = "not installed"
     else:
         bundle["machine"]["metatrader5"] = "unavailable (Windows only)"
 

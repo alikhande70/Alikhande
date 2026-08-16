@@ -25,6 +25,40 @@ try:  # pragma: no cover - depends on how the suite was launched
 except ImportError:  # pragma: no cover
     from fake_mt5 import FakeAccount, FakeMT5, install, uninstall
 
+try:
+    import PySide6  # noqa: F401
+
+    HAS_QT = True
+except ImportError:  # pragma: no cover - the dependency-free job
+    HAS_QT = False
+
+
+@contextlib.contextmanager
+def _pyside6_unavailable():
+    """Make ``import PySide6`` fail for the duration.
+
+    So the "no UI toolkit" tests below produce the same result in both CI jobs
+    instead of depending on what happens to be installed on the runner.
+    """
+    import sys
+
+    class Blocker:
+        def find_spec(self, name, path=None, target=None):
+            if name == "PySide6" or name.startswith("PySide6."):
+                raise ImportError(f"No module named {name!r}")
+            return None
+
+    blocker = Blocker()
+    cached = {k: v for k, v in sys.modules.items() if k.startswith("PySide6")}
+    for name in cached:
+        del sys.modules[name]
+    sys.meta_path.insert(0, blocker)
+    try:
+        yield
+    finally:
+        sys.meta_path.remove(blocker)
+        sys.modules.update(cached)
+
 
 class DoctorTestCase(unittest.TestCase):
     """Drives the Windows branch on whatever machine the suite runs on."""
@@ -105,7 +139,7 @@ class TestDoctorReportsTheFix(DoctorTestCase):
         _code, output = self.run_doctor()
         self.assertIn("GBPUSD -> GBPUSD.m", output)
 
-    def test_a_fully_ready_machine_exits_zero(self):
+    def _make_every_symbol_available(self) -> None:
         from alikhande.config import AppConfig
 
         self.mt5.symbols_map = {}
@@ -113,10 +147,48 @@ class TestDoctorReportsTheFix(DoctorTestCase):
             self.mt5.symbols_map[requested] = _symbol_for(requested)
             self.mt5.load_rates(requested, self.mt5.TIMEFRAME_M5, 400)
 
+    @unittest.skipUnless(HAS_QT, "a machine with no UI toolkit is not a ready machine")
+    def test_a_fully_ready_machine_exits_zero(self):
+        """"Ready" means the machine could run a demo session today, and a
+        session needs a window.
+
+        This test used to run everywhere and fail in the dependency-free job,
+        because it set up a perfect *terminal* and called the result a fully
+        ready *machine*. Those are not the same claim: `doctor` correctly
+        reports NOT READY when PySide6 is absent, since without it there is no
+        UI to run. The product was right and the test was asserting something
+        it had not arranged.
+        """
+        self._make_every_symbol_available()
         code, output = self.run_doctor()
         self.assertIn("READY", output)
         self.assertNotIn("NOT READY", output)
         self.assertEqual(code, 0)
+
+    def test_a_machine_without_the_ui_toolkit_is_not_ready(self):
+        """The property the failure above was actually demonstrating, asserted
+        deliberately instead of by accident.
+
+        Blocks the import for the duration so the result is identical in both
+        CI jobs, rather than depending on what happens to be installed.
+        """
+        self._make_every_symbol_available()
+        with _pyside6_unavailable():
+            code, output = self.run_doctor()
+        self.assertIn("PySide6           MISSING", output)
+        self.assertIn("NOT READY", output)
+        self.assertEqual(code, 1, "a machine that cannot open a window is not ready")
+
+    def test_a_missing_ui_toolkit_does_not_stop_the_terminal_checks(self):
+        """Absent Qt is a reason to report NOT READY, not a reason to stop
+        looking. An operator setting a machine up wants every problem in one
+        pass, not one per run."""
+        self._make_every_symbol_available()
+        with _pyside6_unavailable():
+            _code, output = self.run_doctor()
+        self.assertIn("terminal", output)
+        self.assertIn("algo trading", output)
+        self.assertIn("symbols", output)
 
     def test_doctor_leaves_no_connection_behind(self):
         """It runs on the main thread. A connection left attached here would be

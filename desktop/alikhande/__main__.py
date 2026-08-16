@@ -67,15 +67,13 @@ def _cmd_doctor(_: argparse.Namespace) -> int:
         )
         return 0 if ok else 1
 
-    from .adapters.mt5.gateway import MT5Gateway, probe_terminal
+    from .adapters.mt5.gateway import MT5Gateway, package_version, probe_terminal
 
-    try:
-        import MetaTrader5 as mt5
-
-        line("MetaTrader5", f"{mt5.__version__} installed")
-    except ImportError:
+    version = package_version()
+    if not version:
         line("MetaTrader5", "MISSING", "install with: pip install MetaTrader5")
         return 1
+    line("MetaTrader5", f"{version} installed")
 
     probe = probe_terminal()
     if not probe.available:

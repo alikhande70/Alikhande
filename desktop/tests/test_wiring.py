@@ -30,8 +30,10 @@ from alikhande.core.robot import Robot, RobotPolicy, SessionWindow
 
 try:  # pragma: no cover - depends on how the suite was launched
     from .test_safety import StubGateway, demo_account, default_spec, valid_plan
+    from .sourcecheck import method_source, module_source
 except ImportError:  # pragma: no cover
     from test_safety import StubGateway, demo_account, default_spec, valid_plan
+    from sourcecheck import method_source, module_source
 
 
 # ===========================================================================
@@ -149,14 +151,17 @@ class TestRobotDecisionsAreActedOn(unittest.TestCase):
         Reads the source rather than the behaviour on purpose. The behavioural
         version would need a live window, a broken link and a stale intent all
         at once; this catches the same omission at the moment it is introduced.
+
+        Read from *disk* rather than via ``inspect``, so it needs no import and
+        therefore runs in the dependency-free job too. A coupling guard that
+        only runs where Qt happens to be installed protects the contract on the
+        one machine that least needs protecting.
         """
         import dataclasses
-        import inspect
 
         from alikhande.core.robot import RobotDecision
-        from alikhande.ui import main_window
 
-        body = inspect.getsource(main_window.MainWindow._drive_robot)
+        body = method_source(module_source("ui", "main_window.py"), "_drive_robot")
         for field in dataclasses.fields(RobotDecision):
             if field.name == "status":
                 continue  # rendered, not acted on
@@ -200,13 +205,11 @@ class TestNotificationsReachSomewhere(unittest.TestCase):
     def test_every_subject_the_window_raises_has_a_title_key(self):
         """A notification whose title renders as `notify.link.stalled` is a
         notification nobody can read."""
-        import inspect
         import re
 
         from alikhande.i18n import EN
-        from alikhande.ui import main_window
 
-        source = inspect.getsource(main_window)
+        source = module_source("ui", "main_window.py")
         raised = set(re.findall(r'_notify\(\s*"([a-z_.]+)"', source))
         raised |= set(re.findall(r'notify\.append\(\("([a-z_.]+)"', source))
         self.assertTrue(raised, "no notification subjects found to check")
@@ -251,11 +254,7 @@ class TestRecoveryVerdictIsUsed(unittest.TestCase):
             self.assertIn(key, FA, f"{code} has no Persian text")
 
     def test_the_window_reports_the_verdict_at_launch(self):
-        import inspect
-
-        from alikhande.ui import main_window
-
-        body = inspect.getsource(main_window.MainWindow.__init__)
+        body = method_source(module_source("ui", "main_window.py"), "__init__")
         self.assertIn(
             "_report_recovery",
             body,

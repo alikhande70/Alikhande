@@ -22,12 +22,12 @@ indicator agreement — which is recorded below rather than glossed over.
 ## VERIFIED — executed in this environment
 
 ### The test suite
-493 tests, stdlib `unittest`, no external dependency beyond PySide6 for the UI
+503 tests, stdlib `unittest`, no external dependency beyond PySide6 for the UI
 subset:
 
 ```
 python -m unittest discover -s tests -t .
-Ran 493 tests — OK
+Ran 503 tests — OK
 ```
 
 Covering:
@@ -56,6 +56,46 @@ Covering:
   version, and a corrupt execution state loading as `UNKNOWN` (gate shut) rather
   than as finished.
 - **Outcomes.** ±R scoring, MFE/MAE, and the conservative both-touched rule.
+
+### The dependency-free core, asserted rather than assumed
+
+``alikhande.core`` importing nothing outside the standard library is the
+property the whole test strategy rests on: it is why the analysis engines, the
+risk model, the execution state machine and the outcome loop can all be
+exercised on a machine with no MetaTrader, no Qt and no database.
+
+**Nothing checked it until now.** The dependency-free CI job runs the suite with
+PySide6 blocked, which is weaker evidence than it looks — it proves core does
+not need *Qt*. It would not have noticed ``import numpy``, or the more likely
+mistake, a core module reaching sideways into ``alikhande.adapters`` for
+something convenient.
+
+``tests/test_architecture.py`` walks the source with ``ast`` and asserts three
+things: core imports only from a short stdlib allowlist; core never imports from
+``adapters``, ``app`` or ``ui`` (it is the innermost ring, and that direction is
+invisible to any runtime test); and exactly one module in the package imports
+``MetaTrader5``.
+
+That last one failed when first written. ``doctor`` and the diagnostics bundle
+both imported the package to read its version, so "only the adapter talks to
+MetaTrader" was true of the API and false of the import graph — and the import
+graph is what a reader checks. Both now ask the adapter, which gained a
+``package_version()`` helper.
+
+### Coupling guards read source from disk, not via ``inspect``
+
+Several guards check that one module actually reads what another produces —
+every field of ``RobotDecision``, every notification subject having a title, the
+backtest purging after the replay rather than before. Those are written against
+the text of the calling module, and the obvious way to get it, ``inspect
+.getsource``, needs the module imported. Every one of them lives under
+``alikhande.ui``.
+
+Importing them anyway is what turned a green suite into four errors in the
+dependency-free job. Moving them into ``test_ui.py`` would have worked and would
+have been worse: that file is skipped when Qt is absent, so the guards would
+only protect the contract on the machine that least needs protecting. They read
+the file instead, and now run in **both** jobs.
 
 ### The single-order-boundary property
 Asserted mechanically, not by convention: a test walks every `.py` file in the

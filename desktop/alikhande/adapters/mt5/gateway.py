@@ -66,6 +66,31 @@ def _import_mt5() -> Any:
     return mt5
 
 
+def package_version() -> str:
+    """The installed ``MetaTrader5`` version, or why there is not one.
+
+    Exists so no module outside this one has to import the package merely to
+    report it. ``doctor`` and the diagnostics bundle both used to, which meant
+    three modules referenced MetaTrader5 and the rule "only the adapter talks
+    to MetaTrader" was true of the API and false of the import graph — and an
+    import graph is what a reader checks.
+
+    Never raises: a diagnostics bundle you cannot generate because the thing
+    you are diagnosing is broken is worse than useless.
+
+    Reports only what it could import. Deliberately *not* gated on the
+    platform — a first version checked ``sys.platform`` here and broke every
+    test that drives the Windows branch on a Linux runner, because those patch
+    ``platform.system`` rather than the interpreter's own constant. Which
+    platform this is, and what that means, is the caller's sentence to write.
+    """
+    try:
+        mt5 = _import_mt5()
+    except MT5Unavailable:
+        return ""
+    return str(getattr(mt5, "__version__", "unknown"))
+
+
 @dataclass(frozen=True)
 class TerminalProbe:
     """What a short attach-and-detach found out about the machine.

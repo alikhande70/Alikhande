@@ -24,6 +24,11 @@ from alikhande.adapters.sqlite.repositories import Repositories
 from alikhande.core.enums import Direction, RuntimeKind, SetupType
 from alikhande.core.models import Outcome, SignalCandidate
 
+try:  # pragma: no cover - depends on how the suite was launched
+    from .sourcecheck import method_source, module_source
+except ImportError:  # pragma: no cover
+    from sourcecheck import method_source, module_source
+
 
 class EvidenceTestCase(unittest.TestCase):
     def setUp(self):
@@ -164,15 +169,10 @@ class TestTheCallersUseTheSafeOrder(unittest.TestCase):
     moment it is written rather than the moment it costs somebody a week of
     demo history."""
 
-    def _source(self, obj) -> str:
-        import inspect
-
-        return inspect.getsource(obj)
-
     def test_the_backtest_view_purges_only_after_the_run(self):
-        from alikhande.ui.views import backtest
-
-        body = self._source(backtest)
+        # From disk: importing the view pulls in PySide6, which is unimportable
+        # in the dependency-free job — and this guard is worth running there.
+        body = module_source("ui", "views", "backtest.py")
         purge_at = body.index("purge_runs_of_kind")
         run_at = body.index("Backtester(config).run")
         self.assertLess(
@@ -182,9 +182,7 @@ class TestTheCallersUseTheSafeOrder(unittest.TestCase):
         self.assertIn("purge_run(run_id)", body)
 
     def test_the_calibration_command_purges_only_after_the_run(self):
-        from alikhande import __main__ as cli
-
-        body = self._source(cli._cmd_calibrate)
+        body = method_source(module_source("__main__.py"), "_cmd_calibrate")
         purge_at = body.index("purge_runs_of_kind")
         run_at = body.index("Backtester(config).run")
         self.assertLess(run_at, purge_at, "calibrate still purges before it replays")
@@ -193,9 +191,7 @@ class TestTheCallersUseTheSafeOrder(unittest.TestCase):
     def test_the_calibration_command_cleans_up_on_a_keyboard_interrupt(self):
         """`except Exception` would miss Ctrl-C, which is the interruption an
         operator is most likely to cause."""
-        from alikhande import __main__ as cli
-
-        body = self._source(cli._cmd_calibrate)
+        body = method_source(module_source("__main__.py"), "_cmd_calibrate")
         self.assertIn("except BaseException", body)
         self.assertIn("purge_run(run_id)", body)
 
