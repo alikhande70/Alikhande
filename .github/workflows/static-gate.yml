@@ -1,0 +1,105 @@
+name: static gate
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The linter guards the codebase, so it needs its own guard: if these
+      # fail, every result the gate reports below is untrustworthy.
+      - name: Static gate self-tests
+        run: python3 tools/test_static_gate.py
+
+      - name: Static gate
+        run: python3 tools/static_gate.py
+
+  desktop:
+    name: desktop tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # No dependencies installed, on purpose. The desktop core imports nothing
+      # outside the standard library, and this job is what keeps that true: the
+      # moment somebody reaches for numpy or PySide6 inside core/, it fails here
+      # rather than six months later when the tests quietly stop running.
+      - name: Core, safety, persistence and integration tests
+        working-directory: desktop
+        run: python3 -m unittest discover -s tests -t .
+
+      - name: Backtest smoke run
+        working-directory: desktop
+        run: python3 -m alikhande backtest --symbols EURUSD --h4-bars 400 --warmup 9900 --steps 300
+
+  desktop-ui:
+    name: desktop UI tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Qt needs these shared libraries even to run headless; without them the
+      # PySide6 import fails with a bare "libEGL.so.1: cannot open shared object
+      # file", which reads like a packaging bug rather than a missing OS package.
+      - name: Qt runtime libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1
+
+      - name: Install PySide6
+        run: python3 -m pip install --quiet PySide6
+
+      # The job above runs the same suite with NOTHING installed, which is what
+      # keeps the core dependency-free. This one installs Qt so the UI tests
+      # actually execute instead of skipping everywhere — both properties are
+      # only real if both jobs run.
+      - name: Full suite including UI
+        working-directory: desktop
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python3 -m unittest discover -s tests -t .
+
+  harden:
+    name: hardening loop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Qt runtime libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1
+
+      - name: Install PySide6
+        run: python3 -m pip install --quiet PySide6
+
+      # AUDIT -> FIX -> VERIFY in one command. The FIX stage never edits code;
+      # it reports what needs a human decision and fails the run, because a tool
+      # that rewrote source until the checks passed would be optimising for the
+      # checks rather than for the behaviour they stand in for.
+      - name: Audit, fix report, verify
+        working-directory: desktop
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python3 tools/harden.py
